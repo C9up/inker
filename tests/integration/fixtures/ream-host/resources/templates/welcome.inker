@@ -1,0 +1,11 @@
+<!doctype html>
+<html>
+<body>
+<h1>{{ t('greeting', { name: user.name }) }}</h1>
+<form method="post" action="{{ url('users.update', { id: user.id }) }}">
+{{ csrfField() }}
+<button type="submit">Save</button>
+</form>
+<link rel="stylesheet" href="{{ asset('app.css') }}">
+</body>
+</html>

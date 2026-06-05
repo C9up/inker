@@ -1,0 +1,26 @@
+{% layout 'layouts/main' %}
+{% include 'partials/header' %}
+<section>
+  <h2>{{ title }}</h2>
+  {% if showItems %}
+  <ul>
+    {% each items as item %}
+    <li>{{ upper(item.name) }} — {{ item.price }}</li>
+    {% endeach %}
+  </ul>
+  {% else %}
+  <p>No items</p>
+  {% endif %}
+
+  {% each mappings as [k, v] %}
+  <p>{{ k }} = {{ v }}</p>
+  {% endeach %}
+
+  <p>{{{ rawHtml }}}</p>
+  <p>{{ greeting }}</p>
+  <p>{{ t('hello.world') }}</p>
+  <p>{{ url('users.show', { id: userId }) }}</p>
+
+  {% component 'button' { label: title, disabled: active } %}
+</section>
+{% include 'partials/footer' %}
