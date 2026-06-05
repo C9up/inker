@@ -1,0 +1,69 @@
+# Per-repo npm release for @c9up/inker — multi-platform NAPI (Model B).
+# ⚠ TEMPLATE — validate on CI. Needs repo secret NPM_TOKEN. Build-time @c9up
+# devDeps must be published first (topological: ream + atlas before the rest).
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: build ${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, suffix: linux-x64-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, suffix: linux-arm64-gnu, cross: true }
+          - { os: macos-13, target: x86_64-apple-darwin, suffix: darwin-x64 }
+          - { os: macos-14, target: aarch64-apple-darwin, suffix: darwin-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, suffix: win32-x64-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: aarch64 linker
+        if: ${{ matrix.cross }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release -p inker-engine-napi --target ${{ matrix.target }}
+      - name: assemble .node
+        shell: bash
+        run: |
+          out="target/${{ matrix.target }}/release"
+          copy() { local l=$1 n=$2;
+            if   [ -f "$out/lib$l.so" ];    then cp "$out/lib$l.so"    "$n.${{ matrix.suffix }}.node"
+            elif [ -f "$out/lib$l.dylib" ]; then cp "$out/lib$l.dylib" "$n.${{ matrix.suffix }}.node"
+            elif [ -f "$out/$l.dll" ];      then cp "$out/$l.dll"      "$n.${{ matrix.suffix }}.node"
+            else echo "::error::no cdylib $l" && exit 1; fi; }
+          copy inker_engine_napi index
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.suffix }}
+          path: "*.${{ matrix.suffix }}.node"
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          merge-multiple: true
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
