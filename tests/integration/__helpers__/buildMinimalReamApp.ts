@@ -7,7 +7,7 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { Container, Router, SimpleConfigStore } from "@c9up/ream";
+import { Container, Router, ConfigStore } from "@c9up/ream";
 import { setRouter } from "@c9up/ream/services/router";
 import { Rosetta } from "@c9up/rosetta";
 import InkerProvider, {
@@ -51,7 +51,7 @@ export async function buildMinimalReamApp(
 	setInker(bypassTypeCheck<InkerRenderer>(undefined));
 
 	const container = new Container();
-	const config = new SimpleConfigStore();
+	const config = new ConfigStore();
 
 	if (opts.inkerConfig !== undefined) {
 		config.set("inker", opts.inkerConfig);
