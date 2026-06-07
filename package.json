@@ -42,7 +42,6 @@
     }
   },
   "devDependencies": {
-    "@c9up/rosetta": "^0.1.0",
     "@types/node": "^22.19.15",
     "@vitest/coverage-v8": "^4.1.2",
     "typescript": "^6.0.2",
