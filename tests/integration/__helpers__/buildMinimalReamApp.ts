@@ -8,7 +8,7 @@
 
 import { fileURLToPath } from "node:url";
 import { Container, Router, SimpleConfigStore } from "@c9up/ream";
-import { _setRouter } from "@c9up/ream/services/router";
+import { setRouter } from "@c9up/ream/services/router";
 import { Rosetta } from "@c9up/rosetta";
 import InkerProvider, {
 	resetInkerProviderFlags,
@@ -58,7 +58,7 @@ export async function buildMinimalReamApp(
 	}
 
 	const router = new Router();
-	_setRouter(router);
+	setRouter(router);
 
 	const rosetta = new Rosetta({
 		defaultLocale: "en",
