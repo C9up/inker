@@ -11,7 +11,7 @@
  * canonical helper bodies (`t` / `csrfField` / `url` / `asset`) closing
  * over a single `AsyncLocalStorage<InkerHttpContext>`, constructs the
  * `Templates` instance + `InkerRenderer`, and primes `services/main`'s
- * Proxy via `_setInker`.
+ * Proxy via `setInker`.
  *
  * Mirrors the StationProvider / AuroraProvider shape — duck-typed
  * container / config / app-context interfaces, `loadBearingCast<T>` as the
@@ -27,7 +27,7 @@ import type { HelperFn } from "./helpers.js";
 import type { InkerHttpContext } from "./InkerRenderer.js";
 import { InkerRenderer } from "./InkerRenderer.js";
 import { SafeString } from "./SafeString.js";
-import { _setInker } from "./services/main.js";
+import { setInker } from "./services/main.js";
 import { type CacheMode, Templates } from "./Templates.js";
 
 // ─── Duck-typed host interfaces ──────────────────────────────────
@@ -78,15 +78,15 @@ interface RosettaTranslator {
 
 // ─── Module-scoped flags (process-level, not instance-level) ─────────
 
-let _peerWarnEmitted = false;
-let _appRootFallbackWarned = false;
-const _overrideWarnEmittedNames = new Set<string>();
+let peerWarnEmitted = false;
+let appRootFallbackWarned = false;
+const overrideWarnEmittedNames = new Set<string>();
 
 /** @internal Reset module-level flags between tests. */
-export function _resetInkerProviderFlags(): void {
-	_peerWarnEmitted = false;
-	_appRootFallbackWarned = false;
-	_overrideWarnEmittedNames.clear();
+export function resetInkerProviderFlags(): void {
+	peerWarnEmitted = false;
+	appRootFallbackWarned = false;
+	overrideWarnEmittedNames.clear();
 }
 
 // ─── Provider class ──────────────────────────────────────────────
@@ -128,9 +128,10 @@ export default class InkerProvider {
 		let router: ReamRouter;
 		let rosetta: RosettaTranslator;
 		try {
-			const routerMod = loadBearingCast<{ default: ReamRouter }>(
-				await import("@c9up/ream/services/router"),
-			);
+			// Variable specifier so tsc does not statically resolve the optional
+			// `@c9up/ream` peer at build time (keeps inker standalone-buildable).
+			const routerSpecifier = "@c9up/ream/services/router";
+			const routerMod: { default: ReamRouter } = await import(routerSpecifier);
 			router = routerMod.default;
 			const rosettaContainer = this.#resolveRosetta();
 			if (rosettaContainer === undefined) {
@@ -182,7 +183,7 @@ export default class InkerProvider {
 		});
 		const renderer = new InkerRenderer(templates, als);
 		this.#renderer = renderer;
-		_setInker(renderer);
+		setInker(renderer);
 
 		this.#started = true;
 	}
@@ -193,7 +194,7 @@ export default class InkerProvider {
 		// Intentionally a no-op. `#started` guards `start()` from re-running,
 		// so once the provider has booted, subsequent lifecycle calls have
 		// nothing to undo here: `Templates` owns its own cache, AsyncLocalStorage
-		// has no destroy contract, and the `_setInker` singleton intentionally
+		// has no destroy contract, and the `setInker` singleton intentionally
 		// outlives shutdown so late-arriving handlers don't see a torn-down
 		// proxy. `Templates.clearCache()` is the operator's tool, not ours.
 	}
@@ -209,8 +210,8 @@ export default class InkerProvider {
 	}
 
 	#warnPeerMissingOnce(detail: string): void {
-		if (_peerWarnEmitted) return;
-		_peerWarnEmitted = true;
+		if (peerWarnEmitted) return;
+		peerWarnEmitted = true;
 		console.warn(`[inker] ${detail} See https://ream.dev/modules/inker.`);
 	}
 
@@ -225,8 +226,8 @@ export default class InkerProvider {
 			// cwd-fallback.
 			if (!isContainerNotFound(err)) throw err;
 		}
-		if (!_appRootFallbackWarned) {
-			_appRootFallbackWarned = true;
+		if (!appRootFallbackWarned) {
+			appRootFallbackWarned = true;
 			console.warn(
 				"[inker] No `appRoot` binding (URL or string) resolved from the container; falling back to process.cwd(). Templates and the asset manifest will be read relative to the process working directory — bind `appRoot` in the host container if that is not what you want.",
 			);
@@ -359,8 +360,8 @@ export function mergeHelpers(
 	// set for backward compat with direct callers; InkerProvider now passes
 	// its own per-instance `#overrideWarnedNames` so multi-tenant /
 	// multi-provider setups don't share warn state. Tests that rely on the
-	// module-level set still work via `_resetInkerProviderFlags`.
-	warnedNames: Set<string> = _overrideWarnEmittedNames,
+	// module-level set still work via `resetInkerProviderFlags`.
+	warnedNames: Set<string> = overrideWarnEmittedNames,
 ): Map<string, HelperFn> {
 	const out = new Map(canonical);
 	if (additional === undefined) return out;

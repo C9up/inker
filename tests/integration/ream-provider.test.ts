@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetInkerProviderFlags } from "../../src/InkerProvider.js";
+import { resetInkerProviderFlags } from "../../src/InkerProvider.js";
 import { InkerRenderError } from "../../src/InkerRenderError.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 import {
@@ -27,7 +27,7 @@ async function setupApp(
 
 describe("inker provider — end-to-end with Ream host", () => {
 	beforeEach(() => {
-		_resetInkerProviderFlags();
+		resetInkerProviderFlags();
 	});
 
 	afterEach(() => {

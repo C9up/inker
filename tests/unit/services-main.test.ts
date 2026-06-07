@@ -42,26 +42,26 @@ describe("services/main inker singleton", () => {
 		);
 	});
 
-	it("returns undefined from `_getInker` before binding", async () => {
+	it("returns undefined from `getInker` before binding", async () => {
 		const mod = await loadFresh();
-		expect(mod._getInker()).toBeUndefined();
+		expect(mod.getInker()).toBeUndefined();
 	});
 
-	it("forwards method calls to the bound renderer after `_setInker`", async () => {
+	it("forwards method calls to the bound renderer after `setInker`", async () => {
 		const mod = await loadFresh();
 		const renderer = makeRenderer();
-		mod._setInker(renderer);
+		mod.setInker(renderer);
 
 		const html = await mod.default.renderToString(makeCtx(), "n", {});
 
 		expect(html).toBe("<p>ok</p>");
-		expect(mod._getInker()).toBe(renderer);
+		expect(mod.getInker()).toBe(renderer);
 	});
 
 	it("returns property values (non-function) through the proxy after binding", async () => {
 		const mod = await loadFresh();
 		const renderer = makeRenderer();
-		mod._setInker(renderer);
+		mod.setInker(renderer);
 
 		expect(mod.default._templates).toBe(renderer._templates);
 	});
@@ -69,7 +69,7 @@ describe("services/main inker singleton", () => {
 	it("binds methods so detached destructuring still works", async () => {
 		const mod = await loadFresh();
 		const renderer = makeRenderer();
-		mod._setInker(renderer);
+		mod.setInker(renderer);
 
 		const { renderToString } = mod.default;
 		const html = await renderToString(makeCtx(), "n", {});
@@ -77,14 +77,14 @@ describe("services/main inker singleton", () => {
 		expect(html).toBe("<p>ok</p>");
 	});
 
-	it("replaces the singleton on subsequent `_setInker` calls", async () => {
+	it("replaces the singleton on subsequent `setInker` calls", async () => {
 		const mod = await loadFresh();
 		const first = makeRenderer();
 		const second = makeRenderer();
 
-		mod._setInker(first);
-		expect(mod._getInker()).toBe(first);
-		mod._setInker(second);
-		expect(mod._getInker()).toBe(second);
+		mod.setInker(first);
+		expect(mod.getInker()).toBe(first);
+		mod.setInker(second);
+		expect(mod.getInker()).toBe(second);
 	});
 });

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HelperFn } from "../../src/helpers.js";
 import InkerProvider, {
-	_resetInkerProviderFlags,
+	resetInkerProviderFlags,
 	buildCanonicalHelpers,
 	coerceUrlParams,
 	escapeAttr,
@@ -197,7 +197,7 @@ describe("loadAssetManifest", () => {
 
 describe("mergeHelpers", () => {
 	beforeEach(() => {
-		_resetInkerProviderFlags();
+		resetInkerProviderFlags();
 	});
 
 	const noop: HelperFn = () => "";
@@ -533,7 +533,7 @@ describe("buildCanonicalHelpers", () => {
 
 describe("InkerProvider lifecycle", () => {
 	beforeEach(() => {
-		_resetInkerProviderFlags();
+		resetInkerProviderFlags();
 	});
 
 	it("register() binds InkerRenderer and 'inker' alias", () => {
@@ -573,7 +573,7 @@ describe("InkerProvider lifecycle", () => {
 describe("InkerProvider start() — idempotency & degraded-host", () => {
 	let tmp: string;
 	beforeEach(() => {
-		_resetInkerProviderFlags();
+		resetInkerProviderFlags();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "inker-start-"));
 		fs.mkdirSync(path.join(tmp, "resources/templates"), { recursive: true });
 	});
@@ -643,25 +643,25 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		warn.mockRestore();
 	});
 
-	it("_resetInkerProviderFlags() allows the warn-once flag to fire again", async () => {
+	it("resetInkerProviderFlags() allows the warn-once flag to fire again", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		const { app: appA } = mkAppContext({ appRoot: tmp }, {});
 		await new InkerProvider(appA).start();
-		_resetInkerProviderFlags();
+		resetInkerProviderFlags();
 		const { app: appB } = mkAppContext({ appRoot: tmp }, {});
 		await new InkerProvider(appB).start();
 		expect(warn).toHaveBeenCalledTimes(2);
 		warn.mockRestore();
 	});
 
-	it("start() with rosetta present primes services/main proxy via _setInker", async () => {
+	it("start() with rosetta present primes services/main proxy via setInker", async () => {
 		const mod = await import("../../src/services/main.js");
 		const rosetta = makeStubRosetta();
 		const { app } = mkAppContext({ rosetta, appRoot: tmp }, {});
 		const provider = new InkerProvider(app);
 		provider.register();
 		await provider.start();
-		expect(mod._getInker()).toBeInstanceOf(InkerRenderer);
+		expect(mod.getInker()).toBeInstanceOf(InkerRenderer);
 	});
 
 	it("start() reads config.inker.templatesRoot and uses it", async () => {

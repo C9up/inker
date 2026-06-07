@@ -11,12 +11,12 @@ import { Container, Router, SimpleConfigStore } from "@c9up/ream";
 import { _setRouter } from "@c9up/ream/services/router";
 import { Rosetta } from "@c9up/rosetta";
 import InkerProvider, {
-	_resetInkerProviderFlags,
+	resetInkerProviderFlags,
 	type InkerProviderConfig,
 } from "../../../src/InkerProvider.js";
 import type { InkerHttpContext } from "../../../src/InkerRenderer.js";
 import { InkerRenderer } from "../../../src/InkerRenderer.js";
-import { _setInker } from "../../../src/services/main.js";
+import { setInker } from "../../../src/services/main.js";
 import { bypassTypeCheck } from "../../__helpers__/bypass-type-check.js";
 
 export interface BuildAppOptions {
@@ -43,12 +43,12 @@ export interface TrackedCtx extends InkerHttpContext {
 export async function buildMinimalReamApp(
 	opts: BuildAppOptions,
 ): Promise<BuiltApp> {
-	_resetInkerProviderFlags();
+	resetInkerProviderFlags();
 	// Clear the module-scoped singleton so subsequent tests can't observe a
 	// previous app's renderer via `services/main`. The `bypassTypeCheck`
 	// route satisfies `feedback_no_any_types` (one sanctioned cast site for
 	// inker test code).
-	_setInker(bypassTypeCheck<InkerRenderer>(undefined));
+	setInker(bypassTypeCheck<InkerRenderer>(undefined));
 
 	const container = new Container();
 	const config = new SimpleConfigStore();
