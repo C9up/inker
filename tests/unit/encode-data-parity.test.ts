@@ -1,3 +1,4 @@
+import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { InkerRenderError } from "../../src/InkerRenderError.js";
 import { Templates } from "../../src/Templates.js";
@@ -8,7 +9,7 @@ import { asTyped } from "../__helpers__/bypass-type-check.js";
 // engine receives a `serde_json::Value`, so `encodeData` must reconcile them.
 
 function render(template: string, data: unknown): string {
-	return new Templates({ root: "/tmp" }).renderString(template, asTyped(data));
+	return new Templates({ root: os.tmpdir() }).renderString(template, asTyped(data));
 }
 
 function expectThrow(template: string, data: unknown, code: string): void {

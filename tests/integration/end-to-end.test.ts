@@ -15,7 +15,7 @@ describe("Templates — end-to-end FS round-trip", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-")));
+		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-")));
 	});
 
 	afterEach(() => {
@@ -68,7 +68,7 @@ describe("Templates — layouts and partials", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-")));
+		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-")));
 		fs.mkdirSync(path.join(root, "layouts"));
 		fs.mkdirSync(path.join(root, "partials"));
 	});
@@ -161,8 +161,8 @@ describe("Templates — layouts and partials", () => {
 		} catch (e) {
 			const err = asTyped<InkerRenderError>(e);
 			expect(err.code).toBe("E_INKER_CIRCULAR_INCLUDE");
-			expect(err.message).toContain("partials/a");
-			expect(err.message).toContain("partials/b");
+			expect(err.message.replace(/\\/g, "/")).toContain("partials/a");
+			expect(err.message.replace(/\\/g, "/")).toContain("partials/b");
 		}
 	});
 

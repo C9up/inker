@@ -7,7 +7,7 @@ import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-templates-")));
+	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-templates-")));
 }
 
 function bumpMtime(file: string, deltaSeconds: number): void {

@@ -11,7 +11,7 @@ import { Templates } from "../../src/Templates.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-helpers-")));
+	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-helpers-")));
 }
 
 describe("Templates — helpers option (constructor)", () => {

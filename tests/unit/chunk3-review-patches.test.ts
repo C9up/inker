@@ -7,7 +7,7 @@ import { type HelperFn, Templates } from "../../src/index.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-chunk3-")));
+	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-chunk3-")));
 }
 
 function write(root: string, rel: string, content: string): void {
