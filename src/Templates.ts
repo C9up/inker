@@ -487,7 +487,11 @@ function canonicalizeTemplatesRoot(root: unknown): string {
 	// producing false positives (legitimate templates rejected) for every
 	// caller — broken Inker without diagnostic.
 	try {
-		return fs.realpathSync(root);
+		// `.native` (the OS realpath) so the root and per-template realpath in
+		// #loadAst use the SAME canonical form — on Windows it expands 8.3 short
+		// names (RUNNER~1 -> runneradmin) that JS-side realpath leaves as-is,
+		// which otherwise breaks the symlink-containment check on CI runners.
+		return fs.realpathSync.native(root);
 	} catch (cause) {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_PATH",
@@ -901,7 +905,9 @@ export class Templates {
 		try {
 			let realPath: string;
 			try {
-				realPath = await fsPromises.realpath(absPath);
+				// `.native` to match validateRoot's canonical form (same OS realpath)
+				// so 8.3-short-name / casing differences don't trip containment.
+				realPath = fs.realpathSync.native(absPath);
 			} catch (cause) {
 				throw wrapFsError(cause, absPath, validatedName);
 			}
