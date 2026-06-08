@@ -74,8 +74,12 @@ function runChild(file: string, args: readonly string[], cwd: string): string {
 	}
 }
 
+// Windows: `pnpm` is `pnpm.cmd`; execFileSync needs the explicit name (node
+// and tar resolve fine without it).
+const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+
 function runPnpm(args: readonly string[], cwd: string): string {
-	return runChild("pnpm", args, cwd);
+	return runChild(PNPM, args, cwd);
 }
 
 function tarballFromPackOutput(stdout: string, tmpDir: string): string {

@@ -74,8 +74,9 @@ describe("@c9up/inker published shape (AC5)", () => {
 
 	beforeAll(() => {
 		tmpDir = mkdtempSync(path.join(tmpdir(), "inker-pack-"));
+		const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 		const stdout = execFileSync(
-			"pnpm",
+			pnpm,
 			["pack", "--pack-destination", tmpDir],
 			{ cwd: PKG_ROOT, encoding: "utf8" },
 		);
