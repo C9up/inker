@@ -74,11 +74,12 @@ describe("@c9up/inker published shape (AC5)", () => {
 
 	beforeAll(() => {
 		tmpDir = mkdtempSync(path.join(tmpdir(), "inker-pack-"));
-		const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+		const isWin = process.platform === "win32";
 		const stdout = execFileSync(
-			pnpm,
+			isWin ? "pnpm.cmd" : "pnpm",
 			["pack", "--pack-destination", tmpDir],
-			{ cwd: PKG_ROOT, encoding: "utf8" },
+			// `.cmd` needs a shell since the CVE-2024-27980 fix (EINVAL otherwise).
+			{ cwd: PKG_ROOT, encoding: "utf8", shell: isWin },
 		);
 		const lastLine = stdout
 			.trim()

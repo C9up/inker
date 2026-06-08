@@ -55,13 +55,22 @@ function readStreamField(err: unknown, key: "stdout" | "stderr"): string {
 	return typeof raw === "string" ? raw : String(raw);
 }
 
-function runChild(file: string, args: readonly string[], cwd: string): string {
+function runChild(
+	file: string,
+	args: readonly string[],
+	cwd: string,
+	shell = false,
+): string {
 	try {
 		return execFileSync(file, args, {
 			cwd,
 			encoding: "utf8",
 			env: { ...process.env, CI: "1" },
 			maxBuffer: 50 * 1024 * 1024,
+			// `.cmd` files (pnpm.cmd on Windows) can only be spawned through a
+			// shell since the CVE-2024-27980 fix; plain executables (node) must
+			// NOT use a shell, or the `-e` script args get mangled.
+			shell,
 		});
 	} catch (err) {
 		const stdout = readStreamField(err, "stdout");
@@ -79,7 +88,7 @@ function runChild(file: string, args: readonly string[], cwd: string): string {
 const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 function runPnpm(args: readonly string[], cwd: string): string {
-	return runChild(PNPM, args, cwd);
+	return runChild(PNPM, args, cwd, process.platform === "win32");
 }
 
 function tarballFromPackOutput(stdout: string, tmpDir: string): string {
