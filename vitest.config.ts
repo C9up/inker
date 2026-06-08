@@ -1,5 +1,18 @@
+import { platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+// The pnpm-pack tooling tests spawn `pnpm pack` in a temp dir. On the Windows
+// CI runner that path goes through `pnpm.cmd` + cmd.exe in an 8.3-short-name
+// temp dir and is unreliable — but they verify the *package shape*, which is
+// platform-independent and already covered on linux/macOS. Skip them on win32.
+const win32PackagingSkips =
+	platform === "win32"
+		? [
+				"tests/integration/published-shape.test.ts",
+				"tests/integration/standalone-smoke.test.ts",
+			]
+		: [];
 
 export default defineConfig({
 	test: {
@@ -20,6 +33,7 @@ export default defineConfig({
 			"**/node_modules/**",
 			"**/dist/**",
 			"tests/integration/ream-provider.test.ts",
+			...win32PackagingSkips,
 		],
 		coverage: {
 			provider: "v8",
