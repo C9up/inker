@@ -63,7 +63,7 @@ jobs:
 
       - name: Vitest (NAPI-loaded branch)
         if: matrix.test
-        run: pnpm exec vitest run --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run --reporter=verbose --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
