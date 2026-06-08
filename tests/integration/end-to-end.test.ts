@@ -15,7 +15,7 @@ describe("Templates — end-to-end FS round-trip", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-"));
+		root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-")));
 	});
 
 	afterEach(() => {
@@ -68,7 +68,7 @@ describe("Templates — layouts and partials", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-"));
+		root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-")));
 		fs.mkdirSync(path.join(root, "layouts"));
 		fs.mkdirSync(path.join(root, "partials"));
 	});

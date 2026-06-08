@@ -6,7 +6,7 @@ import { type HelperFn, SafeString, Templates } from "../../src/index.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-helpers-"));
+	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-helpers-")));
 }
 
 function write(root: string, rel: string, content: string): void {

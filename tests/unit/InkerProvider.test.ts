@@ -135,7 +135,7 @@ describe("resolveCacheMode", () => {
 describe("loadAssetManifest", () => {
 	let tmp: string;
 	beforeEach(() => {
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "inker-manifest-"));
+		tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-manifest-")));
 		fs.mkdirSync(path.join(tmp, "public"), { recursive: true });
 	});
 	afterEach(() => {
@@ -574,7 +574,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 	let tmp: string;
 	beforeEach(() => {
 		resetInkerProviderFlags();
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "inker-start-"));
+		tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "inker-start-")));
 		fs.mkdirSync(path.join(tmp, "resources/templates"), { recursive: true });
 	});
 	afterEach(() => {
