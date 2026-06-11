@@ -37,6 +37,25 @@ export type THelper = (key: string, params?: Record<string, unknown>) => string;
 export type CsrfFieldHelper = () => SafeString;
 
 /**
+ * Signature for the canonical `csrfMeta()` helper.
+ *
+ * Returns a `SafeString` containing the `<meta name="csrf-token" …>` element
+ * (for JS clients to read the token). Like `csrfField`, returning a `SafeString`
+ * is mandatory so the renderer doesn't escape the markup. Provided by the Ream
+ * provider wiring the session's CSRF token.
+ */
+export type CsrfMetaHelper = () => SafeString;
+
+/**
+ * Signature for the canonical `cspNonce()` helper.
+ *
+ * Returns the per-request Content-Security-Policy nonce (a plain string) so
+ * inline `<script nonce="…">` tags match the response CSP header, or `""` when
+ * no nonce is set. Provided by the Ream provider.
+ */
+export type CspNonceHelper = () => string;
+
+/**
  * Signature for the canonical `url(name, params?)` helper.
  *
  * Resolves a named route + interpolates path params. Implementation
