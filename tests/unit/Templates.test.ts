@@ -7,7 +7,9 @@ import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-templates-")));
+	return fs.realpathSync.native(
+		fs.mkdtempSync(path.join(os.tmpdir(), "inker-templates-")),
+	);
 }
 
 function bumpMtime(file: string, deltaSeconds: number): void {
@@ -389,6 +391,16 @@ describe("Templates — component resolution (53.3)", () => {
 		expect(await templates.render("page", { page: { name: "Bob" } })).toBe(
 			"W[<Bob>]",
 		);
+	});
+
+	// Audit 2026-06-13: the mirror of the test above — a partial included INSIDE a
+	// component was never pre-loaded, so render threw E_INKER_DISK_REQUIRED.
+	it("renders a partial included inside a component (pre-loaded, no DISK_REQUIRED)", async () => {
+		write("page", "{% component 'card' {} %}");
+		write("components/card", "C[{% include 'partials/badge' %}]");
+		write("partials/badge", "BADGE");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("C[BADGE]");
 	});
 
 	it("component cache hits use mtime — re-renders after bumpMtime", async () => {

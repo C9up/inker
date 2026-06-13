@@ -986,33 +986,25 @@ export class Templates {
 			);
 		}
 
-		// Resolve all partials reachable from the body AST (slot-in-partial
-		// rejection happens inside #resolvePartialsIn as each partial loads).
+		// Resolve partials + components reachable from the body AST. Both
+		// resolvers recurse mutually, so the full transitive closure (partials
+		// inside components and vice versa) is pre-loaded here.
 		await this.#resolvePartialsIn(
 			entryInfo.partials,
 			partialAsts,
+			componentAsts,
 			includeStack,
 			entryAbsPath,
 		);
-
-		// Resolve all components reachable from the body AST.
 		await this.#resolveComponentsIn(
 			entryInfo.components,
+			partialAsts,
 			componentAsts,
 			includeStack,
 			entryAbsPath,
 		);
 
 		if (!hasLayout) {
-			// Resolve components transitively reachable from partials.
-			for (const partialAst of partialAsts.values()) {
-				await this.#resolveComponentsIn(
-					partialAst.composeInfo.components,
-					componentAsts,
-					includeStack,
-					entryAbsPath,
-				);
-			}
 			return { bodyAst, partialAsts, componentAsts };
 		}
 
@@ -1099,27 +1091,22 @@ export class Templates {
 				);
 			}
 
-			// Resolve partials + components reachable from the layout AST.
+			// Resolve partials + components reachable from the layout AST (mutual
+			// recursion covers the full transitive closure).
 			await this.#resolvePartialsIn(
 				layoutInfo.partials,
 				partialAsts,
+				componentAsts,
 				includeStack,
 				layoutAbsPath,
 			);
 			await this.#resolveComponentsIn(
 				layoutInfo.components,
+				partialAsts,
 				componentAsts,
 				includeStack,
 				layoutAbsPath,
 			);
-			for (const partialAst of partialAsts.values()) {
-				await this.#resolveComponentsIn(
-					partialAst.composeInfo.components,
-					componentAsts,
-					includeStack,
-					layoutAbsPath,
-				);
-			}
 		} finally {
 			includeStack.delete(layoutAbsPath);
 		}
@@ -1137,6 +1124,7 @@ export class Templates {
 	async #resolvePartialsIn(
 		refs: readonly NapiNodeRef[],
 		partialAsts: Map<string, NapiInkerAst>,
+		componentAsts: Map<string, NapiInkerAst>,
 		includeStack: Set<string>,
 		hostAbsPath: string,
 	): Promise<void> {
@@ -1205,10 +1193,19 @@ export class Templates {
 
 				partialAsts.set(partialKey, partialAst);
 
-				// Recurse into nested partials.
+				// Recurse into nested partials AND components reachable from this
+				// partial (mutual recursion → full transitive closure).
 				await this.#resolvePartialsIn(
 					info.partials,
 					partialAsts,
+					componentAsts,
+					includeStack,
+					partialAbsPath,
+				);
+				await this.#resolveComponentsIn(
+					info.components,
+					partialAsts,
+					componentAsts,
 					includeStack,
 					partialAbsPath,
 				);
@@ -1220,6 +1217,7 @@ export class Templates {
 
 	async #resolveComponentsIn(
 		refs: readonly NapiNodeRef[],
+		partialAsts: Map<string, NapiInkerAst>,
 		componentAsts: Map<string, NapiInkerAst>,
 		includeStack: Set<string>,
 		hostAbsPath: string,
@@ -1297,9 +1295,19 @@ export class Templates {
 
 				componentAsts.set(componentKey, componentAst);
 
-				// Recurse into nested components.
+				// Recurse into nested components AND partials included inside this
+				// component (mutual recursion → a {% include %} in a component is
+				// pre-loaded, fixing E_INKER_DISK_REQUIRED at render time).
 				await this.#resolveComponentsIn(
 					info.components,
+					partialAsts,
+					componentAsts,
+					includeStack,
+					componentAbsPath,
+				);
+				await this.#resolvePartialsIn(
+					info.partials,
+					partialAsts,
 					componentAsts,
 					includeStack,
 					componentAbsPath,
