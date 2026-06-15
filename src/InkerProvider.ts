@@ -78,14 +78,15 @@ interface RosettaTranslator {
 
 // ─── Module-scoped flags (process-level, not instance-level) ─────────
 
-let peerWarnEmitted = false;
-let appRootFallbackWarned = false;
 const overrideWarnEmittedNames = new Set<string>();
 
-/** @internal Reset module-level flags between tests. */
+/**
+ * @internal Reset module-level flags between tests. The peer-missing and
+ * cwd-fallback warns are now per-instance (audit 2026-06-13), so they reset
+ * automatically with each new provider — this only clears the remaining
+ * module-scoped override-warn set.
+ */
 export function resetInkerProviderFlags(): void {
-	peerWarnEmitted = false;
-	appRootFallbackWarned = false;
 	overrideWarnEmittedNames.clear();
 }
 
@@ -100,6 +101,11 @@ export default class InkerProvider {
 	// and multi-tenant scenarios where each tenant has its own provider with
 	// its own additionalHelpers map.
 	readonly #overrideWarnedNames = new Set<string>();
+	// Per-instance warn-once flags (audit 2026-06-13, same class as P17): module
+	// -level flags meant a second provider in the same process silently skipped
+	// its missing-peer / cwd-fallback diagnostic.
+	#peerWarnEmitted = false;
+	#appRootFallbackWarned = false;
 
 	constructor(protected app: InkerAppContext) {}
 
@@ -210,8 +216,8 @@ export default class InkerProvider {
 	}
 
 	#warnPeerMissingOnce(detail: string): void {
-		if (peerWarnEmitted) return;
-		peerWarnEmitted = true;
+		if (this.#peerWarnEmitted) return;
+		this.#peerWarnEmitted = true;
 		console.warn(`[inker] ${detail} See https://ream.dev/modules/inker.`);
 	}
 
@@ -226,8 +232,8 @@ export default class InkerProvider {
 			// cwd-fallback.
 			if (!isContainerNotFound(err)) throw err;
 		}
-		if (!appRootFallbackWarned) {
-			appRootFallbackWarned = true;
+		if (!this.#appRootFallbackWarned) {
+			this.#appRootFallbackWarned = true;
 			console.warn(
 				"[inker] No `appRoot` binding (URL or string) resolved from the container; falling back to process.cwd(). Templates and the asset manifest will be read relative to the process working directory — bind `appRoot` in the host container if that is not what you want.",
 			);

@@ -5,13 +5,13 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HelperFn } from "../../src/helpers.js";
 import InkerProvider, {
-	resetInkerProviderFlags,
 	buildCanonicalHelpers,
 	coerceUrlParams,
 	escapeAttr,
 	type InkerAppContext,
 	loadAssetManifest,
 	mergeHelpers,
+	resetInkerProviderFlags,
 	resolveCacheMode,
 	resolveTemplatesRoot,
 } from "../../src/InkerProvider.js";
@@ -135,7 +135,9 @@ describe("resolveCacheMode", () => {
 describe("loadAssetManifest", () => {
 	let tmp: string;
 	beforeEach(() => {
-		tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-manifest-")));
+		tmp = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-manifest-")),
+		);
 		fs.mkdirSync(path.join(tmp, "public"), { recursive: true });
 	});
 	afterEach(() => {
@@ -574,7 +576,9 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 	let tmp: string;
 	beforeEach(() => {
 		resetInkerProviderFlags();
-		tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-start-")));
+		tmp = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-start-")),
+		);
 		fs.mkdirSync(path.join(tmp, "resources/templates"), { recursive: true });
 	});
 	afterEach(() => {
@@ -643,11 +647,13 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		warn.mockRestore();
 	});
 
-	it("resetInkerProviderFlags() allows the warn-once flag to fire again", async () => {
+	it("a second provider instance warns independently (per-instance warn-once)", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		const { app: appA } = mkAppContext({ appRoot: tmp }, {});
 		await new InkerProvider(appA).start();
-		resetInkerProviderFlags();
+		// No resetInkerProviderFlags() — a fresh instance must emit its own
+		// diagnostic. The module-level warn-once used to silence the 2nd provider
+		// in the same process (audit 2026-06-13).
 		const { app: appB } = mkAppContext({ appRoot: tmp }, {});
 		await new InkerProvider(appB).start();
 		expect(warn).toHaveBeenCalledTimes(2);
