@@ -8,7 +8,6 @@
 
 import { fileURLToPath } from "node:url";
 import { Container, Router, ConfigStore } from "@c9up/ream";
-import { setRouter } from "@c9up/ream/services/router";
 import { Rosetta } from "@c9up/rosetta";
 import InkerProvider, {
 	resetInkerProviderFlags,
@@ -58,7 +57,6 @@ export async function buildMinimalReamApp(
 	}
 
 	const router = new Router();
-	setRouter(router);
 
 	const rosetta = new Rosetta({
 		defaultLocale: "en",
@@ -68,6 +66,9 @@ export async function buildMinimalReamApp(
 		},
 	});
 
+	// Register the router under the `'router'` token, exactly as Ignitor does —
+	// the provider resolves it from the container (not via a `@c9up/ream` import).
+	container.bindValue("router", router);
 	container.bindValue("appRoot", opts.appRoot);
 	container.bindValue("rosetta", rosetta);
 

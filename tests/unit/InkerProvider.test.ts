@@ -42,6 +42,14 @@ function mkAppContext(
 	singletons: Map<string, () => unknown>;
 } {
 	const singletons = new Map<string, () => unknown>();
+	// Ream registers the host router under the `'router'` token; the provider now
+	// resolves it from the container (not via a `@c9up/ream` import). Default one
+	// in so start() passes its router check — the "no router" degradation is
+	// covered by its own test with a router-less context.
+	const resolved: Record<string, unknown> =
+		"router" in bindings
+			? bindings
+			: { router: { makeUrl: () => "/" }, ...bindings };
 	const app: InkerAppContext = {
 		container: {
 			singleton<T>(token: unknown, factory: () => T) {
@@ -49,7 +57,7 @@ function mkAppContext(
 			},
 			resolve<T = unknown>(token: unknown): T {
 				const key = String(token);
-				if (key in bindings) return bindings[key] as T;
+				if (key in resolved) return resolved[key] as T;
 				const factory = singletons.get(key);
 				if (factory) return factory() as T;
 				// Mirror Ream's Container shape — provider duck-types on `code`
@@ -58,6 +66,10 @@ function mkAppContext(
 				throw Object.assign(new Error(`[stub] no binding for ${key}`), {
 					code: "CONTAINER_NOT_FOUND",
 				});
+			},
+			has(token: unknown): boolean {
+				const key = String(token);
+				return key in resolved || singletons.has(key);
 			},
 		},
 		config: {
@@ -619,6 +631,35 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		const second = app.container.resolve(InkerRenderer);
 		expect(first).toBe(second);
 		expect(first).toBeInstanceOf(InkerRenderer);
+	});
+
+	it("start() warns + skips when no 'router' is registered (non-Ream host)", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const singletons = new Map<string, () => unknown>();
+		// A host that never registered `'router'` (not Ream / router not wired):
+		// inker degrades — warn-once, rendering disabled, no crash.
+		const app: InkerAppContext = {
+			container: {
+				singleton(token: unknown, factory: () => unknown) {
+					singletons.set(String(token), factory);
+				},
+				resolve(): never {
+					throw Object.assign(new Error("no binding"), {
+						code: "CONTAINER_NOT_FOUND",
+					});
+				},
+				has(): boolean {
+					return false;
+				},
+			},
+			config: { get: () => undefined },
+		};
+		const provider = new InkerProvider(app);
+		provider.register();
+		await provider.start();
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0]?.[0]).toMatch(/router/);
+		warn.mockRestore();
 	});
 
 	it("start() warns once when rosetta is not registered in the container", async () => {

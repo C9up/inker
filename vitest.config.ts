@@ -1,5 +1,4 @@
 import { platform } from "node:process";
-import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 // The pnpm-pack tooling tests spawn `pnpm pack` in a temp dir. On the Windows
@@ -18,14 +17,6 @@ export default defineConfig({
 	test: {
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
-		// Alias the optional @c9up/ream peer to a local stub so InkerProvider.start()'s
-		// dynamic import resolves standalone (agnostic). Runtime resolves the real
-		// peer only when inker runs inside Ream.
-		alias: {
-			"@c9up/ream/services/router": fileURLToPath(
-				new URL("./tests/stubs/ream-router.ts", import.meta.url),
-			),
-		},
 		// ream-provider.test.ts builds a real @c9up/ream + @c9up/rosetta app — a
 		// monorepo-level integration test that can't run in the standalone repo.
 		// The agnostic behaviour is covered by standalone-smoke.test.ts.

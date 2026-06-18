@@ -6,17 +6,20 @@
  * surfaces immediately instead of silently rendering with an unconfigured
  * Templates instance).
  *
- * `start()` lazily imports `@c9up/ream/services/router` + `@c9up/rosetta`
- * (both declared as `peerDependenciesMeta.optional`), builds the four
- * canonical helper bodies (`t` / `csrfField` / `url` / `asset`) closing
- * over a single `AsyncLocalStorage<InkerHttpContext>`, constructs the
- * `Templates` instance + `InkerRenderer`, and primes `services/main`'s
- * Proxy via `setInker`.
+ * `start()` resolves the host router from the container (Ream registers it as
+ * `'router'`) + the `@c9up/rosetta` translator (declared as
+ * `peerDependenciesMeta.optional`), builds the four canonical helper bodies
+ * (`t` / `csrfField` / `url` / `asset`) closing over a single
+ * `AsyncLocalStorage<InkerHttpContext>`, constructs the `Templates` instance +
+ * `InkerRenderer`, and primes `services/main`'s Proxy via `setInker`.
+ *
+ * Reading the router from the container — not importing
+ * `@c9up/ream/services/router` — keeps inker runtime-agnostic: a non-Ream host
+ * never registers `'router'`, so Phase 1 silently degrades (warn-once).
  *
  * Mirrors the StationProvider / AuroraProvider shape — duck-typed
  * container / config / app-context interfaces, `loadBearingCast<T>` as the
- * single sanctioned cross-package narrowing site, `isModuleNotFound`
- * silent-degradation in Phase 1, `#started` idempotency.
+ * single sanctioned cross-package narrowing site, `#started` idempotency.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -35,6 +38,7 @@ import { type CacheMode, Templates } from "./Templates.js";
 interface InkerContainer {
 	singleton<T>(token: unknown, factory: () => T): void;
 	resolve<T = unknown>(token: unknown): T;
+	has(token: unknown): boolean;
 }
 
 interface InkerConfigStore {
@@ -127,34 +131,25 @@ export default class InkerProvider {
 	async start(): Promise<void> {
 		if (this.#started) return;
 
-		// Phase 1 — lazy peer imports. Both `@c9up/ream/services/router` and
-		// `@c9up/rosetta` are optional peers. Module-not-found is the
-		// degraded-host signal: silently return + warn-once. Anything else
-		// re-throws.
-		let router: ReamRouter;
-		let rosetta: RosettaTranslator;
-		try {
-			// Variable specifier so tsc does not statically resolve the optional
-			// `@c9up/ream` peer at build time (keeps inker standalone-buildable).
-			const routerSpecifier = "@c9up/ream/services/router";
-			const routerMod: { default: ReamRouter } = await import(routerSpecifier);
-			router = routerMod.default;
-			const rosettaContainer = this.#resolveRosetta();
-			if (rosettaContainer === undefined) {
-				this.#warnPeerMissingOnce(
-					"`@c9up/rosetta` is available as a module but no Rosetta instance is registered in the container. The `t()` helper will throw at first render.",
-				);
-				return;
-			}
-			rosetta = rosettaContainer;
-		} catch (err) {
-			if (isModuleNotFound(err)) {
-				this.#warnPeerMissingOnce(
-					"`@c9up/ream/services/router` or `@c9up/rosetta` is not installed. Inker rendering is disabled until both peers are present.",
-				);
-				return;
-			}
-			throw err;
+		// Phase 1 — resolve the host router + the Rosetta translator from the
+		// container. Reading both from the container — not importing
+		// `@c9up/ream/services/router` — keeps inker runtime-agnostic: a non-Ream
+		// host never registers `'router'`. Either peer missing → warn-once + skip
+		// (rendering stays disabled until both are present). The container yields
+		// the real Router instance; factory-thrown errors propagate.
+		if (!this.app.container.has("router")) {
+			this.#warnPeerMissingOnce(
+				"No `'router'` registered in the container (host is not Ream, or the router is not wired). Inker rendering is disabled until a Ream router is present.",
+			);
+			return;
+		}
+		const router = this.app.container.resolve<ReamRouter>("router");
+		const rosetta = this.#resolveRosetta();
+		if (rosetta === undefined) {
+			this.#warnPeerMissingOnce(
+				"`@c9up/rosetta` is not registered in the container. Inker rendering is disabled until a Rosetta instance is present.",
+			);
+			return;
 		}
 
 		// Phase 2 — resolve config.
@@ -566,13 +561,6 @@ function isRosettaShape(value: unknown): value is RosettaTranslator {
 		typeof value === "object" &&
 		typeof Reflect.get(value, "t") === "function"
 	);
-}
-
-/** Node's ERR_MODULE_NOT_FOUND surfaces on an Error subclass with `code`. */
-function isModuleNotFound(err: unknown): boolean {
-	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	const { code } = err;
-	return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";
 }
 
 /**
