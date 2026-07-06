@@ -7,11 +7,11 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { Container, Router, ConfigStore } from "@c9up/ream";
+import { ConfigStore, Container, Router } from "@c9up/ream";
 import { Rosetta } from "@c9up/rosetta";
 import InkerProvider, {
-	resetInkerProviderFlags,
 	type InkerProviderConfig,
+	resetInkerProviderFlags,
 } from "../../../src/InkerProvider.js";
 import type { InkerHttpContext } from "../../../src/InkerRenderer.js";
 import { InkerRenderer } from "../../../src/InkerRenderer.js";
@@ -76,7 +76,7 @@ export async function buildMinimalReamApp(
 	provider.register();
 	await provider.start();
 
-	const inker = container.resolve<InkerRenderer>(InkerRenderer);
+	const inker = await container.resolve<InkerRenderer>(InkerRenderer);
 
 	return {
 		inker,

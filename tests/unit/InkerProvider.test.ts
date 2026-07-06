@@ -722,7 +722,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		const provider = new InkerProvider(app);
 		provider.register();
 		await provider.start();
-		const renderer = app.container.resolve<InkerRenderer>(InkerRenderer);
+		const renderer = await app.container.resolve<InkerRenderer>(InkerRenderer);
 		// The internal Templates uses #root — surface via a render attempt
 		// against an absent file in the customRoot to confirm the path is in
 		// the error message.

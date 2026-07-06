@@ -37,7 +37,8 @@ import { type CacheMode, Templates } from "./Templates.js";
 
 interface InkerContainer {
 	singleton<T>(token: unknown, factory: () => T): void;
-	resolve<T = unknown>(token: unknown): T;
+	// Async (AdonisJS IoC container parity): resolution returns a Promise.
+	resolve<T = unknown>(token: unknown): Promise<T>;
 	has(token: unknown): boolean;
 }
 
@@ -143,8 +144,8 @@ export default class InkerProvider {
 			);
 			return;
 		}
-		const router = this.app.container.resolve<ReamRouter>("router");
-		const rosetta = this.#resolveRosetta();
+		const router = await this.app.container.resolve<ReamRouter>("router");
+		const rosetta = await this.#resolveRosetta();
 		if (rosetta === undefined) {
 			this.#warnPeerMissingOnce(
 				"`@c9up/rosetta` is not registered in the container. Inker rendering is disabled until a Rosetta instance is present.",
@@ -154,7 +155,7 @@ export default class InkerProvider {
 
 		// Phase 2 — resolve config.
 		const config = this.app.config.get<InkerProviderConfig>("inker") ?? {};
-		const appRoot = this.#readAppRoot();
+		const appRoot = await this.#readAppRoot();
 		const templatesRoot = resolveTemplatesRoot(config.templatesRoot, appRoot);
 		const cacheMode = resolveCacheMode(config.cacheMode);
 		const assetManifest = loadAssetManifest(config.assetManifest, appRoot);
@@ -216,9 +217,9 @@ export default class InkerProvider {
 		console.warn(`[inker] ${detail} See https://ream.dev/modules/inker.`);
 	}
 
-	#readAppRoot(): string {
+	async #readAppRoot(): Promise<string> {
 		try {
-			const raw = this.app.container.resolve<unknown>("appRoot");
+			const raw = await this.app.container.resolve<unknown>("appRoot");
 			if (raw instanceof URL) return fileURLToPath(raw);
 			if (typeof raw === "string") return raw;
 		} catch (err) {
@@ -236,7 +237,7 @@ export default class InkerProvider {
 		return process.cwd();
 	}
 
-	#resolveRosetta(): RosettaTranslator | undefined {
+	async #resolveRosetta(): Promise<RosettaTranslator | undefined> {
 		// Try container resolution under both the canonical "rosetta" alias
 		// and the class binding. RosettaProvider binds both (per
 		// `packages/rosetta/src/RosettaProvider.ts`).
@@ -249,7 +250,7 @@ export default class InkerProvider {
 		const tokens: readonly string[] = ["rosetta", "Rosetta"];
 		for (const token of tokens) {
 			try {
-				const candidate = this.app.container.resolve<unknown>(token);
+				const candidate = await this.app.container.resolve<unknown>(token);
 				if (isRosettaShape(candidate)) {
 					return candidate;
 				}
