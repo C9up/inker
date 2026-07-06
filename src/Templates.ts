@@ -1278,20 +1278,10 @@ export class Templates {
 					);
 				}
 
-				// Slot-leak rejection: components MUST NOT contain {{> body }}.
-				const slot = info.slots[0];
-				if (slot !== undefined) {
-					throw new InkerRenderError(
-						"E_INKER_UNKNOWN_SLOT",
-						`Component '${componentValidated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
-						{
-							templatePath: componentAbsPath,
-							templateName: componentValidated,
-							line: slot.line,
-							column: slot.column,
-						},
-					);
-				}
+				// A component template MAY contain slot placeholders: `{{> body }}`
+				// yields the default (block-body) slot and `{{> name }}` a named
+				// `{% slot 'name' %}` provided by the caller. Placeholders with no
+				// matching slot render empty (Edge parity), so no validation here.
 
 				componentAsts.set(componentKey, componentAst);
 

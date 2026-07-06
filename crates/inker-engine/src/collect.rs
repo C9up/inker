@@ -55,8 +55,22 @@ fn collect_nodes(
 			format!("Collect recursion exceeded maximum depth {MAX_COLLECT_DEPTH}"),
 		));
 	}
+	// `{% let x = expr %}` binds `x` for the following siblings — mirror render's
+	// scope threading so collect walks with identical scope (and helper order).
+	let mut local_scope: Option<Value> = None;
 	for node in nodes {
-		collect_node(node, data, context, tape, depth)?;
+		let scope = local_scope.as_ref().unwrap_or(data);
+		if let InkerNode::Let { name, expression, .. } = node {
+			let value = eval_pure(expression, scope, context)?;
+			let mut obj = match scope {
+				Value::Object(o) => o.clone(),
+				_ => JsonMap::new(),
+			};
+			obj.insert(name.clone(), value);
+			local_scope = Some(Value::Object(obj));
+			continue;
+		}
+		collect_node(node, scope, context, tape, depth)?;
 	}
 	Ok(())
 }
@@ -69,7 +83,10 @@ fn collect_node(
 	depth: u32,
 ) -> Result<(), InkerError> {
 	match node {
-		InkerNode::Text { .. } | InkerNode::Slot(_) | InkerNode::Layout(_) => {}
+		InkerNode::Text { .. }
+		| InkerNode::Slot(_)
+		| InkerNode::Layout(_)
+		| InkerNode::Let { .. } => {}
 		InkerNode::Interpolation { expression, .. } => {
 			if let Expression::Call { id, name, args, .. } = expression {
 				push_invocation(*id, name, args, data, context, tape)?;
@@ -118,6 +135,12 @@ fn collect_node(
 				} else {
 					scoped.insert(arg.key.clone(), eval_pure(&arg.value, data, context)?);
 				}
+			}
+			// Slot content is collected in the CALLER scope, after the args and
+			// before the component template — mirrors render's walk order exactly.
+			collect_nodes(&c.body_nodes, data, context, tape, depth + 1)?;
+			for slot in &c.named_slots {
+				collect_nodes(&slot.nodes, data, context, tape, depth + 1)?;
 			}
 			let key = normalize_partial_key(&c.name);
 			if let Some(component_ast) = context.components.get(&key) {

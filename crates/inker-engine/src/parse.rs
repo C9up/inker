@@ -6,7 +6,10 @@
 //! assembles the final `InkerAst`. Also collects every helper call-site for
 //! the ADR-007 TS-side pre-resolve walk (AC6).
 
-use crate::ast::{EachBinding, IfCondition, InkerNode, LayoutNode, SlotNode};
+use crate::ast::{
+	ComponentArg, ComponentNode, EachBinding, IfCondition, InkerNode, LayoutNode,
+	NamedSlot, SlotNode,
+};
 use crate::error::{ErrorCode, InkerError};
 use crate::lex::Token;
 use crate::parse_block_tag::{
@@ -51,12 +54,29 @@ fn is_whitespace_only(value: &str) -> bool {
 		.all(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r')
 }
 
+/// One `if` / `elseif` arm of an `If` frame. Folded (innermost-last) into a
+/// chain of binary `InkerNode::If` at close so render / collect / napi keep
+/// seeing the simple two-way `If` shape.
+struct IfBranch {
+	condition: IfCondition,
+	nodes: Vec<InkerNode>,
+	line: u32,
+	column: u32,
+}
+
+/// A `{% slot 'name' %}` currently being captured inside a component frame.
+struct SlotBuild {
+	name: String,
+	nodes: Vec<InkerNode>,
+	line: u32,
+	column: u32,
+}
+
 enum BlockFrame {
 	If {
 		line: u32,
 		column: u32,
-		condition: IfCondition,
-		then_nodes: Vec<InkerNode>,
+		branches: Vec<IfBranch>,
 		else_nodes: Option<Vec<InkerNode>>,
 		in_else: bool,
 	},
@@ -70,13 +90,23 @@ enum BlockFrame {
 		else_nodes: Option<Vec<InkerNode>>,
 		in_else: bool,
 	},
+	Component {
+		line: u32,
+		column: u32,
+		name: String,
+		args: Vec<ComponentArg>,
+		raw: String,
+		body_nodes: Vec<InkerNode>,
+		named_slots: Vec<NamedSlot>,
+		active_slot: Option<SlotBuild>,
+	},
 }
 
 impl BlockFrame {
 	fn active_mut(&mut self) -> &mut Vec<InkerNode> {
 		match self {
 			BlockFrame::If {
-				then_nodes,
+				branches,
 				else_nodes,
 				in_else,
 				..
@@ -84,7 +114,10 @@ impl BlockFrame {
 				if *in_else {
 					else_nodes.get_or_insert_with(Vec::new)
 				} else {
-					then_nodes
+					&mut branches
+						.last_mut()
+						.expect("If frame always has >= 1 branch")
+						.nodes
 				}
 			}
 			BlockFrame::Each {
@@ -99,27 +132,100 @@ impl BlockFrame {
 					body_nodes
 				}
 			}
+			BlockFrame::Component {
+				body_nodes,
+				active_slot,
+				..
+			} => match active_slot {
+				Some(slot) => &mut slot.nodes,
+				None => body_nodes,
+			},
 		}
 	}
 
-	fn kind_label(&self) -> &'static str {
+	/// Lower-case opening directive keyword, for `{% ... %}` error messages.
+	fn open_keyword(&self) -> &'static str {
 		match self {
-			BlockFrame::If { .. } => "If",
-			BlockFrame::Each { .. } => "Each",
+			BlockFrame::If { .. } => "if",
+			BlockFrame::Each { .. } => "each",
+			BlockFrame::Component { .. } => "component",
 		}
 	}
 
 	fn line(&self) -> u32 {
 		match self {
-			BlockFrame::If { line, .. } | BlockFrame::Each { line, .. } => *line,
+			BlockFrame::If { line, .. }
+			| BlockFrame::Each { line, .. }
+			| BlockFrame::Component { line, .. } => *line,
 		}
 	}
 
 	fn column(&self) -> u32 {
 		match self {
-			BlockFrame::If { column, .. } | BlockFrame::Each { column, .. } => *column,
+			BlockFrame::If { column, .. }
+			| BlockFrame::Each { column, .. }
+			| BlockFrame::Component { column, .. } => *column,
 		}
 	}
+}
+
+/// Fold an `If` frame's `if`/`elseif` branches plus optional `else` into a
+/// chain of two-way `InkerNode::If` (innermost `else` last). With no `elseif`
+/// this yields exactly the original single `If { then, else }` shape.
+fn fold_if_branches(
+	branches: Vec<IfBranch>,
+	else_nodes: Option<Vec<InkerNode>>,
+) -> InkerNode {
+	let mut acc: Option<Vec<InkerNode>> = else_nodes;
+	let mut node: Option<InkerNode> = None;
+	for branch in branches.into_iter().rev() {
+		let if_node = InkerNode::If {
+			condition: branch.condition,
+			then_nodes: branch.nodes,
+			else_nodes: acc.take(),
+			line: branch.line,
+			column: branch.column,
+		};
+		acc = Some(vec![if_node.clone()]);
+		node = Some(if_node);
+	}
+	node.expect("If frame always has >= 1 branch")
+}
+
+/// Cheap leading-keyword sniff on a block tag's raw inner (already trimmed by
+/// the lexer) — used only for the component/endcomponent lookahead.
+fn block_tag_keyword(raw: &str) -> &str {
+	let trimmed = raw.trim_start();
+	let end = trimmed
+		.find(|c: char| c.is_whitespace() || c == '{')
+		.unwrap_or(trimmed.len());
+	&trimmed[..end]
+}
+
+/// Decide whether the `{% component %}` at `tokens[start]` opens a block (has a
+/// matching `{% endcomponent %}`) or is the self-closing inline form. Treats
+/// component/endcomponent as balanced pairs: the nearest unpaired
+/// `endcomponent` closes this component. No matching end ⇒ self-closing, so
+/// legacy inline `{% component %}` (no endcomponent) stays backward compatible.
+fn component_opens_block(tokens: &[Token], start: usize) -> bool {
+	let mut depth: i32 = 0;
+	let mut i = start + 1;
+	while i < tokens.len() {
+		if let Token::BlockTag { raw, .. } = &tokens[i] {
+			match block_tag_keyword(raw) {
+				"component" => depth += 1,
+				"endcomponent" => {
+					if depth == 0 {
+						return true;
+					}
+					depth -= 1;
+				}
+				_ => {}
+			}
+		}
+		i += 1;
+	}
+	false
 }
 
 fn push_node(
@@ -229,6 +335,17 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
 			for a in &c.args {
 				collect_helpers_in_expr(&a.value, out);
 			}
+			for n in &c.body_nodes {
+				collect_helpers_in_node(n, out);
+			}
+			for slot in &c.named_slots {
+				for n in &slot.nodes {
+					collect_helpers_in_node(n, out);
+				}
+			}
+		}
+		InkerNode::Let { expression, .. } => {
+			collect_helpers_in_expr(expression, out);
 		}
 		InkerNode::Text { .. }
 		| InkerNode::Layout(_)
@@ -249,7 +366,7 @@ pub fn parse(
 	let mut seen_non_whitespace_content = false;
 	let mut helper_id_counter: u32 = 0;
 
-	for token in tokens {
+	for (token_index, token) in tokens.iter().enumerate() {
 		match token {
 			Token::Text { value, .. } => {
 				let node = InkerNode::Text {
@@ -377,8 +494,240 @@ pub fn parse(
 						}
 					}
 					ParsedBlockTag::Component(component_node) => {
+						if component_opens_block(tokens, token_index) {
+							open_blocks.push(BlockFrame::Component {
+								line: component_node.line,
+								column: component_node.column,
+								name: component_node.name,
+								args: component_node.args,
+								raw: component_node.raw,
+								body_nodes: Vec::new(),
+								named_slots: Vec::new(),
+								active_slot: None,
+							});
+							if open_blocks.len() == 1 {
+								seen_non_whitespace_content = true;
+							}
+						} else {
+							push_node(
+								InkerNode::Component(component_node),
+								&mut root_nodes,
+								&mut open_blocks,
+							);
+							if open_blocks.is_empty() {
+								seen_non_whitespace_content = true;
+							}
+						}
+					}
+					ParsedBlockTag::OpenSlot {
+						name,
+						line: pl,
+						column: pc,
+					} => {
+						let top = match open_blocks.last_mut() {
+							Some(t) => t,
+							None => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% slot '{name}' %}} outside of a {{% component %}} block (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						};
+						match top {
+							BlockFrame::Component {
+								active_slot,
+								named_slots,
+								..
+							} => {
+								if active_slot.is_some() {
+									return Err(make_err(
+										ErrorCode::UnmatchedBlockEnd,
+										format!("Nested {{% slot '{name}' %}} — close the previous slot with {{% endslot %}} first (at line {pl}, column {pc})"),
+										pl,
+										pc,
+										template_path,
+									));
+								}
+								if named_slots.iter().any(|s| s.name == name) {
+									return Err(make_err(
+										ErrorCode::InvalidExpression,
+										format!("Duplicate slot name '{name}' in the same {{% component %}} block (at line {pl}, column {pc})"),
+										pl,
+										pc,
+										template_path,
+									));
+								}
+								*active_slot = Some(SlotBuild {
+									name,
+									nodes: Vec::new(),
+									line: pl,
+									column: pc,
+								});
+							}
+							_ => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% slot '{name}' %}} must be a direct child of a {{% component %}} block (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						}
+					}
+					ParsedBlockTag::CloseSlot {
+						line: pl,
+						column: pc,
+					} => {
+						let top = match open_blocks.last_mut() {
+							Some(t) => t,
+							None => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						};
+						match top {
+							BlockFrame::Component { active_slot, named_slots, .. } => {
+								match active_slot.take() {
+									Some(slot) => named_slots.push(NamedSlot {
+										name: slot.name,
+										nodes: slot.nodes,
+										line: slot.line,
+										column: slot.column,
+									}),
+									None => {
+										return Err(make_err(
+											ErrorCode::UnmatchedBlockEnd,
+											format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+											pl,
+											pc,
+											template_path,
+										));
+									}
+								}
+							}
+							_ => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						}
+					}
+					ParsedBlockTag::CloseComponent {
+						line: pl,
+						column: pc,
+					} => {
+						let top = match open_blocks.last() {
+							Some(t) => t,
+							None => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% endcomponent %}} with no open {{% component %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						};
+						if !matches!(top, BlockFrame::Component { .. }) {
+							let open_kw = top.open_keyword();
+							let top_line = top.line();
+							let top_col = top.column();
+							return Err(make_err(
+								ErrorCode::MismatchedBlockEnd,
+								format!("{{% endcomponent %}} does not match open {{% {open_kw} %}} (open at line {top_line}, column {top_col}; close at line {pl}, column {pc})"),
+								pl,
+								pc,
+								template_path,
+							));
+						}
+						let frame = open_blocks.pop().expect("checked above");
+						if let BlockFrame::Component {
+							line,
+							column,
+							name,
+							args,
+							raw,
+							body_nodes,
+							named_slots,
+							active_slot,
+						} = frame
+						{
+							if active_slot.is_some() {
+								return Err(make_err(
+									ErrorCode::UnclosedBlock,
+									format!("{{% slot %}} was not closed with {{% endslot %}} before {{% endcomponent %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+							push_node(
+								InkerNode::Component(ComponentNode {
+									name,
+									args,
+									body_nodes,
+									named_slots,
+									raw,
+									line,
+									column,
+								}),
+								&mut root_nodes,
+								&mut open_blocks,
+							);
+						}
+					}
+					ParsedBlockTag::Let {
+						name,
+						expression,
+						source,
+						line: pl,
+						column: pc,
+					} => {
 						push_node(
-							InkerNode::Component(component_node),
+							InkerNode::Let {
+								name,
+								expression,
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.is_empty() {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::IncludeIf {
+						condition,
+						partial,
+						line: pl,
+						column: pc,
+					} => {
+						// `{% includeIf cond, 'name' %}` desugars to
+						// `{% if cond %}{% include 'name' %}{% endif %}`, reusing the
+						// existing If + Partial render / collect / compose machinery.
+						push_node(
+							InkerNode::If {
+								condition,
+								then_nodes: vec![InkerNode::Partial(partial)],
+								else_nodes: None,
+								line: pl,
+								column: pc,
+							},
 							&mut root_nodes,
 							&mut open_blocks,
 						);
@@ -394,13 +743,68 @@ pub fn parse(
 						open_blocks.push(BlockFrame::If {
 							line: pl,
 							column: pc,
-							condition,
-							then_nodes: Vec::new(),
+							branches: vec![IfBranch {
+								condition,
+								nodes: Vec::new(),
+								line: pl,
+								column: pc,
+							}],
 							else_nodes: None,
 							in_else: false,
 						});
 						if open_blocks.len() == 1 {
 							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::ElseIf {
+						condition,
+						line: pl,
+						column: pc,
+					} => {
+						let top = match open_blocks.last_mut() {
+							Some(t) => t,
+							None => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!("{{% elseif %}} with no open {{% if %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
+						};
+						match top {
+							BlockFrame::If {
+								branches,
+								in_else,
+								..
+							} => {
+								if *in_else {
+									return Err(make_err(
+										ErrorCode::InvalidExpression,
+										format!("{{% elseif %}} after {{% else %}} in the same {{% if %}} block (at line {pl}, column {pc})"),
+										pl,
+										pc,
+										template_path,
+									));
+								}
+								branches.push(IfBranch {
+									condition,
+									nodes: Vec::new(),
+									line: pl,
+									column: pc,
+								});
+							}
+							other => {
+								let open_kw = other.open_keyword();
+								return Err(make_err(
+									ErrorCode::InvalidExpression,
+									format!("{{% elseif %}} only valid inside {{% if %}}, not {{% {open_kw} %}} (at line {pl}, column {pc})"),
+									pl,
+									pc,
+									template_path,
+								));
+							}
 						}
 					}
 					ParsedBlockTag::OpenEach {
@@ -445,11 +849,23 @@ pub fn parse(
 						let already = match top {
 							BlockFrame::If { in_else, .. } => *in_else,
 							BlockFrame::Each { in_else, .. } => *in_else,
+							BlockFrame::Component { .. } => {
+								return Err(make_err(
+									ErrorCode::UnmatchedBlockEnd,
+									format!(
+										"{{% else %}} inside a {{% component %}} block — 'else' is only valid in {{% if %}} / {{% each %}} (at line {pl}, column {pc})"
+									),
+									pl,
+									pc,
+									template_path,
+								));
+							}
 						};
 						if already {
 							let kw = match top {
 								BlockFrame::If { .. } => "if",
 								BlockFrame::Each { .. } => "each",
+								BlockFrame::Component { .. } => "component",
 							};
 							let frame_line = top.line();
 							return Err(make_err(
@@ -479,6 +895,7 @@ pub fn parse(
 								*in_else = true;
 								*else_nodes = Some(Vec::new());
 							}
+							BlockFrame::Component { .. } => {}
 						}
 					}
 					ParsedBlockTag::Close {
@@ -504,15 +921,13 @@ pub fn parse(
 								));
 							}
 						};
-						let top_kind = match top {
-							BlockFrame::If { .. } => BlockClosesKind::If,
-							BlockFrame::Each { .. } => BlockClosesKind::Each,
+						let matches_close = match top {
+							BlockFrame::If { .. } => closes == BlockClosesKind::If,
+							BlockFrame::Each { .. } => closes == BlockClosesKind::Each,
+							BlockFrame::Component { .. } => false,
 						};
-						if top_kind != closes {
-							let open_kw = match top {
-								BlockFrame::If { .. } => "if",
-								BlockFrame::Each { .. } => "each",
-							};
+						if !matches_close {
+							let open_kw = top.open_keyword();
 							let close_kw = match closes {
 								BlockClosesKind::If => "endif",
 								BlockClosesKind::Each => "endeach",
@@ -532,19 +947,13 @@ pub fn parse(
 						let frame = open_blocks.pop().expect("checked above");
 						let node = match frame {
 							BlockFrame::If {
-								line,
-								column,
-								condition,
-								then_nodes,
+								branches,
 								else_nodes,
 								..
-							} => InkerNode::If {
-								condition,
-								then_nodes,
-								else_nodes,
-								line,
-								column,
-							},
+							} => fold_if_branches(branches, else_nodes),
+							BlockFrame::Component { .. } => unreachable!(
+								"{{% endcomponent %}} is closed by the CloseComponent arm, never the generic if/each close"
+							),
 							BlockFrame::Each {
 								line,
 								column,
@@ -572,8 +981,7 @@ pub fn parse(
 	}
 
 	if let Some(top) = open_blocks.last() {
-		let kw = top.kind_label();
-		let kw_lower = if kw == "If" { "if" } else { "each" };
+		let kw_lower = top.open_keyword();
 		return Err(make_err(
 			ErrorCode::UnclosedBlock,
 			format!(

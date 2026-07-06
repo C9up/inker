@@ -153,6 +153,61 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 			}
 		}
 
+		// Comment: {{-- ... --}} (Edge parity). Stripped entirely — emits no
+		// token and no output, does not touch the data tree. Balanced against
+		// the first `--}}`; an unterminated comment is a hard lex error so a
+		// stray `{{--` cannot silently swallow the rest of the template.
+		if ch == '{'
+			&& i + 3 < len
+			&& chars[i + 1] == '{'
+			&& chars[i + 2] == '-'
+			&& chars[i + 3] == '-'
+		{
+			flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
+			let open_line = cursor.line;
+			let open_column = cursor.column;
+			advance(&mut cursor, '{');
+			advance(&mut cursor, '{');
+			advance(&mut cursor, '-');
+			advance(&mut cursor, '-');
+			i += 4;
+			let mut closed = false;
+			while i < len {
+				let c = chars[i];
+				if c == '-'
+					&& i + 3 < len
+					&& chars[i + 1] == '-'
+					&& chars[i + 2] == '}'
+					&& chars[i + 3] == '}'
+				{
+					advance(&mut cursor, '-');
+					advance(&mut cursor, '-');
+					advance(&mut cursor, '}');
+					advance(&mut cursor, '}');
+					i += 4;
+					closed = true;
+					break;
+				}
+				advance(&mut cursor, c);
+				i += 1;
+			}
+			if !closed {
+				return Err(make_err(
+					ErrorCode::UnclosedInterpolation,
+					format!(
+						"Unclosed comment (missing '--}}}}') at line {}, column {}",
+						open_line, open_column
+					),
+					open_line,
+					open_column,
+					options,
+				));
+			}
+			text_start_line = cursor.line;
+			text_start_column = cursor.column;
+			continue;
+		}
+
 		// Block tag open: {% ... %}
 		if ch == '{' && i + 1 < len && chars[i + 1] == '%' {
 			flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
@@ -641,6 +696,31 @@ mod tests {
 			}
 			_ => panic!("expected InterpEscaped"),
 		}
+	}
+
+	#[test]
+	fn comment_is_stripped_entirely() {
+		let toks = lex("a{{-- hidden {{ x }} --}}b", &LexOptions::default()).unwrap();
+		assert_eq!(toks.len(), 2);
+		match (&toks[0], &toks[1]) {
+			(Token::Text { value: a, .. }, Token::Text { value: b, .. }) => {
+				assert_eq!(a, "a");
+				assert_eq!(b, "b");
+			}
+			_ => panic!("expected two Text tokens around the stripped comment"),
+		}
+	}
+
+	#[test]
+	fn comment_only_emits_no_tokens() {
+		let toks = lex("{{-- just a note --}}", &LexOptions::default()).unwrap();
+		assert!(toks.is_empty());
+	}
+
+	#[test]
+	fn unclosed_comment_errors() {
+		let err = lex("{{-- never closed", &LexOptions::default()).unwrap_err();
+		assert_eq!(err.code, ErrorCode::UnclosedInterpolation);
 	}
 
 	#[test]

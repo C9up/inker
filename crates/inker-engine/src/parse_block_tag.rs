@@ -17,18 +17,16 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
-const UNKNOWN_DIRECTIVE_HINT: &str = "Inker 53.4 supports `layout`, `include`, `if`/`else`/`endif`, `each`/`endeach`, and `component`.";
+const UNKNOWN_DIRECTIVE_HINT: &str = "Inker supports `layout`, `include`/`includeIf`, `if`/`elseif`/`else`/`endif`, `each`/`endeach`, `let`, and `component`/`slot`.";
 
 static REJECTED_DIRECTIVES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 	let mut s = HashSet::new();
 	for n in [
 		"for",
 		"endfor",
-		"endcomponent",
 		"unless",
 		"endunless",
 		"set",
-		"let",
 		"raw",
 		"endraw",
 		"block",
@@ -51,12 +49,18 @@ static KNOWN_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 	for n in [
 		"layout",
 		"include",
+		"includeIf",
 		"if",
+		"elseif",
 		"else",
 		"endif",
 		"each",
 		"endeach",
+		"let",
 		"component",
+		"endcomponent",
+		"slot",
+		"endslot",
 	] {
 		s.insert(n);
 	}
@@ -72,6 +76,10 @@ static IDENT_CONT_RE: Lazy<Regex> =
 
 static DRIVE_LETTER_RE: Lazy<Regex> =
 	Lazy::new(|| Regex::new(r"^[A-Za-z]:").expect("static regex"));
+
+static SLOT_NAME_RE: Lazy<Regex> = Lazy::new(|| {
+	Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*$").expect("static regex compiles")
+});
 
 fn is_whitespace(ch: char) -> bool {
 	ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
@@ -579,6 +587,222 @@ fn find_top_level_as(s: &[char]) -> Option<(usize, usize)> {
 	None
 }
 
+#[allow(clippy::too_many_arguments)]
+fn parse_let_tag(
+	chars: &[char],
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+	after_keyword: usize,
+	helpers: &HashSet<String>,
+	helper_id_start: u32,
+) -> Result<(String, Expression, String, u32), InkerError> {
+	let mut i = skip_whitespace(chars, after_keyword);
+	let start = i;
+	while i < chars.len() && IDENT_CONT_RE.is_match(&chars[i].to_string()) {
+		i += 1;
+	}
+	let name: String = chars[start..i].iter().collect();
+	if name.is_empty() {
+		return Err(fail_invalid_expression(
+			"let directive requires a variable name",
+			line,
+			column,
+			template_path,
+		));
+	}
+	if !BINDING_RE.is_match(&name) {
+		return Err(fail_invalid_expression(
+			format!("let variable '{name}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_reserved_binding(&name) {
+		return Err(fail_invalid_expression(
+			format!("let variable '{name}' is a reserved word"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_prototype_pollution_key(&name) {
+		return Err(fail_invalid_expression(
+			format!("let variable '{name}' is forbidden (prototype-pollution surface)"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	i = skip_whitespace(chars, i);
+	if chars.get(i).copied() != Some('=') {
+		return Err(fail_parse(
+			format!("let directive requires '=' after the variable name '{name}'"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if chars.get(i + 1).copied() == Some('=') {
+		return Err(fail_parse(
+			"let directive uses a single '=' for assignment, not '=='",
+			line,
+			column,
+			template_path,
+		));
+	}
+	i += 1;
+	let expr_source: String = chars[i..].iter().collect::<String>().trim().to_string();
+	if expr_source.is_empty() {
+		return Err(fail_invalid_expression(
+			format!("let directive requires an expression after '=' for '{name}'"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	let options = ParseExpressionOptions {
+		template_path: template_path.map(|s| s.to_string()),
+		helpers: helpers.clone(),
+	};
+	let (expression, next_id) = parse_expression_with_helper_count(
+		&expr_source,
+		line,
+		column,
+		&options,
+		helper_id_start,
+	)?;
+	Ok((name, expression, expr_source, next_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_include_if_tag(
+	raw: &str,
+	chars: &[char],
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+	after_keyword: usize,
+	helpers: &HashSet<String>,
+	helper_id_start: u32,
+) -> Result<(IfCondition, PartialNode, u32), InkerError> {
+	let start = skip_whitespace(chars, after_keyword);
+	if start >= chars.len() {
+		return Err(fail_invalid_expression(
+			"includeIf directive requires '<condition>, <name>'",
+			line,
+			column,
+			template_path,
+		));
+	}
+	let body = &chars[start..];
+	let comma = match find_top_level_comma(body) {
+		Some(c) => c,
+		None => {
+			return Err(fail_invalid_expression(
+				"includeIf directive requires a comma between the condition and the quoted template name",
+				line,
+				column,
+				template_path,
+			));
+		}
+	};
+	let cond_source: String =
+		body[..comma].iter().collect::<String>().trim().to_string();
+	if cond_source.is_empty() {
+		return Err(fail_invalid_expression(
+			"includeIf directive requires a condition before the comma",
+			line,
+			column,
+			template_path,
+		));
+	}
+	let options = ParseExpressionOptions {
+		template_path: template_path.map(|s| s.to_string()),
+		helpers: helpers.clone(),
+	};
+	let (expression, next_id) = parse_expression_with_helper_count(
+		&cond_source,
+		line,
+		column,
+		&options,
+		helper_id_start,
+	)?;
+
+	let name_pos = skip_whitespace(chars, start + comma + 1);
+	if name_pos >= chars.len() {
+		return Err(fail_parse(
+			"includeIf directive requires a quoted template name after the comma",
+			line,
+			column,
+			template_path,
+		));
+	}
+	let (name, next) =
+		read_quoted_string(chars, name_pos, line, column, template_path)?;
+	validate_path_name(&name, line, column, template_path)?;
+	let after_name = skip_whitespace(chars, next);
+	if after_name < chars.len() {
+		let trailing: String = chars[next..].iter().collect();
+		return Err(fail_parse(
+			format!("Unexpected tokens after includeIf name: '{trailing}'"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	Ok((
+		IfCondition {
+			expression,
+			source: cond_source,
+		},
+		PartialNode {
+			name,
+			raw: raw.to_string(),
+			line,
+			column,
+		},
+		next_id,
+	))
+}
+
+/// Locate the first top-level `,` in `s`, honoring string literals and
+/// bracket/brace/paren nesting. Returns its index in `s`, or None.
+fn find_top_level_comma(s: &[char]) -> Option<usize> {
+	let mut depth: i32 = 0;
+	let mut string_delim: Option<char> = None;
+	let mut i = 0;
+	while i < s.len() {
+		let c = s[i];
+		if let Some(delim) = string_delim {
+			if c == '\\' && i + 1 < s.len() {
+				i += 2;
+				continue;
+			}
+			if c == delim {
+				string_delim = None;
+			}
+			i += 1;
+			continue;
+		}
+		if c == '"' || c == '\'' {
+			string_delim = Some(c);
+			i += 1;
+			continue;
+		}
+		if c == '[' || c == '(' || c == '{' {
+			depth += 1;
+		} else if c == ']' || c == ')' || c == '}' {
+			depth -= 1;
+		} else if c == ',' && depth == 0 {
+			return Some(i);
+		}
+		i += 1;
+	}
+	None
+}
+
 fn parse_each_tag(
 	chars: &[char],
 	line: u32,
@@ -891,6 +1115,8 @@ fn parse_component_tag(
 		ComponentNode {
 			name,
 			args,
+			body_nodes: Vec::new(),
+			named_slots: Vec::new(),
 			raw: raw.to_string(),
 			line,
 			column,
@@ -928,6 +1154,37 @@ pub enum ParsedBlockTag {
 		column: u32,
 	},
 	Else {
+		line: u32,
+		column: u32,
+	},
+	ElseIf {
+		condition: IfCondition,
+		line: u32,
+		column: u32,
+	},
+	Let {
+		name: String,
+		expression: Expression,
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	IncludeIf {
+		condition: IfCondition,
+		partial: PartialNode,
+		line: u32,
+		column: u32,
+	},
+	OpenSlot {
+		name: String,
+		line: u32,
+		column: u32,
+	},
+	CloseSlot {
+		line: u32,
+		column: u32,
+	},
+	CloseComponent {
 		line: u32,
 		column: u32,
 	},
@@ -1008,6 +1265,26 @@ pub fn parse_block_tag(
 		));
 	}
 
+	if keyword == "elseif" {
+		let (condition, next_id) = parse_if_tag(
+			&chars,
+			line,
+			column,
+			template_path,
+			after_keyword,
+			helpers,
+			helper_id_start,
+		)?;
+		return Ok((
+			ParsedBlockTag::ElseIf {
+				condition,
+				line,
+				column,
+			},
+			next_id,
+		));
+	}
+
 	if keyword == "each" {
 		let (iterable, iterable_source, binding, next_id) = parse_each_tag(
 			&chars,
@@ -1071,11 +1348,41 @@ pub fn parse_block_tag(
 	}
 
 	if keyword == "else" {
+		// `{% else if <cond> %}` is accepted as a spelled-out `elseif` — chained
+		// into the AST identically. The single-token `{% elseif %}` form is
+		// handled above; this catches the space-separated spelling.
+		let after_else = skip_whitespace(&chars, after_keyword);
+		if after_else + 2 <= chars.len()
+			&& chars[after_else] == 'i'
+			&& chars.get(after_else + 1).copied() == Some('f')
+			&& chars
+				.get(after_else + 2)
+				.map(|c| is_whitespace(*c))
+				.unwrap_or(false)
+		{
+			let (condition, next_id) = parse_if_tag(
+				&chars,
+				line,
+				column,
+				template_path,
+				after_else + 2,
+				helpers,
+				helper_id_start,
+			)?;
+			return Ok((
+				ParsedBlockTag::ElseIf {
+					condition,
+					line,
+					column,
+				},
+				next_id,
+			));
+		}
 		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
 		if !trailing.is_empty() {
 			return Err(fail_invalid_expression(
 				format!(
-					"Unexpected tokens after else: '{trailing}' — '{{% else if %}}' chains are not supported, use nested {{% if %}}/{{% else %}}/{{% endif %}}"
+					"Unexpected tokens after else: '{trailing}' — use '{{% elseif <cond> %}}' (or '{{% else if <cond> %}}') for chained conditions"
 				),
 				line,
 				column,
@@ -1083,6 +1390,117 @@ pub fn parse_block_tag(
 			));
 		}
 		return Ok((ParsedBlockTag::Else { line, column }, helper_id_start));
+	}
+
+	if keyword == "let" {
+		let (name, expression, source, next_id) = parse_let_tag(
+			&chars,
+			line,
+			column,
+			template_path,
+			after_keyword,
+			helpers,
+			helper_id_start,
+		)?;
+		return Ok((
+			ParsedBlockTag::Let {
+				name,
+				expression,
+				source,
+				line,
+				column,
+			},
+			next_id,
+		));
+	}
+
+	if keyword == "includeIf" {
+		let (condition, partial, next_id) = parse_include_if_tag(
+			raw,
+			&chars,
+			line,
+			column,
+			template_path,
+			after_keyword,
+			helpers,
+			helper_id_start,
+		)?;
+		return Ok((
+			ParsedBlockTag::IncludeIf {
+				condition,
+				partial,
+				line,
+				column,
+			},
+			next_id,
+		));
+	}
+
+	if keyword == "slot" {
+		let after_kw_space = skip_whitespace(&chars, after_keyword);
+		if after_kw_space >= chars.len() {
+			return Err(fail_parse(
+				"slot directive requires a quoted slot name",
+				line,
+				column,
+				template_path,
+			));
+		}
+		let (name, next) =
+			read_quoted_string(&chars, after_kw_space, line, column, template_path)?;
+		if !SLOT_NAME_RE.is_match(&name) {
+			return Err(fail_parse(
+				format!("Invalid slot name '{name}' — must match /^[a-zA-Z_][a-zA-Z0-9_-]*$/"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		if name == "body" {
+			return Err(fail_parse(
+				"slot name 'body' is reserved for the default component body content",
+				line,
+				column,
+				template_path,
+			));
+		}
+		let after_name = skip_whitespace(&chars, next);
+		if after_name < chars.len() {
+			let trailing: String = chars[next..].iter().collect();
+			return Err(fail_parse(
+				format!("Unexpected tokens after slot name: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::OpenSlot { name, line, column }, helper_id_start));
+	}
+
+	if keyword == "endslot" {
+		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after endslot: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::CloseSlot { line, column }, helper_id_start));
+	}
+
+	if keyword == "endcomponent" {
+		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after endcomponent: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::CloseComponent { line, column }, helper_id_start));
 	}
 
 	if keyword == "component" {

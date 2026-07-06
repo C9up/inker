@@ -80,6 +80,12 @@ pub struct RenderContext {
 	pub partials: HashMap<String, InkerAst>,
 	pub components: HashMap<String, InkerAst>,
 	pub body_html: Option<String>,
+	/// Component slot content keyed by slot name (`body` = the default slot).
+	/// Set only while rendering a component template; `None` everywhere else.
+	/// A `{{> name }}` placeholder inside a component resolves from this map
+	/// (a placeholder with no matching slot renders empty, Edge parity), while
+	/// layouts keep resolving `{{> body }}` from `body_html`.
+	pub component_slots: Option<HashMap<String, String>>,
 }
 
 /// Render an AST consuming the pre-resolved helper tape in walk order.
@@ -134,8 +140,22 @@ fn render_nodes(
 			context,
 		));
 	}
+	// `{% let x = expr %}` binds `x` for every SIBLING node that follows it in
+	// this list (block-scoped, like `each`). Thread an augmented scope forward.
+	let mut local_scope: Option<Value> = None;
 	for node in nodes {
-		render_node(node, data, context, buf, depth, tape, cursor)?;
+		let scope = local_scope.as_ref().unwrap_or(data);
+		if let InkerNode::Let { name, expression, .. } = node {
+			let value = eval_pure(expression, scope, context)?;
+			let mut obj = match scope {
+				Value::Object(o) => o.clone(),
+				_ => JsonMap::new(),
+			};
+			obj.insert(name.clone(), value);
+			local_scope = Some(Value::Object(obj));
+			continue;
+		}
+		render_node(node, scope, context, buf, depth, tape, cursor)?;
 	}
 	Ok(())
 }
@@ -185,17 +205,26 @@ fn render_node(
 			}
 		}
 		InkerNode::Slot(SlotNode { name, line, column }) => {
-			if name != "body" {
+			if let Some(slots) = &context.component_slots {
+				// Rendering a component template: `{{> name }}` resolves from
+				// the caller-provided slots (`body` = default slot). A
+				// placeholder with no matching slot renders empty (Edge parity).
+				if let Some(html) = slots.get(name) {
+					buf.push_str(html);
+				}
+			} else if name == "body" {
+				// Layout body injection.
+				if let Some(body) = &context.body_html {
+					buf.push_str(body);
+				}
+			} else {
 				return Err(make_err(
 					ErrorCode::UnknownSlot,
-					format!("Unknown slot '{name}' — Inker only supports {{{{> body }}}} as of 53.4."),
+					format!("Unknown slot '{name}' — {{{{> body }}}} is only valid inside a layout, and named {{{{> ... }}}} placeholders only inside a component template."),
 					*line,
 					*column,
 					context,
 				));
-			}
-			if let Some(body) = &context.body_html {
-				buf.push_str(body);
 			}
 		}
 		InkerNode::Partial(PartialNode { name, line, column, .. }) => {
@@ -267,10 +296,24 @@ fn render_node(
 				};
 				scoped.insert(arg.key.clone(), v);
 			}
+			// Slot content renders in the CALLER scope (Edge semantics: a slot
+			// sees the caller's data, not the component's props) and BEFORE the
+			// component template so the helper tape order matches collect. `body`
+			// is the default slot; each `{% slot 'x' %}` is a named slot.
+			let mut slots: HashMap<String, String> = HashMap::new();
+			let mut body_buf = String::new();
+			render_nodes(&c.body_nodes, data, context, &mut body_buf, depth + 1, tape, cursor)?;
+			slots.insert("body".to_string(), body_buf);
+			for slot in &c.named_slots {
+				let mut slot_buf = String::new();
+				render_nodes(&slot.nodes, data, context, &mut slot_buf, depth + 1, tape, cursor)?;
+				slots.insert(slot.name.clone(), slot_buf);
+			}
 			let scoped_data = Value::Object(scoped);
 			let mut sub_ctx = context.clone();
 			sub_ctx.template_name = Some(c.name.clone());
 			sub_ctx.body_html = None;
+			sub_ctx.component_slots = Some(slots);
 			render_nodes(
 				&component_ast.nodes,
 				&scoped_data,
@@ -281,6 +324,10 @@ fn render_node(
 				cursor,
 			)?;
 		}
+		// `Let` bindings are applied by `render_nodes` (they mutate the sibling
+		// scope, not the buffer); by the time a node reaches `render_node` the
+		// binding is already in scope, so nothing to emit here.
+		InkerNode::Let { .. } => {}
 	}
 	Ok(())
 }
@@ -994,5 +1041,124 @@ mod tests {
 		let ast = parse_template("{% each obj as [k, v] %}{{ k }}={{ v }};{% endeach %}");
 		let data = json!({ "obj": { "a": "1", "__proto__": "bad", "constructor": "bad" } });
 		assert_eq!(render_no_helpers(&ast, &data).unwrap(), "a=1;");
+	}
+
+	// ---- Component body + named slots (Edge slot parity) ----
+
+	fn render_with_components(
+		caller: &InkerAst,
+		data: &Value,
+		components: &[(&str, &InkerAst)],
+	) -> Result<String, InkerError> {
+		let mut ctx = RenderContext::default();
+		for (name, ast) in components {
+			ctx.components
+				.insert(normalize_partial_key(name), (*ast).clone());
+		}
+		render(caller, data, &ctx, &[])
+	}
+
+	#[test]
+	fn component_body_renders_in_default_slot() {
+		let card = parse_template("[{{> body }}]");
+		let page = parse_template("{% component 'card' {} %}HELLO{% endcomponent %}");
+		assert_eq!(
+			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
+			"[HELLO]"
+		);
+	}
+
+	#[test]
+	fn component_named_slots_render_in_place() {
+		let card = parse_template("<h>{{> title }}</h><p>{{> body }}</p>");
+		let page = parse_template(
+			"{% component 'card' {} %}{% slot 'title' %}T{% endslot %}BODY{% endcomponent %}",
+		);
+		assert_eq!(
+			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
+			"<h>T</h><p>BODY</p>"
+		);
+	}
+
+	#[test]
+	fn component_named_slots_declared_out_of_order() {
+		// Slots declared body-text, then 'a', then 'b'; template references b, a.
+		let card = parse_template("{{> b }}|{{> a }}");
+		let page = parse_template(
+			"{% component 'c' {} %}{% slot 'a' %}AA{% endslot %}{% slot 'b' %}BB{% endslot %}{% endcomponent %}",
+		);
+		assert_eq!(
+			render_with_components(&page, &json!({}), &[("c", &card)]).unwrap(),
+			"BB|AA"
+		);
+	}
+
+	#[test]
+	fn component_self_closing_still_renders() {
+		let card = parse_template("<{{ name }}>");
+		let page = parse_template("{% component 'card' { name: who } %}");
+		assert_eq!(
+			render_with_components(&page, &json!({ "who": "x" }), &[("card", &card)]).unwrap(),
+			"<x>"
+		);
+	}
+
+	#[test]
+	fn component_missing_named_slot_renders_empty() {
+		// Template references {{> footer }} but the caller provides no such slot.
+		let card = parse_template("[{{> body }}|{{> footer }}]");
+		let page = parse_template("{% component 'card' {} %}B{% endcomponent %}");
+		assert_eq!(
+			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
+			"[B|]"
+		);
+	}
+
+	#[test]
+	fn component_body_content_is_html_escaped() {
+		// Interpolation inside slot content escapes exactly as anywhere else.
+		let card = parse_template("[{{> body }}]");
+		let page = parse_template("{% component 'card' {} %}{{ danger }}{% endcomponent %}");
+		assert_eq!(
+			render_with_components(
+				&page,
+				&json!({ "danger": "<script>alert(1)</script>" }),
+				&[("card", &card)],
+			)
+			.unwrap(),
+			"[&lt;script&gt;alert(1)&lt;/script&gt;]"
+		);
+	}
+
+	#[test]
+	fn component_slot_sees_caller_scope_not_props() {
+		// `title` exists in the CALLER data; the component prop is `heading`.
+		let card = parse_template("{{ heading }}:{{> body }}");
+		let page = parse_template(
+			"{% component 'card' { heading: 'H' } %}{{ title }}{% endcomponent %}",
+		);
+		assert_eq!(
+			render_with_components(&page, &json!({ "title": "caller" }), &[("card", &card)])
+				.unwrap(),
+			"H:caller"
+		);
+	}
+
+	// ---- elseif chains ----
+
+	#[test]
+	fn elseif_selects_matching_branch() {
+		let ast = parse_template("{% if a %}A{% elseif b %}B{% else %}C{% endif %}");
+		assert_eq!(render_no_helpers(&ast, &json!({ "a": false, "b": true })).unwrap(), "B");
+		assert_eq!(render_no_helpers(&ast, &json!({ "a": true, "b": true })).unwrap(), "A");
+		assert_eq!(render_no_helpers(&ast, &json!({ "a": false, "b": false })).unwrap(), "C");
+	}
+
+	// ---- let bindings ----
+
+	#[test]
+	fn let_binds_for_following_siblings() {
+		let ast = parse_template("{% let x = 5 %}{{ x }}");
+		assert_eq!(render_no_helpers(&ast, &json!({})).unwrap(), "5");
 	}
 }

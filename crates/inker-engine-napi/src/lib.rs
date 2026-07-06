@@ -256,6 +256,14 @@ fn collect_partials(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 					collect_partials(el, out);
 				}
 			}
+			InkerNode::Component(c) => {
+				// A `{% component %}` block body / named slots is caller content
+				// that may `{% include %}` partials — walk it so they pre-load.
+				collect_partials(&c.body_nodes, out);
+				for slot in &c.named_slots {
+					collect_partials(&slot.nodes, out);
+				}
+			}
 			_ => {}
 		}
 	}
@@ -264,11 +272,19 @@ fn collect_partials(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 	for n in nodes {
 		match n {
-			InkerNode::Component(c) => out.push(NodeRefNapi {
-				name: c.name.clone(),
-				line: c.line,
-				column: c.column,
-			}),
+			InkerNode::Component(c) => {
+				out.push(NodeRefNapi {
+					name: c.name.clone(),
+					line: c.line,
+					column: c.column,
+				});
+				// A `{% component %}` block body / named slots is caller content
+				// that may invoke further components — walk it so they pre-load.
+				collect_components(&c.body_nodes, out);
+				for slot in &c.named_slots {
+					collect_components(&slot.nodes, out);
+				}
+			}
 			InkerNode::If {
 				then_nodes,
 				else_nodes,
@@ -364,6 +380,7 @@ fn build_render_context(ctx: RenderContextNapi) -> RenderContext {
 		partials: partials_typed,
 		components: components_typed,
 		body_html: ctx.body_html,
+		component_slots: None,
 	}
 }
 

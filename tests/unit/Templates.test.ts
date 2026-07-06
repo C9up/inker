@@ -359,17 +359,11 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("rejects components containing {{> body }} slot", async () => {
-		write("page", "{% component 'bad' {} %}");
-		write("components/bad", "[{{> body }}]");
+	it("renders a self-closing component whose template has {{> body }} as empty body", async () => {
+		write("page", "{% component 'card' {} %}");
+		write("components/card", "[{{> body }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
-		try {
-			await templates.render("page", {});
-			expect.fail();
-		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
-			expect(err.code).toBe("E_INKER_UNKNOWN_SLOT");
-		}
+		expect(await templates.render("page", {})).toBe("[]");
 	});
 
 	it("rejects path-traversal in component name at parse time", async () => {
@@ -430,5 +424,143 @@ describe("Templates — component resolution (53.3)", () => {
 				users: [{ name: "A" }, { name: "B" }],
 			}),
 		).toBe("[A][B]");
+	});
+
+	// ---- Component slots (edge.js parity) ----
+
+	it("renders a component body into the default {{> body }} slot", async () => {
+		write("page", "{% component 'card' {} %}HELLO{% endcomponent %}");
+		write("components/card", "[{{> body }}]");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("[HELLO]");
+	});
+
+	it("renders named slots at their {{> name }} placeholders", async () => {
+		write(
+			"page",
+			"{% component 'card' {} %}{% slot 'title' %}T{% endslot %}BODY{% endcomponent %}",
+		);
+		write("components/card", "<h>{{> title }}</h><p>{{> body }}</p>");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("<h>T</h><p>BODY</p>");
+	});
+
+	it("maps named slots regardless of declaration order", async () => {
+		write(
+			"page",
+			"{% component 'c' {} %}{% slot 'a' %}AA{% endslot %}{% slot 'b' %}BB{% endslot %}{% endcomponent %}",
+		);
+		write("components/c", "{{> b }}|{{> a }}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("BB|AA");
+	});
+
+	it("renders empty for a {{> name }} placeholder the caller did not fill", async () => {
+		write("page", "{% component 'card' {} %}B{% endcomponent %}");
+		write("components/card", "[{{> body }}|{{> footer }}]");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("[B|]");
+	});
+
+	it("evaluates slot content in the caller scope, not the component props", async () => {
+		write(
+			"page",
+			"{% component 'card' { heading: 'H' } %}{{ title }}{% endcomponent %}",
+		);
+		write("components/card", "{{ heading }}:{{> body }}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", { title: "caller" })).toBe(
+			"H:caller",
+		);
+	});
+
+	it("HTML-escapes interpolations inside slot content", async () => {
+		write("page", "{% component 'card' {} %}{{ danger }}{% endcomponent %}");
+		write("components/card", "[{{> body }}]");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(
+			await templates.render("page", {
+				danger: "<script>alert(1)</script>",
+			}),
+		).toBe("[&lt;script&gt;alert(1)&lt;/script&gt;]");
+	});
+
+	it("renders a component-block nested inside another component's slot body", async () => {
+		// The inner badge uses explicit block form so the balanced-nesting
+		// lookahead binds each {% endcomponent %} to its own {% component %}.
+		write(
+			"page",
+			"{% component 'card' {} %}BEFORE{% component 'badge' { text: 'X' } %}IN{% endcomponent %}AFTER{% endcomponent %}",
+		);
+		write("components/card", "[{{> body }}]");
+		write("components/badge", "<{{ text }}:{{> body }}>");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", {})).toBe("[BEFORE<X:IN>AFTER]");
+	});
+
+	it("throws E_INKER_MISMATCHED_BLOCK_END when {% endcomponent %} closes an open inner block", async () => {
+		// A misplaced / missing endcomponent leaves the inner {% if %} open when
+		// {% endcomponent %} arrives, which is a clear mismatch error.
+		write("page", "{% component 'card' {} %}{% if x %}Y{% endcomponent %}");
+		write("components/card", "[{{> body }}]");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		try {
+			await templates.render("page", { x: true });
+			expect.fail();
+		} catch (e) {
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_MISMATCHED_BLOCK_END",
+			);
+		}
+	});
+
+	it("throws E_INKER_UNMATCHED_BLOCK_END for a stray {% endcomponent %}", async () => {
+		write("page", "{% endcomponent %}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		try {
+			await templates.render("page", {});
+			expect.fail();
+		} catch (e) {
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_UNMATCHED_BLOCK_END",
+			);
+		}
+	});
+
+	it("throws E_INKER_INVALID_EXPRESSION on a duplicate slot name", async () => {
+		write(
+			"page",
+			"{% component 'card' {} %}{% slot 'a' %}1{% endslot %}{% slot 'a' %}2{% endslot %}{% endcomponent %}",
+		);
+		write("components/card", "{{> a }}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		try {
+			await templates.render("page", {});
+			expect.fail();
+		} catch (e) {
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_INVALID_EXPRESSION",
+			);
+		}
+	});
+
+	it("throws E_INKER_UNMATCHED_BLOCK_END for {% slot %} outside a component", async () => {
+		write("page", "{% slot 'a' %}x{% endslot %}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		try {
+			await templates.render("page", {});
+			expect.fail();
+		} catch (e) {
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_UNMATCHED_BLOCK_END",
+			);
+		}
+	});
+
+	it("selects the matching {% elseif %} branch", async () => {
+		write("page", "{% if a %}A{% elseif b %}B{% else %}C{% endif %}");
+		const templates = new Templates({ root, cacheMode: "mtime" });
+		expect(await templates.render("page", { a: false, b: true })).toBe("B");
+		expect(await templates.render("page", { a: false, b: false })).toBe("C");
 	});
 });
