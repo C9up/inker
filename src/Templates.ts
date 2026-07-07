@@ -221,6 +221,24 @@ function assertNotReservedDeviceName(name: string): void {
 	}
 }
 
+/**
+ * Validate a mount disk name (AdonisJS/Edge `edge.mount(name, …)` parity).
+ * A disk name is an identifier-shaped label, NOT a path: it must be non-empty
+ * and contain only `[A-Za-z0-9_-]`. This forbids `::` (the disk separator),
+ * `/` and `\` (path segments), `.`/`..` traversal, and control bytes — a disk
+ * name can never itself become a path component that widens containment.
+ */
+const DISK_NAME_RE = /^[A-Za-z0-9_-]+$/;
+function assertDiskName(diskName: unknown): void {
+	if (typeof diskName !== "string" || !DISK_NAME_RE.test(diskName)) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`Mount disk name must match ${DISK_NAME_RE} (identifier-shaped, no path separators); got ${JSON.stringify(diskName)}`,
+			{ templateName: typeof diskName === "string" ? diskName : undefined },
+		);
+	}
+}
+
 function assertContained(root: string, absPath: string, name: string): void {
 	// P12: case-sensitive `startsWith` breaks on APFS/HFS+/NTFS where
 	// `realpath` canonicalises segment casing — a root like
@@ -586,6 +604,13 @@ export class Templates {
 	#cacheGeneration = 0;
 	readonly #helpers: ReadonlyMap<string, HelperFn>;
 	readonly #helperNames: ReadonlySet<string>;
+	// Named template "disks" (AdonisJS/Edge `edge.mount(name, dir)` parity).
+	// The DEFAULT disk is `#root` (the constructor `root`), addressed by a bare
+	// `template` name; a NAMED disk is addressed as `name::template`. Each value
+	// is a canonicalised absolute root — containment (assertContained + the
+	// #loadAst symlink guard) is enforced against the disk's OWN root, never a
+	// shared one, so mounting a package's templates cannot widen traversal.
+	readonly #disks: Map<string, string> = new Map();
 
 	constructor(options: TemplatesOptions) {
 		this.#root = canonicalizeTemplatesRoot(options.root);
@@ -614,15 +639,75 @@ export class Templates {
 		this.#helperNames = helperNames;
 	}
 
+	/**
+	 * Mount a named templates "disk" (AdonisJS/Edge `edge.mount(name, dir)`
+	 * parity). Templates in a mounted disk are addressed as `name::template`
+	 * (including from `{% layout %}` / `{% include %}` / `{% component %}`
+	 * references); a BARE `template` name always resolves against the default
+	 * root, exactly like Edge. Re-mounting a name overwrites its root. `dir` is
+	 * canonicalised (absolute + realpath) the same way the constructor root is,
+	 * so each disk carries its own containment boundary.
+	 */
+	mount(diskName: string, dir: string): void {
+		assertDiskName(diskName);
+		this.#disks.set(diskName, canonicalizeTemplatesRoot(dir));
+	}
+
+	/**
+	 * Unmount a named disk (AdonisJS/Edge `edge.unmount(name)` parity). No-op if
+	 * the disk was never mounted. Does NOT clear the AST cache — cache keys are
+	 * absolute paths, so a later re-mount of a different directory resolves to
+	 * different keys and cannot serve a stale entry.
+	 */
+	unmount(diskName: string): void {
+		this.#disks.delete(diskName);
+	}
+
+	/**
+	 * Split an optionally-namespaced template name into its resolution root and
+	 * bare (disk-relative) name. `name::path` → the mounted disk's root; a bare
+	 * `path` → the default root. Unknown disk → loud E_INKER_INVALID_PATH.
+	 */
+	#splitDisk(name: string): { root: string; bare: string } {
+		const sep = name.indexOf("::");
+		if (sep === -1) return { root: this.#root, bare: name };
+		const disk = name.slice(0, sep);
+		const bare = name.slice(sep + 2);
+		const root = this.#disks.get(disk);
+		if (root === undefined) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`Unknown templates disk '${disk}' in '${name}' — mount it with Templates#mount('${disk}', dir) first`,
+				{ templateName: name },
+			);
+		}
+		return { root, bare };
+	}
+
+	/**
+	 * Resolve an (optionally `disk::`-prefixed) template name to its disk root,
+	 * validated bare name, and absolute `.inker` path — with per-disk
+	 * containment. `prefix` is prepended to the bare name AFTER the disk split
+	 * (used for `components/` so `disk::button` → `<disk>/components/button`).
+	 */
+	#resolveTemplateFile(
+		name: string,
+		prefix = "",
+	): { root: string; validated: string; absPath: string } {
+		const { root, bare } = this.#splitDisk(name);
+		const validated = validateName(`${prefix}${bare}`);
+		const absPath = path.join(root, `${validated}.inker`);
+		assertContained(root, absPath, validated);
+		return { root, validated, absPath };
+	}
+
 	async render(
 		name: string,
 		data: Readonly<Record<string, unknown>>,
 	): Promise<string> {
-		const validated = validateName(name);
-		const absPath = path.join(this.#root, `${validated}.inker`);
-		assertContained(this.#root, absPath, validated);
+		const { root, validated, absPath } = this.#resolveTemplateFile(name);
 
-		const entryAst = await this.#loadAst(absPath, validated);
+		const entryAst = await this.#loadAst(absPath, validated, root);
 		const composed = await this.#compose(
 			entryAst,
 			validated,
@@ -829,11 +914,12 @@ export class Templates {
 	async #loadAst(
 		absPath: string,
 		validatedName: string,
+		root: string,
 	): Promise<NapiInkerAst> {
 		const inflight = this.#inflight.get(absPath);
 		if (inflight !== undefined) return inflight;
 
-		const promise = this.#loadAstUncached(absPath, validatedName);
+		const promise = this.#loadAstUncached(absPath, validatedName, root);
 		this.#inflight.set(absPath, promise);
 		try {
 			return await promise;
@@ -845,6 +931,7 @@ export class Templates {
 	async #loadAstUncached(
 		absPath: string,
 		validatedName: string,
+		root: string,
 	): Promise<NapiInkerAst> {
 		// T7: snapshot the cache generation. If clearCache() runs while this
 		// load is in flight, the snapshot will diverge from #cacheGeneration
@@ -912,11 +999,11 @@ export class Templates {
 				throw wrapFsError(cause, absPath, validatedName);
 			}
 			if (realPath !== absPath) {
-				const rel = path.relative(this.#root, realPath);
+				const rel = path.relative(root, realPath);
 				if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
 					throw new InkerRenderError(
 						"E_INKER_INVALID_PATH",
-						`Resolved template path escapes the templates root via symlink: ${realPath} is outside ${this.#root}`,
+						`Resolved template path escapes the templates root via symlink: ${realPath} is outside ${root}`,
 						{ templatePath: realPath, templateName: validatedName },
 					);
 				}
@@ -1020,9 +1107,11 @@ export class Templates {
 		}
 		const layoutLine = entryInfo.layoutLine ?? undefined;
 		const layoutColumn = entryInfo.layoutColumn ?? undefined;
-		const layoutValidated = validateName(layoutName);
-		const layoutAbsPath = path.join(this.#root, `${layoutValidated}.inker`);
-		assertContained(this.#root, layoutAbsPath, layoutValidated);
+		const {
+			root: layoutRoot,
+			validated: layoutValidated,
+			absPath: layoutAbsPath,
+		} = this.#resolveTemplateFile(layoutName);
 
 		if (includeStack.has(layoutAbsPath)) {
 			throw new InkerRenderError(
@@ -1040,7 +1129,11 @@ export class Templates {
 		includeStack.add(layoutAbsPath);
 		let layoutAst: NapiInkerAst;
 		try {
-			layoutAst = await this.#loadAst(layoutAbsPath, layoutValidated);
+			layoutAst = await this.#loadAst(
+				layoutAbsPath,
+				layoutValidated,
+				layoutRoot,
+			);
 		} catch (e) {
 			includeStack.delete(layoutAbsPath);
 			throw e;
@@ -1129,9 +1222,11 @@ export class Templates {
 		hostAbsPath: string,
 	): Promise<void> {
 		for (const node of refs) {
-			const partialValidated = validateName(node.name);
-			const partialAbsPath = path.join(this.#root, `${partialValidated}.inker`);
-			assertContained(this.#root, partialAbsPath, partialValidated);
+			const {
+				root: partialRoot,
+				validated: partialValidated,
+				absPath: partialAbsPath,
+			} = this.#resolveTemplateFile(node.name);
 			const partialKey = normalizePartialKey(node.name);
 
 			if (includeStack.has(partialAbsPath)) {
@@ -1155,7 +1250,11 @@ export class Templates {
 			includeStack.add(partialAbsPath);
 			let partialAst: NapiInkerAst;
 			try {
-				partialAst = await this.#loadAst(partialAbsPath, partialValidated);
+				partialAst = await this.#loadAst(
+					partialAbsPath,
+					partialValidated,
+					partialRoot,
+				);
 			} catch (e) {
 				includeStack.delete(partialAbsPath);
 				throw e;
@@ -1223,13 +1322,14 @@ export class Templates {
 		hostAbsPath: string,
 	): Promise<void> {
 		for (const node of refs) {
-			const componentName = `components/${node.name}`;
-			const componentValidated = validateName(componentName);
-			const componentAbsPath = path.join(
-				this.#root,
-				`${componentValidated}.inker`,
-			);
-			assertContained(this.#root, componentAbsPath, componentValidated);
+			// Split the optional `disk::` prefix off FIRST, then prepend the
+			// `components/` directory to the bare name so `disk::button` resolves
+			// to `<disk>/components/button.inker`, not `<default>/components/disk::button`.
+			const {
+				root: componentRoot,
+				validated: componentValidated,
+				absPath: componentAbsPath,
+			} = this.#resolveTemplateFile(node.name, "components/");
 			const componentKey = normalizePartialKey(node.name);
 
 			if (includeStack.has(componentAbsPath)) {
@@ -1255,6 +1355,7 @@ export class Templates {
 				componentAst = await this.#loadAst(
 					componentAbsPath,
 					componentValidated,
+					componentRoot,
 				);
 			} catch (e) {
 				includeStack.delete(componentAbsPath);

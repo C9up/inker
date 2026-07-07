@@ -48,6 +48,21 @@ export class InkerRenderer {
 		return this.#als.run(ctx, () => this.#templates.render(name, data));
 	}
 
+	/**
+	 * Mount a named templates disk on the shared engine (AdonisJS/Edge
+	 * `edge.mount(name, dir)` parity). A package that ships its own templates
+	 * mounts its directory under a namespace, then renders `name::template`.
+	 * Delegates to the underlying `Templates` engine.
+	 */
+	mount(diskName: string, dir: string): void {
+		this.#templates.mount(diskName, dir);
+	}
+
+	/** Unmount a named disk (`edge.unmount(name)` parity). Delegates to Templates. */
+	unmount(diskName: string): void {
+		this.#templates.unmount(diskName);
+	}
+
 	/** @internal Test seam — access the underlying Templates for cache control. */
 	get _templates(): Templates {
 		return this.#templates;
