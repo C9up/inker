@@ -200,6 +200,19 @@ function assertSafePathShape(name: string): void {
 			{ templateName: name },
 		);
 	}
+	// A bare (post-`#splitDisk`) template name never legitimately contains `:`.
+	// The drive-letter guard above only catches a leading `[A-Za-z]:`; a residual
+	// separator such as `1::b` (digit-led, so it slips that guard) would otherwise
+	// reach `path.join` and, on Windows NTFS, be reinterpreted as an alternate-
+	// data-stream reference — a cross-platform resolution divergence. `:` is
+	// already reserved as the `::` disk separator, so forbid it outright here.
+	if (name.includes(":")) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`Template name cannot contain ':' characters; got ${JSON.stringify(name)}`,
+			{ templateName: name },
+		);
+	}
 }
 
 /**
@@ -656,8 +669,9 @@ export class Templates {
 	/**
 	 * Unmount a named disk (AdonisJS/Edge `edge.unmount(name)` parity). No-op if
 	 * the disk was never mounted. Does NOT clear the AST cache — cache keys are
-	 * absolute paths, so a later re-mount of a different directory resolves to
-	 * different keys and cannot serve a stale entry.
+	 * `(root, absPath)` pairs, so a later re-mount of a different directory
+	 * resolves under a different root and cannot serve a stale entry, even when
+	 * two directories canonicalise to overlapping absolute paths.
 	 */
 	unmount(diskName: string): void {
 		this.#disks.delete(diskName);
@@ -916,15 +930,22 @@ export class Templates {
 		validatedName: string,
 		root: string,
 	): Promise<NapiInkerAst> {
-		const inflight = this.#inflight.get(absPath);
+		// Key the cache/inflight maps by the resolving disk's root AND the
+		// absolute path, not the path alone. Two disks with overlapping roots
+		// can resolve the SAME absPath; keying by path alone would let disk A's
+		// entry (which passed containment against A's root) be served to disk B
+		// on a cache hit — bypassing B's symlink-containment check, which only
+		// runs on a cache MISS. The compound key isolates each disk's cache.
+		const cacheKey = `${root}\u0000${absPath}`;
+		const inflight = this.#inflight.get(cacheKey);
 		if (inflight !== undefined) return inflight;
 
 		const promise = this.#loadAstUncached(absPath, validatedName, root);
-		this.#inflight.set(absPath, promise);
+		this.#inflight.set(cacheKey, promise);
 		try {
 			return await promise;
 		} finally {
-			this.#inflight.delete(absPath);
+			this.#inflight.delete(cacheKey);
 		}
 	}
 
@@ -938,7 +959,9 @@ export class Templates {
 		// at write-back time, and we'll skip the cache.set() to avoid
 		// silently restoring a stale AST after operator invalidation.
 		const loadGeneration = this.#cacheGeneration;
-		const cached = this.#cache.get(absPath);
+		// Same compound (root, absPath) key as #loadAst — see the note there.
+		const cacheKey = `${root}\u0000${absPath}`;
+		const cached = this.#cache.get(cacheKey);
 
 		if (this.#cacheMode === "never" && cached !== undefined) {
 			return cached.ast;
@@ -1033,7 +1056,7 @@ export class Templates {
 		// clearCache() was called during the await chain above, the new
 		// generation discards this write — the next render() starts fresh.
 		if (this.#cacheGeneration === loadGeneration) {
-			this.#cache.set(absPath, { ast, mtimeMs: currentMtime });
+			this.#cache.set(cacheKey, { ast, mtimeMs: currentMtime });
 		}
 		return ast;
 	}
