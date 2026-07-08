@@ -14,8 +14,8 @@
  *
  * `RESERVED_BINDING_NAMES` blocks identifiers that would collide with
  * Inker grammar keywords (e.g. `as`) or JavaScript reserved words when
- * used as `{% each items as <name> %}` bindings or `{% each items as
- * [<a>, <b>] %}` destructured names. The block is per-position rather
+ * used as `@each(<name> in items)` bindings or `@each(items as
+ * [<a>, <b>])` destructured names. The block is per-position rather
  * than universal — Inker permits these names inside path expressions
  * since paths cannot collide with the grammar.
  */

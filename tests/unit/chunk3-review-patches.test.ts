@@ -31,8 +31,8 @@ describe("chunk3 review patches", () => {
 	// T2 hardens normalizePartialKey defensively for direct-AST callers, so
 	// the parser-error path is also acceptable.
 	describe("T2 — normalizePartialKey defense-in-depth (parser already rejects)", () => {
-		it("`{% include './' %}` is rejected (by parser OR by normalizer)", async () => {
-			write(root, "index.inker", "{% include './' %}");
+		it("`@include('./')` is rejected (by parser OR by normalizer)", async () => {
+			write(root, "index.inker", "@include('./')");
 			const tpl = new Templates({ root });
 			try {
 				await tpl.render("index", {});
@@ -82,9 +82,9 @@ describe("chunk3 review patches", () => {
 
 	// T4 — BOM strip in both disk-load and renderString paths
 	describe("T4 — BOM is stripped from source", () => {
-		it("BOM-prefixed template still parses `{% layout %}` as layout", async () => {
+		it("BOM-prefixed template still parses `@layout()` as layout", async () => {
 			write(root, "layouts/main.inker", "<html>{{> body }}</html>");
-			write(root, "page.inker", "﻿{% layout 'layouts/main' %}HELLO");
+			write(root, "page.inker", "﻿@layout('layouts/main')HELLO");
 			const tpl = new Templates({ root });
 			const html = await tpl.render("page", {});
 			expect(html).toBe("<html>HELLO</html>");
@@ -98,15 +98,15 @@ describe("chunk3 review patches", () => {
 		});
 	});
 
-	// T5 — duplicate `{% layout %}` in body throws
+	// T5 — duplicate `@layout()` in body throws
 	describe("T5 — duplicate layout in body is rejected", () => {
-		it("throws E_INKER_DUPLICATE_LAYOUT for a second `{% layout %}`", async () => {
+		it("throws E_INKER_DUPLICATE_LAYOUT for a second `@layout()`", async () => {
 			write(root, "layouts/a.inker", "<a>{{> body }}</a>");
 			write(root, "layouts/b.inker", "<b>{{> body }}</b>");
 			write(
 				root,
 				"page.inker",
-				"{% layout 'layouts/a' %}body{% layout 'layouts/b' %}",
+				"@layout('layouts/a')body@layout('layouts/b')",
 			);
 			const tpl = new Templates({ root });
 			try {
@@ -121,7 +121,7 @@ describe("chunk3 review patches", () => {
 
 		it("a single layout still works", async () => {
 			write(root, "layouts/a.inker", "<a>{{> body }}</a>");
-			write(root, "page.inker", "{% layout 'layouts/a' %}body");
+			write(root, "page.inker", "@layout('layouts/a')body");
 			const tpl = new Templates({ root });
 			expect(await tpl.render("page", {})).toBe("<a>body</a>");
 		});
@@ -324,7 +324,7 @@ describe("chunk3 review patches", () => {
 		it("still detects a Partial node under nested If", () => {
 			const tpl = new Templates({ root });
 			try {
-				tpl.renderString("{% if true %}{% include 'foo' %}{% endif %}", {});
+				tpl.renderString("@if(true)@include('foo')@endif", {});
 				expect.fail("should have thrown");
 			} catch (e) {
 				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_REQUIRED");
@@ -335,7 +335,7 @@ describe("chunk3 review patches", () => {
 			const tpl = new Templates({ root });
 			try {
 				tpl.renderString(
-					"{% each xs as x %}{% component 'card' { x: x } %}{% endeach %}",
+					"@each(x in xs)@component('card', { x: x })@endeach",
 					{ xs: [1] },
 				);
 				expect.fail("should have thrown");

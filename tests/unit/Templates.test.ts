@@ -118,10 +118,10 @@ describe("Templates — render() filesystem behaviour", () => {
 		expect(templates.renderString("{{ 100 }}", {})).toBe("100");
 	});
 
-	it("renderString throws E_INKER_DISK_REQUIRED on {% layout %}", () => {
+	it("renderString throws E_INKER_DISK_REQUIRED on @layout()", () => {
 		const templates = new Templates({ root });
 		try {
-			templates.renderString("{% layout 'main' %}hi", {});
+			templates.renderString("@layout('main')hi", {});
 			expect.fail("should have thrown");
 		} catch (e) {
 			const err = asTyped<InkerRenderError>(e);
@@ -130,10 +130,10 @@ describe("Templates — render() filesystem behaviour", () => {
 		}
 	});
 
-	it("renderString throws E_INKER_DISK_REQUIRED on {% include %}", () => {
+	it("renderString throws E_INKER_DISK_REQUIRED on @include()", () => {
 		const templates = new Templates({ root });
 		try {
-			templates.renderString("{% include 'partials/x' %}", {});
+			templates.renderString("@include('partials/x')", {});
 			expect.fail("should have thrown");
 		} catch (e) {
 			const err = asTyped<InkerRenderError>(e);
@@ -255,14 +255,14 @@ describe("Templates — cache semantics", () => {
 		const layout = path.join(root, "main.inker");
 		const child = path.join(root, "child.inker");
 		fs.writeFileSync(layout, "<L1>{{> body }}</L1>");
-		fs.writeFileSync(child, "{% layout 'main' %}<p>old</p>");
+		fs.writeFileSync(child, "@layout('main')<p>old</p>");
 		vi.stubEnv("NODE_ENV", "production");
 		const templates = new Templates({ root });
 
 		expect(await templates.render("child", {})).toBe("<L1><p>old</p></L1>");
 
 		fs.writeFileSync(layout, "<L2>{{> body }}</L2>");
-		fs.writeFileSync(child, "{% layout 'main' %}<p>new</p>");
+		fs.writeFileSync(child, "@layout('main')<p>new</p>");
 		bumpMtime(layout, 10);
 		bumpMtime(child, 10);
 
@@ -310,7 +310,7 @@ describe("Templates — component resolution (53.3)", () => {
 	}
 
 	it("resolves a component under components/<name>.inker", async () => {
-		write("page", "{% component 'card' { title: page.title } %}");
+		write("page", "@component('card', { title: page.title })");
 		write("components/card", "[{{ title }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { page: { title: "Hi" } })).toBe(
@@ -319,7 +319,7 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("isolates component scope — parent data NOT visible (D7)", async () => {
-		write("page", "{% component 'card' {} %}");
+		write("page", "@component('card', {})");
 		write("components/card", "[{{ user.name }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -333,8 +333,8 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("detects component circular includes (card → card)", async () => {
-		write("page", "{% component 'card' {} %}");
-		write("components/card", "{% component 'card' {} %}");
+		write("page", "@component('card', {})");
+		write("components/card", "@component('card', {})");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -345,9 +345,9 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("rejects components containing {% layout %}", async () => {
-		write("page", "{% component 'bad' {} %}");
-		write("components/bad", "{% layout 'main' %}\nx");
+	it("rejects components containing @layout()", async () => {
+		write("page", "@component('bad', {})");
+		write("components/bad", "@layout('main')\nx");
 		write("main", "{{> body }}");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -360,14 +360,14 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("renders a self-closing component whose template has {{> body }} as empty body", async () => {
-		write("page", "{% component 'card' {} %}");
+		write("page", "@component('card', {})");
 		write("components/card", "[{{> body }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe("[]");
 	});
 
 	it("rejects path-traversal in component name at parse time", async () => {
-		write("page", "{% component '../etc/passwd' {} %}");
+		write("page", "@component('../etc/passwd', {})");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -378,8 +378,8 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("renders a component nested in a partial", async () => {
-		write("page", "{% include 'partials/widget' %}");
-		write("partials/widget", "W[{% component 'card' { name: page.name } %}]");
+		write("page", "@include('partials/widget')");
+		write("partials/widget", "W[@component('card', { name: page.name })]");
 		write("components/card", "<{{ name }}>");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { page: { name: "Bob" } })).toBe(
@@ -390,8 +390,8 @@ describe("Templates — component resolution (53.3)", () => {
 	// Audit 2026-06-13: the mirror of the test above — a partial included INSIDE a
 	// component was never pre-loaded, so render threw E_INKER_DISK_REQUIRED.
 	it("renders a partial included inside a component (pre-loaded, no DISK_REQUIRED)", async () => {
-		write("page", "{% component 'card' {} %}");
-		write("components/card", "C[{% include 'partials/badge' %}]");
+		write("page", "@component('card', {})");
+		write("components/card", "C[@include('partials/badge')]");
 		write("partials/badge", "BADGE");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe("C[BADGE]");
@@ -399,7 +399,7 @@ describe("Templates — component resolution (53.3)", () => {
 
 	it("component cache hits use mtime — re-renders after bumpMtime", async () => {
 		const file = write("components/card", "[{{ title }}]");
-		write("page", "{% component 'card' { title: page.title } %}");
+		write("page", "@component('card', { title: page.title })");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { page: { title: "v1" } })).toBe(
 			"[v1]",
@@ -415,7 +415,7 @@ describe("Templates — component resolution (53.3)", () => {
 	it("renders a component inside an each loop with per-iter data scope", async () => {
 		write(
 			"page",
-			"{% each users as user %}{% component 'card' { name: user.name } %}{% endeach %}",
+			"@each(user in users)@component('card', { name: user.name })@endeach",
 		);
 		write("components/card", "[{{ name }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -429,7 +429,7 @@ describe("Templates — component resolution (53.3)", () => {
 	// ---- Component slots (edge.js parity) ----
 
 	it("renders a component body into the default {{> body }} slot", async () => {
-		write("page", "{% component 'card' {} %}HELLO{% endcomponent %}");
+		write("page", "@component('card', {})HELLO@endcomponent");
 		write("components/card", "[{{> body }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe("[HELLO]");
@@ -438,7 +438,7 @@ describe("Templates — component resolution (53.3)", () => {
 	it("renders named slots at their {{> name }} placeholders", async () => {
 		write(
 			"page",
-			"{% component 'card' {} %}{% slot 'title' %}T{% endslot %}BODY{% endcomponent %}",
+			"@component('card', {})@slot('title')T@endslot\nBODY@endcomponent",
 		);
 		write("components/card", "<h>{{> title }}</h><p>{{> body }}</p>");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -448,7 +448,7 @@ describe("Templates — component resolution (53.3)", () => {
 	it("maps named slots regardless of declaration order", async () => {
 		write(
 			"page",
-			"{% component 'c' {} %}{% slot 'a' %}AA{% endslot %}{% slot 'b' %}BB{% endslot %}{% endcomponent %}",
+			"@component('c', {})@slot('a')AA@endslot@slot('b')BB@endslot@endcomponent",
 		);
 		write("components/c", "{{> b }}|{{> a }}");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -456,7 +456,7 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("renders empty for a {{> name }} placeholder the caller did not fill", async () => {
-		write("page", "{% component 'card' {} %}B{% endcomponent %}");
+		write("page", "@component('card', {})B@endcomponent");
 		write("components/card", "[{{> body }}|{{> footer }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe("[B|]");
@@ -465,7 +465,7 @@ describe("Templates — component resolution (53.3)", () => {
 	it("evaluates slot content in the caller scope, not the component props", async () => {
 		write(
 			"page",
-			"{% component 'card' { heading: 'H' } %}{{ title }}{% endcomponent %}",
+			"@component('card', { heading: 'H' }){{ title }}@endcomponent",
 		);
 		write("components/card", "{{ heading }}:{{> body }}");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -475,7 +475,7 @@ describe("Templates — component resolution (53.3)", () => {
 	});
 
 	it("HTML-escapes interpolations inside slot content", async () => {
-		write("page", "{% component 'card' {} %}{{ danger }}{% endcomponent %}");
+		write("page", "@component('card', {}){{ danger }}@endcomponent");
 		write("components/card", "[{{> body }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(
@@ -487,10 +487,10 @@ describe("Templates — component resolution (53.3)", () => {
 
 	it("renders a component-block nested inside another component's slot body", async () => {
 		// The inner badge uses explicit block form so the balanced-nesting
-		// lookahead binds each {% endcomponent %} to its own {% component %}.
+		// lookahead binds each @endcomponent to its own @component().
 		write(
 			"page",
-			"{% component 'card' {} %}BEFORE{% component 'badge' { text: 'X' } %}IN{% endcomponent %}AFTER{% endcomponent %}",
+			"@component('card', {})BEFORE@component('badge', { text: 'X' })IN@endcomponent\nAFTER@endcomponent",
 		);
 		write("components/card", "[{{> body }}]");
 		write("components/badge", "<{{ text }}:{{> body }}>");
@@ -498,10 +498,10 @@ describe("Templates — component resolution (53.3)", () => {
 		expect(await templates.render("page", {})).toBe("[BEFORE<X:IN>AFTER]");
 	});
 
-	it("throws E_INKER_MISMATCHED_BLOCK_END when {% endcomponent %} closes an open inner block", async () => {
-		// A misplaced / missing endcomponent leaves the inner {% if %} open when
-		// {% endcomponent %} arrives, which is a clear mismatch error.
-		write("page", "{% component 'card' {} %}{% if x %}Y{% endcomponent %}");
+	it("throws E_INKER_MISMATCHED_BLOCK_END when @endcomponent closes an open inner block", async () => {
+		// A misplaced / missing endcomponent leaves the inner @if() open when
+		// @endcomponent arrives, which is a clear mismatch error.
+		write("page", "@component('card', {})@if(x)Y@endcomponent");
 		write("components/card", "[{{> body }}]");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -514,8 +514,8 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("throws E_INKER_UNMATCHED_BLOCK_END for a stray {% endcomponent %}", async () => {
-		write("page", "{% endcomponent %}");
+	it("throws E_INKER_UNMATCHED_BLOCK_END for a stray @endcomponent", async () => {
+		write("page", "@endcomponent");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -530,7 +530,7 @@ describe("Templates — component resolution (53.3)", () => {
 	it("throws E_INKER_INVALID_EXPRESSION on a duplicate slot name", async () => {
 		write(
 			"page",
-			"{% component 'card' {} %}{% slot 'a' %}1{% endslot %}{% slot 'a' %}2{% endslot %}{% endcomponent %}",
+			"@component('card', {})@slot('a')1@endslot@slot('a')2@endslot@endcomponent",
 		);
 		write("components/card", "{{> a }}");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -544,8 +544,8 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("throws E_INKER_UNMATCHED_BLOCK_END for {% slot %} outside a component", async () => {
-		write("page", "{% slot 'a' %}x{% endslot %}");
+	it("throws E_INKER_UNMATCHED_BLOCK_END for @slot() outside a component", async () => {
+		write("page", "@slot('a')x@endslot");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -557,8 +557,8 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("selects the matching {% elseif %} branch", async () => {
-		write("page", "{% if a %}A{% elseif b %}B{% else %}C{% endif %}");
+	it("selects the matching @elseif() branch", async () => {
+		write("page", "@if(a)A@elseif(b)B@else\nC@endif");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { a: false, b: true })).toBe("B");
 		expect(await templates.render("page", { a: false, b: false })).toBe("C");

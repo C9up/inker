@@ -1,20 +1,26 @@
-//! Tokenizer — mirrors `packages/inker/src/lex.ts` 1:1.
+//! Tokenizer — Edge-syntax control flow (Epic 62 / story 62.1).
 //!
 //! Produces five token kinds:
 //!   - `Text` — verbatim source between control structures.
-//!   - `InterpEscaped` — `{{ expr }}` (escape-by-default).
+//!   - `InterpEscaped` — `{{ expr }}` (escape-by-default; trim markers `{{- -}}`).
 //!   - `InterpRaw` — `{{{ expr }}}` (raw HTML pass-through).
-//!   - `BlockTag` — `{% ... %}` (raw inner kept for parseBlockTag.rs).
+//!   - `BlockTag` — `@keyword(args)` / `@keyword` / `@endkeyword` / `@!component(args)`
+//!     (Edge `@`-tags; the un-`@`ed, paren-unwrapped inner `keyword args` is kept
+//!     for parse_block_tag.rs). `@...` is no longer recognised.
 //!   - `SlotPlaceholder` — `{{> name }}` (layout body slot).
 //!
-//! Position tracking matches the TS impl character-by-character. Templates are
-//! ASCII-heavy, so char-count and UTF-16-code-unit-count diverge only on
-//! non-BMP scalars (4-byte emoji etc.) — accepted divergence per AC18 / DNR
-//! `feedback_no_drift_noise`; the byte-parity suite uses ASCII fixtures.
+//! `@`-tag disambiguation follows Edge: `@word` is a block tag ONLY when `word`
+//! (or `!word` / `endword`) is a known block keyword; any other `@…` (CSS
+//! `@media`/`@keyframes`, `me@example.com`, JS `@decorator`) is literal text.
 //!
-//! Backslash-escapes recognise `\{{`, `\}}`, `\{%`, `\%}` (3 chars consumed,
-//! 2-char literal emitted into the surrounding text). All other backslashes
-//! pass through unchanged.
+//! Escapes (Edge parity): `@@` → literal `@`; `@{{` → literal `{{` (suppresses the
+//! interpolation). The old backslash escapes (`\{{`, `\}}`, `\@`,(`\)`) are gone —
+//! `@`/`` are ordinary text now and need no escaping.
+//!
+//! Position tracking is character-by-character. Templates are ASCII-heavy, so
+//! char-count and UTF-16-code-unit-count diverge only on non-BMP scalars (4-byte
+//! emoji etc.) — accepted divergence per DNR `feedback_no_drift_noise`; the
+//! byte-parity suite uses ASCII fixtures.
 
 use crate::error::{ErrorCode, InkerError};
 use once_cell::sync::Lazy;
@@ -80,6 +86,44 @@ fn advance(cursor: &mut Cursor, ch: char) {
 	}
 }
 
+/// Block-tag keywords recognised at the `@` sigil. `@word` is a tag ONLY when
+/// `word` is in this set (Edge parity — everything else, incl. CSS `@media` and
+/// e-mail `@host`, is literal text). `section`/`endsection`/`super` are listed so
+/// `@section` lexes as a tag and the PARSER rejects it cleanly (reserved for the
+/// 62.3 layout-model story) rather than leaking through as text.
+fn is_block_keyword(word: &str) -> bool {
+	matches!(
+		word,
+		"if" | "elseif"
+			| "else" | "endif"
+			| "unless" | "endunless"
+			| "each" | "endeach"
+			| "let" | "include"
+			| "includeIf" | "component"
+			| "endcomponent" | "slot"
+			| "endslot" | "layout"
+			| "section" | "endsection"
+			| "super"
+	)
+}
+
+/// Read an ASCII identifier (`[A-Za-z][A-Za-z0-9]*`) starting at `i`. Returns the
+/// word and the index one past its last char. Used to peek the keyword after an
+/// `@` (or `@!`) sigil. Empty when `chars[i]` is not an identifier start.
+fn read_ident(chars: &[char], i: usize) -> (String, usize) {
+	let len = chars.len();
+	let mut j = i;
+	if j >= len || !(chars[j].is_ascii_alphabetic() || chars[j] == '_') {
+		return (String::new(), i);
+	}
+	let mut out = String::new();
+	while j < len && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+		out.push(chars[j]);
+		j += 1;
+	}
+	(out, j)
+}
+
 // The `flush_text!` macro reassigns the text-start cursor after every flush so
 // the NEXT text run starts at the right position; on the final flush (after the
 // loop) that reassignment is legitimately dead. Suppress the macro-generated
@@ -97,6 +141,9 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 	let mut text_start_line = cursor.line;
 	let mut text_start_column = cursor.column;
 	let mut text_buf = String::new();
+	// Set by a right-trim interpolation `{{ … -}}`; trims the leading whitespace
+	// of the following text run (Edge whitespace-control parity).
+	let mut trim_pending_left = false;
 
 	macro_rules! flush_text {
 		($cursor:expr, $start_line:expr, $start_col:expr, $buf:expr, $toks:expr) => {{
@@ -113,44 +160,160 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 	}
 
 	while i < len {
+		// Right-trim carry-over from a `{{ … -}}`: swallow the leading whitespace
+		// of this text run before doing anything else.
+		if trim_pending_left {
+			while i < len
+				&& (chars[i] == ' '
+					|| chars[i] == '\t'
+					|| chars[i] == '\r'
+					|| chars[i] == '\n')
+			{
+				advance(&mut cursor, chars[i]);
+				i += 1;
+			}
+			trim_pending_left = false;
+			text_start_line = cursor.line;
+			text_start_column = cursor.column;
+			if i >= len {
+				break;
+			}
+		}
 		let ch = chars[i];
 
-		// Backslash escapes for {{, }}, {%, %}
-		if ch == '\\' && i + 2 < len {
-			let next = chars[i + 1];
-			let after = chars[i + 2];
-			if next == '{' && after == '{' {
+		// Edge `@` sigil: escapes (`@@`, `@{{`) + block tags (`@keyword(args)`,
+		// `@keyword`, `@endkeyword`, `@!component(args)`). A `@word` that is not a
+		// known block keyword is literal text (falls through below).
+		if ch == '@' {
+			// `@@` → literal `@`.
+			if i + 1 < len && chars[i + 1] == '@' {
+				text_buf.push('@');
+				advance(&mut cursor, '@');
+				advance(&mut cursor, '@');
+				i += 2;
+				continue;
+			}
+			// `@{{` → literal `{{` (suppress interpolation).
+			if i + 2 < len && chars[i + 1] == '{' && chars[i + 2] == '{' {
 				text_buf.push_str("{{");
-				advance(&mut cursor, '\\');
+				advance(&mut cursor, '@');
 				advance(&mut cursor, '{');
 				advance(&mut cursor, '{');
 				i += 3;
 				continue;
 			}
-			if next == '}' && after == '}' {
-				text_buf.push_str("}}");
-				advance(&mut cursor, '\\');
-				advance(&mut cursor, '}');
-				advance(&mut cursor, '}');
-				i += 3;
+			// `@[!]keyword` — a block tag only when `keyword` is known.
+			let self_closing = i + 1 < len && chars[i + 1] == '!';
+			let word_start = if self_closing { i + 2 } else { i + 1 };
+			let (word, after_word) = read_ident(&chars, word_start);
+			// `@!` is only valid for `component`; `@!other` is literal.
+			if !word.is_empty()
+				&& is_block_keyword(&word)
+				&& (!self_closing || word == "component")
+			{
+				flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
+				let open_line = cursor.line;
+				let open_column = cursor.column;
+				// Advance over `@`, optional `!`, and the keyword chars.
+				while i < after_word {
+					advance(&mut cursor, chars[i]);
+					i += 1;
+				}
+				// Optional balanced `( … )` argument span (string-aware + nested).
+				let mut args = String::new();
+				if i < len && chars[i] == '(' {
+					advance(&mut cursor, '(');
+					i += 1;
+					let mut depth = 1usize;
+					let mut string_delim: Option<char> = None;
+					let mut closed = false;
+					while i < len {
+						let c = chars[i];
+						if let Some(d) = string_delim {
+							if c == '\\' && i + 1 < len {
+								args.push(c);
+								args.push(chars[i + 1]);
+								advance(&mut cursor, c);
+								advance(&mut cursor, chars[i + 1]);
+								i += 2;
+								continue;
+							}
+							if c == d {
+								string_delim = None;
+							}
+							args.push(c);
+							advance(&mut cursor, c);
+							i += 1;
+							continue;
+						}
+						if c == '"' || c == '\'' {
+							string_delim = Some(c);
+							args.push(c);
+							advance(&mut cursor, c);
+							i += 1;
+							continue;
+						}
+						if c == '(' {
+							depth += 1;
+						} else if c == ')' {
+							depth -= 1;
+							if depth == 0 {
+								advance(&mut cursor, ')');
+								i += 1;
+								closed = true;
+								break;
+							}
+						}
+						args.push(c);
+						advance(&mut cursor, c);
+						i += 1;
+					}
+					if !closed {
+						return Err(make_err(
+							ErrorCode::UnclosedBlockTag,
+							format!(
+								"Unclosed '@{}(' at line {}, column {}",
+								word, open_line, open_column
+							),
+							open_line,
+							open_column,
+							options,
+						));
+					}
+				}
+				// Reconstruct the `raw` parse_block_tag expects: `[!]keyword args`,
+				// args paren-unwrapped + trimmed. Self-closing component keeps `!`.
+				let kw = if self_closing {
+					format!("!{word}")
+				} else {
+					word.clone()
+				};
+				let args_trimmed = args.trim();
+				let raw = if args_trimmed.is_empty() {
+					kw
+				} else {
+					format!("{kw} {args_trimmed}")
+				};
+				tokens.push(Token::BlockTag {
+					raw,
+					line: open_line,
+					column: open_column,
+				});
+				// Edge trims ONE newline immediately after a block tag, so a tag on
+				// its own line injects no blank line into the output.
+				if i < len && chars[i] == '\r' {
+					advance(&mut cursor, '\r');
+					i += 1;
+				}
+				if i < len && chars[i] == '\n' {
+					advance(&mut cursor, '\n');
+					i += 1;
+				}
+				text_start_line = cursor.line;
+				text_start_column = cursor.column;
 				continue;
 			}
-			if next == '{' && after == '%' {
-				text_buf.push_str("{%");
-				advance(&mut cursor, '\\');
-				advance(&mut cursor, '{');
-				advance(&mut cursor, '%');
-				i += 3;
-				continue;
-			}
-			if next == '%' && after == '}' {
-				text_buf.push_str("%}");
-				advance(&mut cursor, '\\');
-				advance(&mut cursor, '%');
-				advance(&mut cursor, '}');
-				i += 3;
-				continue;
-			}
+			// Not a known tag — `@` is literal; fall through to text accumulation.
 		}
 
 		// Comment: {{-- ... --}} (Edge parity). Stripped entirely — emits no
@@ -208,88 +371,8 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 			continue;
 		}
 
-		// Block tag open: {% ... %}
-		if ch == '{' && i + 1 < len && chars[i + 1] == '%' {
-			flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
-			let open_line = cursor.line;
-			let open_column = cursor.column;
-
-			advance(&mut cursor, '{');
-			advance(&mut cursor, '%');
-			i += 2;
-
-			let mut inner = String::new();
-			let mut closed = false;
-			let mut string_delim: Option<char> = None;
-			while i < len {
-				let c = chars[i];
-				if string_delim.is_none() {
-					if c == '%' && i + 1 < len && chars[i + 1] == '}' {
-						advance(&mut cursor, '%');
-						advance(&mut cursor, '}');
-						i += 2;
-						closed = true;
-						break;
-					}
-					if c == '"' || c == '\'' {
-						string_delim = Some(c);
-					}
-				} else {
-					if c == '\\' && i + 1 < len {
-						let esc_next = chars[i + 1];
-						inner.push(c);
-						inner.push(esc_next);
-						advance(&mut cursor, c);
-						advance(&mut cursor, esc_next);
-						i += 2;
-						continue;
-					}
-					if Some(c) == string_delim {
-						string_delim = None;
-					}
-				}
-				inner.push(c);
-				advance(&mut cursor, c);
-				i += 1;
-			}
-
-			if !closed {
-				return Err(make_err(
-					ErrorCode::UnclosedBlockTag,
-					format!(
-						"Unclosed block tag at line {}, column {}",
-						open_line, open_column
-					),
-					open_line,
-					open_column,
-					options,
-				));
-			}
-
-			let raw = inner.trim().to_string();
-			if raw.is_empty() {
-				return Err(make_err(
-					ErrorCode::ParseError,
-					format!(
-						"Empty block tag at line {}, column {}",
-						open_line, open_column
-					),
-					open_line,
-					open_column,
-					options,
-				));
-			}
-
-			tokens.push(Token::BlockTag {
-				raw,
-				line: open_line,
-				column: open_column,
-			});
-
-			text_start_line = cursor.line;
-			text_start_column = cursor.column;
-			continue;
-		}
+		// `@…` is no longer a control structure — it is ordinary text now
+		// (Edge uses `@`-tags, handled at the `@` sigil above). No branch here.
 
 		// Interpolation open: {{ ... }} / {{{ ... }}} / slot {{> ... }}
 		if ch == '{' && i + 1 < len && chars[i + 1] == '{' {
@@ -307,6 +390,20 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 				advance(&mut cursor, '{');
 				advance(&mut cursor, '{');
 				i += 2;
+			}
+
+			// Left-trim `{{- … }}` / `{{{- … }}}`: a `-` right after the braces
+			// strips the trailing whitespace of the preceding text run.
+			if i < len && chars[i] == '-' {
+				advance(&mut cursor, '-');
+				i += 1;
+				if let Some(Token::Text { value, .. }) = tokens.last_mut() {
+					*value = value.trim_end().to_string();
+					// Don't leave a zero-width Text node when the whole run was ws.
+					if value.is_empty() {
+						tokens.pop();
+					}
+				}
 			}
 
 			// Slot disambiguator: first non-whitespace char inside is `>`.
@@ -537,6 +634,12 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 				));
 			}
 
+			// Right-trim `{{ … -}}` / `{{{ … -}}}`: a `-` right before the close
+			// braces strips the leading whitespace of the following text run.
+			if inner.ends_with('-') {
+				inner.pop();
+				trim_pending_left = true;
+			}
 			let expression = inner.trim().to_string();
 			if expression.is_empty() {
 				return Err(make_err(
@@ -650,7 +753,7 @@ mod tests {
 
 	#[test]
 	fn block_tag_emits_raw_inner() {
-		let toks = lex("{% layout 'main' %}", &LexOptions::default()).unwrap();
+		let toks = lex("@layout('main')", &LexOptions::default()).unwrap();
 		assert_eq!(toks.len(), 1);
 		match &toks[0] {
 			Token::BlockTag { raw, .. } => assert_eq!(raw, "layout 'main'"),
@@ -659,12 +762,32 @@ mod tests {
 	}
 
 	#[test]
-	fn backslash_escape_preserves_literal_double_brace() {
-		let toks = lex(r"a\{{b\}}c", &LexOptions::default()).unwrap();
+	fn at_escapes_produce_literal_output() {
+		// `@@` → literal `@`; `@{{` → literal `{{` (suppress interpolation).
+		let toks = lex("a@@b @{{ x }}c", &LexOptions::default()).unwrap();
 		assert_eq!(toks.len(), 1);
 		match &toks[0] {
-			Token::Text { value, .. } => assert_eq!(value, "a{{b}}c"),
+			Token::Text { value, .. } => assert_eq!(value, "a@b {{ x }}c"),
 			_ => panic!("expected Text"),
+		}
+	}
+
+	#[test]
+	fn trim_markers_strip_adjacent_whitespace() {
+		// `{{- x -}}` trims trailing ws of the preceding text + leading ws of next.
+		let toks = lex("a   {{- x -}}   b", &LexOptions::default()).unwrap();
+		assert_eq!(toks.len(), 3);
+		match &toks[0] {
+			Token::Text { value, .. } => assert_eq!(value, "a"),
+			_ => panic!("expected Text 'a'"),
+		}
+		match &toks[1] {
+			Token::InterpEscaped { expression, .. } => assert_eq!(expression, "x"),
+			_ => panic!("expected InterpEscaped 'x'"),
+		}
+		match &toks[2] {
+			Token::Text { value, .. } => assert_eq!(value, "b"),
+			_ => panic!("expected Text 'b'"),
 		}
 	}
 
@@ -676,7 +799,7 @@ mod tests {
 
 	#[test]
 	fn unclosed_block_tag_errors() {
-		let err = lex("{% if x", &LexOptions::default()).unwrap_err();
+		let err = lex("@if(x", &LexOptions::default()).unwrap_err();
 		assert_eq!(err.code, ErrorCode::UnclosedBlockTag);
 	}
 

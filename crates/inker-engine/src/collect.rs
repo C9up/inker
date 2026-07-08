@@ -55,7 +55,7 @@ fn collect_nodes(
 			format!("Collect recursion exceeded maximum depth {MAX_COLLECT_DEPTH}"),
 		));
 	}
-	// `{% let x = expr %}` binds `x` for the following siblings — mirror render's
+	// `@let(x = expr)` binds `x` for the following siblings — mirror render's
 	// scope threading so collect walks with identical scope (and helper order).
 	let mut local_scope: Option<Value> = None;
 	for node in nodes {
@@ -238,6 +238,41 @@ fn collect_each(
 			}
 			Ok(())
 		}
+		EachBinding::Indexed { item, index } => {
+			match &iterable {
+				Value::Array(arr) => {
+					if arr.is_empty() {
+						if let Some(els) = else_nodes {
+							collect_nodes(els, data, context, tape, depth)?;
+						}
+					} else {
+						for (i, elem) in arr.iter().enumerate() {
+							let idx = Value::Number(serde_json::Number::from(i as u64));
+							let scoped = merge_scope_pair(data, item, elem, index, &idx);
+							collect_nodes(body_nodes, &scoped, context, tape, depth)?;
+						}
+					}
+				}
+				Value::Object(obj) => {
+					if obj.is_empty() {
+						if let Some(els) = else_nodes {
+							collect_nodes(els, data, context, tape, depth)?;
+						}
+					} else {
+						for (k, v) in obj {
+							if is_prototype_pollution_key(k) {
+								continue;
+							}
+							let key = Value::String(k.clone());
+							let scoped = merge_scope_pair(data, item, v, index, &key);
+							collect_nodes(body_nodes, &scoped, context, tape, depth)?;
+						}
+					}
+				}
+				_ => {}
+			}
+			Ok(())
+		}
 	}
 }
 
@@ -334,7 +369,7 @@ mod tests {
 	#[test]
 	fn collects_per_iteration_with_loop_scope() {
 		let ast = parse_with_helpers(
-			"{% each xs as [k, v] %}{{ url('show', { id: v }) }}{% endeach %}",
+			"@each([k, v] in xs){{ url('show', { id: v }) }}@endeach",
 			&["url"],
 		);
 		let data = json!({ "xs": [["a", 1], ["b", 2]] });
@@ -347,7 +382,7 @@ mod tests {
 	#[test]
 	fn conditional_only_collects_taken_branch() {
 		let ast = parse_with_helpers(
-			"{% if on %}{{ a() }}{% else %}{{ b() }}{% endif %}",
+			"@if(on){{ a() }}@else{{ b() }}@endif",
 			&["a", "b"],
 		);
 		let tape_true =
@@ -362,7 +397,7 @@ mod tests {
 
 	#[test]
 	fn empty_loop_collects_nothing() {
-		let ast = parse_with_helpers("{% each xs as i %}{{ f(i) }}{% endeach %}", &["f"]);
+		let ast = parse_with_helpers("@each(i in xs){{ f(i) }}@endeach", &["f"]);
 		let tape =
 			collect_invocations(&ast, &json!({ "xs": [] }), &RenderContext::default()).unwrap();
 		assert_eq!(tape.len(), 0);
@@ -372,7 +407,7 @@ mod tests {
 	fn component_arg_helper_collected() {
 		// Body uses the arg as plain data, not as a helper arg.
 		let body = parse_with_helpers("{{ text }}", &[]);
-		let ast = parse_with_helpers("{% component 'b' { text: t('greeting') } %}", &["t"]);
+		let ast = parse_with_helpers("@component('b', { text: t('greeting') })", &["t"]);
 		let mut ctx = RenderContext::default();
 		ctx.components.insert("b".to_string(), body);
 		let tape = collect_invocations(&ast, &json!({}), &ctx).unwrap();

@@ -84,7 +84,7 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "invoice.inker"),
-			"{% layout 'layouts/main' %}<h1>Invoice for {{ name }}</h1>",
+			"@layout('layouts/main')<h1>Invoice for {{ name }}</h1>",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("invoice", { name: "Alice" })).toBe(
@@ -99,11 +99,11 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "layouts/main.inker"),
-			"<html><body>{{> body }}{% include 'partials/footer' %}</body></html>",
+			"<html><body>{{> body }}@include('partials/footer')</body></html>",
 		);
 		fs.writeFileSync(
 			path.join(root, "invoice.inker"),
-			"{% layout 'layouts/main' %}<h1>Invoice for {{ name }}</h1>",
+			"@layout('layouts/main')<h1>Invoice for {{ name }}</h1>",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("invoice", { name: "Alice" })).toBe(
@@ -119,7 +119,7 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}{% include 'partials/header' %}<p>{{ msg }}</p>",
+			"@layout('layouts/main')@include('partials/header')<p>{{ msg }}</p>",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { msg: "hi" })).toBe(
@@ -131,11 +131,11 @@ describe("Templates — layouts and partials", () => {
 		fs.writeFileSync(path.join(root, "partials/inner.inker"), "[inner]");
 		fs.writeFileSync(
 			path.join(root, "partials/wrap.inker"),
-			"(wrap{% include 'partials/inner' %})",
+			"(wrap@include('partials/inner'))",
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"X{% include 'partials/wrap' %}Y",
+			"X@include('partials/wrap')Y",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe("X(wrap[inner])Y");
@@ -144,15 +144,15 @@ describe("Templates — layouts and partials", () => {
 	it("circular include — partials a → b → a throws E_INKER_CIRCULAR_INCLUDE", async () => {
 		fs.writeFileSync(
 			path.join(root, "partials/a.inker"),
-			"A:{% include 'partials/b' %}",
+			"A:@include('partials/b')",
 		);
 		fs.writeFileSync(
 			path.join(root, "partials/b.inker"),
-			"B:{% include 'partials/a' %}",
+			"B:@include('partials/a')",
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% include 'partials/a' %}",
+			"@include('partials/a')",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -166,18 +166,18 @@ describe("Templates — layouts and partials", () => {
 		}
 	});
 
-	it("nested layout — layouts/main.inker contains {% layout 'other' %} throws", async () => {
+	it("nested layout — layouts/main.inker contains @layout('other') throws", async () => {
 		fs.writeFileSync(
 			path.join(root, "layouts/other.inker"),
 			"<other>{{> body }}</other>",
 		);
 		fs.writeFileSync(
 			path.join(root, "layouts/main.inker"),
-			"{% layout 'layouts/other' %}<m>{{> body }}</m>",
+			"@layout('layouts/other')<m>{{> body }}</m>",
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}body",
+			"@layout('layouts/main')body",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -192,18 +192,18 @@ describe("Templates — layouts and partials", () => {
 		}
 	});
 
-	it("layout-in-partial — partial contains {% layout %} throws", async () => {
+	it("layout-in-partial — partial contains @layout() throws", async () => {
 		fs.writeFileSync(
 			path.join(root, "layouts/main.inker"),
 			"<m>{{> body }}</m>",
 		);
 		fs.writeFileSync(
 			path.join(root, "partials/bad.inker"),
-			"{% layout 'layouts/main' %}sneaky",
+			"@layout('layouts/main')sneaky",
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% include 'partials/bad' %}",
+			"@include('partials/bad')",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -222,7 +222,7 @@ describe("Templates — layouts and partials", () => {
 		fs.writeFileSync(path.join(root, "layouts/empty.inker"), "<html></html>");
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/empty' %}content",
+			"@layout('layouts/empty')content",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -243,7 +243,7 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}",
+			"@layout('layouts/main')",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe(
@@ -258,7 +258,7 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}body",
+			"@layout('layouts/main')body",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -274,10 +274,10 @@ describe("Templates — layouts and partials", () => {
 		}
 	});
 
-	it("path-traversal in include — `{% include '../etc/passwd' %}` rejected at parse", async () => {
+	it("path-traversal in include — `@include('../etc/passwd')` rejected at parse", async () => {
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% include '../etc/passwd' %}",
+			"@include('../etc/passwd')",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
@@ -294,7 +294,7 @@ describe("Templates — layouts and partials", () => {
 		fs.writeFileSync(layout, "<L1>{{> body }}</L1>");
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}<p>x</p>",
+			"@layout('layouts/main')<p>x</p>",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 
@@ -311,7 +311,7 @@ describe("Templates — layouts and partials", () => {
 		fs.writeFileSync(partial, "<f1>");
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"start{% include 'partials/footer' %}end",
+			"start@include('partials/footer')end",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 
@@ -329,12 +329,12 @@ describe("Templates — layouts and partials", () => {
 		const partial = path.join(root, "partials/footer.inker");
 		fs.writeFileSync(
 			layout,
-			"<L1>{{> body }}{% include 'partials/footer' %}</L1>",
+			"<L1>{{> body }}@include('partials/footer')</L1>",
 		);
 		fs.writeFileSync(partial, "<f1>");
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% layout 'layouts/main' %}<p>x</p>",
+			"@layout('layouts/main')<p>x</p>",
 		);
 		const templates = new Templates({ root, cacheMode: "never" });
 
@@ -342,7 +342,7 @@ describe("Templates — layouts and partials", () => {
 
 		fs.writeFileSync(
 			layout,
-			"<L2>{{> body }}{% include 'partials/footer' %}</L2>",
+			"<L2>{{> body }}@include('partials/footer')</L2>",
 		);
 		fs.writeFileSync(partial, "<f2>");
 		bumpMtime(layout, 10);
@@ -358,7 +358,7 @@ describe("Templates — layouts and partials", () => {
 		);
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
-			"{% include 'partials/greet' %}",
+			"@include('partials/greet')",
 		);
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", { name: "Alice" })).toBe(
@@ -382,7 +382,7 @@ describe("Templates — layouts and partials", () => {
 			write("components/badge.inker", "<span>{{ label }}</span>");
 			write(
 				"page.inker",
-				"{% layout 'main' %}{% include 'partials/header' %} {% component 'badge' { label: page.label } %}",
+				"@layout('main')@include('partials/header') @component('badge', { label: page.label })",
 			);
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(
@@ -399,7 +399,7 @@ describe("Templates — layouts and partials", () => {
 			write("components/user-card.inker", "<li>{{ name }} ({{ email }})</li>");
 			write(
 				"page.inker",
-				"<ul>{% each users as user %}{% component 'user-card' { name: user.name, email: user.email } %}{% endeach %}</ul>",
+				"<ul>@each(user in users)@component('user-card', { name: user.name, email: user.email })@endeach</ul>",
 			);
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			const out = await templates.render("page", {
@@ -414,7 +414,7 @@ describe("Templates — layouts and partials", () => {
 		it("renders nested-conditional rendering with each/else", async () => {
 			write(
 				"page.inker",
-				"{% if showAll %}{% each items as item %}<{{ item }}>{% else %}EMPTY{% endeach %}{% else %}HIDDEN{% endif %}",
+				"@if(showAll)@each(item in items)<{{ item }}>@else\nEMPTY@endeach@else\nHIDDEN@endif",
 			);
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(
@@ -432,8 +432,8 @@ describe("Templates — layouts and partials", () => {
 		});
 
 		it("detects component cycle (card→card) on disk fixture", async () => {
-			write("components/card.inker", "{% component 'card' {} %}");
-			write("page.inker", "{% component 'card' {} %}");
+			write("components/card.inker", "@component('card', {})");
+			write("page.inker", "@component('card', {})");
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			try {
 				await templates.render("page", {});
@@ -447,7 +447,7 @@ describe("Templates — layouts and partials", () => {
 
 		it("component cache hit (mtime unchanged → cached AST)", async () => {
 			const file = write("components/card.inker", "[{{ title }}]");
-			write("page.inker", "{% component 'card' { title: page.title } %}");
+			write("page.inker", "@component('card', { title: page.title })");
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(await templates.render("page", { page: { title: "v1" } })).toBe(
 				"[v1]",
@@ -468,7 +468,7 @@ describe("Templates — layouts and partials", () => {
 			write("components/row.inker", "<li>{{ value }}</li>");
 			write(
 				"page.inker",
-				"{% layout 'main' %}<ul>{% each items as v %}{% component 'row' { value: v } %}{% endeach %}</ul>",
+				"@layout('main')<ul>@each(v in items)@component('row', { value: v })@endeach</ul>",
 			);
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(await templates.render("page", { items: ["X", "Y", "Z"] })).toBe(
@@ -476,28 +476,28 @@ describe("Templates — layouts and partials", () => {
 			);
 		});
 
-		it("rejects {% if x %} in renderString (recursive disk-walk catches Component inside If)", () => {
+		it("rejects @if(x) in renderString (recursive disk-walk catches Component inside If)", () => {
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(() =>
 				templates.renderString(
-					"{% if x %}{% component 'card' {} %}{% endif %}",
+					"@if(x)@component('card', {})@endif",
 					{ x: true },
 				),
 			).toThrowError(/E_INKER_DISK_REQUIRED|component/);
 		});
 
-		it("rejects {% each %} containing {% include %} in renderString", () => {
+		it("rejects @each() containing @include() in renderString", () => {
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(() =>
 				templates.renderString(
-					"{% each items as x %}{% include 'partials/y' %}{% endeach %}",
+					"@each(x in items)@include('partials/y')@endeach",
 					{ items: [] },
 				),
 			).toThrowError(/E_INKER_DISK_REQUIRED|include/);
 		});
 
-		it("each over null hint mentions {% if %} wrapper", async () => {
-			write("page.inker", "{% each items as item %}row{% endeach %}");
+		it("each over null hint mentions @if() wrapper", async () => {
+			write("page.inker", "@each(item in items)row@endeach");
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			try {
 				await templates.render("page", { items: null });
@@ -510,7 +510,7 @@ describe("Templates — layouts and partials", () => {
 		});
 
 		it("propagates resolvePath line/column in error context for if condition", async () => {
-			write("page.inker", "line1\nline2 {% if x.y.z %}T{% endif %}");
+			write("page.inker", "line1\nline2 @if(x.y.z)T@endif");
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			try {
 				await templates.render("page", { x: null });

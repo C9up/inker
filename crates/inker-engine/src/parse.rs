@@ -1,8 +1,8 @@
 //! Top-level parser — mirrors `packages/inker/src/parse.ts` 1:1.
 //!
 //! Consumes the `Vec<Token>` from `lex::lex`, dispatches block tags through
-//! `parse_block_tag::parse_block_tag`, balances `{% if %}` / `{% each %}` /
-//! `{% else %}` / `{% endif %}` / `{% endeach %}` via a frame stack, and
+//! `parse_block_tag::parse_block_tag`, balances `@if()` / `@each()` /
+//! `@else` / `@endif` / `@endeach` via a frame stack, and
 //! assembles the final `InkerAst`. Also collects every helper call-site for
 //! the ADR-007 TS-side pre-resolve walk (AC6).
 
@@ -64,7 +64,7 @@ struct IfBranch {
 	column: u32,
 }
 
-/// A `{% slot 'name' %}` currently being captured inside a component frame.
+/// A `@slot('name')` currently being captured inside a component frame.
 struct SlotBuild {
 	name: String,
 	nodes: Vec<InkerNode>,
@@ -143,7 +143,7 @@ impl BlockFrame {
 		}
 	}
 
-	/// Lower-case opening directive keyword, for `{% ... %}` error messages.
+	/// Lower-case opening directive keyword, for `@...` error messages.
 	fn open_keyword(&self) -> &'static str {
 		match self {
 			BlockFrame::If { .. } => "if",
@@ -202,11 +202,11 @@ fn block_tag_keyword(raw: &str) -> &str {
 	&trimmed[..end]
 }
 
-/// Decide whether the `{% component %}` at `tokens[start]` opens a block (has a
-/// matching `{% endcomponent %}`) or is the self-closing inline form. Treats
+/// Decide whether the `@component()` at `tokens[start]` opens a block (has a
+/// matching `@endcomponent`) or is the self-closing inline form. Treats
 /// component/endcomponent as balanced pairs: the nearest unpaired
 /// `endcomponent` closes this component. No matching end ⇒ self-closing, so
-/// legacy inline `{% component %}` (no endcomponent) stays backward compatible.
+/// legacy inline `@component()` (no endcomponent) stays backward compatible.
 fn component_opens_block(tokens: &[Token], start: usize) -> bool {
 	let mut depth: i32 = 0;
 	let mut i = start + 1;
@@ -442,7 +442,7 @@ pub fn parse(
 							return Err(make_err(
 								ErrorCode::InvalidLayoutPosition,
 								format!(
-									"{{% layout %}} must be the first directive in the template (got at line {}, column {} inside a block)",
+									"@layout must be the first directive in the template (got at line {}, column {} inside a block)",
 									token.line(), token.column()
 								),
 								*line,
@@ -454,7 +454,7 @@ pub fn parse(
 							return Err(make_err(
 								ErrorCode::DuplicateLayout,
 								format!(
-									"{{% layout %}} declared twice (first at line {sl_line}, second at line {})",
+									"@layout declared twice (first at line {sl_line}, second at line {})",
 									*line
 								),
 								*line,
@@ -466,7 +466,7 @@ pub fn parse(
 							return Err(make_err(
 								ErrorCode::InvalidLayoutPosition,
 								format!(
-									"{{% layout %}} must be the first directive in the template (got at line {}, column {} after non-whitespace content)",
+									"@layout must be the first directive in the template (got at line {}, column {} after non-whitespace content)",
 									*line, *column
 								),
 								*line,
@@ -529,7 +529,7 @@ pub fn parse(
 							None => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% slot '{name}' %}} outside of a {{% component %}} block (at line {pl}, column {pc})"),
+									format!("@slot('{name}') outside of a @component() block (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -545,7 +545,7 @@ pub fn parse(
 								if active_slot.is_some() {
 									return Err(make_err(
 										ErrorCode::UnmatchedBlockEnd,
-										format!("Nested {{% slot '{name}' %}} — close the previous slot with {{% endslot %}} first (at line {pl}, column {pc})"),
+										format!("Nested @slot('{name}') — close the previous slot with @endslot first (at line {pl}, column {pc})"),
 										pl,
 										pc,
 										template_path,
@@ -554,7 +554,7 @@ pub fn parse(
 								if named_slots.iter().any(|s| s.name == name) {
 									return Err(make_err(
 										ErrorCode::InvalidExpression,
-										format!("Duplicate slot name '{name}' in the same {{% component %}} block (at line {pl}, column {pc})"),
+										format!("Duplicate slot name '{name}' in the same @component() block (at line {pl}, column {pc})"),
 										pl,
 										pc,
 										template_path,
@@ -570,7 +570,7 @@ pub fn parse(
 							_ => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% slot '{name}' %}} must be a direct child of a {{% component %}} block (at line {pl}, column {pc})"),
+									format!("@slot('{name}') must be a direct child of a @component() block (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -587,7 +587,7 @@ pub fn parse(
 							None => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+									format!("@endslot with no open @slot (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -606,7 +606,7 @@ pub fn parse(
 									None => {
 										return Err(make_err(
 											ErrorCode::UnmatchedBlockEnd,
-											format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+											format!("@endslot with no open @slot (at line {pl}, column {pc})"),
 											pl,
 											pc,
 											template_path,
@@ -617,7 +617,7 @@ pub fn parse(
 							_ => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% endslot %}} with no open {{% slot %}} (at line {pl}, column {pc})"),
+									format!("@endslot with no open @slot (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -634,7 +634,7 @@ pub fn parse(
 							None => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% endcomponent %}} with no open {{% component %}} (at line {pl}, column {pc})"),
+									format!("@endcomponent with no open @component() (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -647,7 +647,7 @@ pub fn parse(
 							let top_col = top.column();
 							return Err(make_err(
 								ErrorCode::MismatchedBlockEnd,
-								format!("{{% endcomponent %}} does not match open {{% {open_kw} %}} (open at line {top_line}, column {top_col}; close at line {pl}, column {pc})"),
+								format!("@endcomponent does not match open @{open_kw} (open at line {top_line}, column {top_col}; close at line {pl}, column {pc})"),
 								pl,
 								pc,
 								template_path,
@@ -668,7 +668,7 @@ pub fn parse(
 							if active_slot.is_some() {
 								return Err(make_err(
 									ErrorCode::UnclosedBlock,
-									format!("{{% slot %}} was not closed with {{% endslot %}} before {{% endcomponent %}} (at line {pl}, column {pc})"),
+									format!("@slot was not closed with @endslot before @endcomponent (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -717,8 +717,8 @@ pub fn parse(
 						line: pl,
 						column: pc,
 					} => {
-						// `{% includeIf cond, 'name' %}` desugars to
-						// `{% if cond %}{% include 'name' %}{% endif %}`, reusing the
+						// `@includeIf(cond, 'name')` desugars to
+						// `@if(cond)@include('name')@endif`, reusing the
 						// existing If + Partial render / collect / compose machinery.
 						push_node(
 							InkerNode::If {
@@ -766,7 +766,7 @@ pub fn parse(
 							None => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
-									format!("{{% elseif %}} with no open {{% if %}} (at line {pl}, column {pc})"),
+									format!("@elseif() with no open @if (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -782,7 +782,7 @@ pub fn parse(
 								if *in_else {
 									return Err(make_err(
 										ErrorCode::InvalidExpression,
-										format!("{{% elseif %}} after {{% else %}} in the same {{% if %}} block (at line {pl}, column {pc})"),
+										format!("@elseif() after @else in the same @if block (at line {pl}, column {pc})"),
 										pl,
 										pc,
 										template_path,
@@ -799,7 +799,7 @@ pub fn parse(
 								let open_kw = other.open_keyword();
 								return Err(make_err(
 									ErrorCode::InvalidExpression,
-									format!("{{% elseif %}} only valid inside {{% if %}}, not {{% {open_kw} %}} (at line {pl}, column {pc})"),
+									format!("@elseif() only valid inside @if, not @{open_kw} (at line {pl}, column {pc})"),
 									pl,
 									pc,
 									template_path,
@@ -838,7 +838,7 @@ pub fn parse(
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
 									format!(
-										"{{% else %}} with no open {{% if %}} or {{% each %}} (at line {pl}, column {pc})"
+										"@else with no open @if or @each (at line {pl}, column {pc})"
 									),
 									pl,
 									pc,
@@ -853,7 +853,7 @@ pub fn parse(
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
 									format!(
-										"{{% else %}} inside a {{% component %}} block — 'else' is only valid in {{% if %}} / {{% each %}} (at line {pl}, column {pc})"
+										"@else inside a @component() block — 'else' is only valid in @if / @each (at line {pl}, column {pc})"
 									),
 									pl,
 									pc,
@@ -871,7 +871,7 @@ pub fn parse(
 							return Err(make_err(
 								ErrorCode::InvalidExpression,
 								format!(
-									"Multiple {{% else %}} clauses in the same {{% {kw} %}} block (open at line {frame_line}, second else at line {pl})"
+									"Multiple @else clauses in the same @{kw} block (open at line {frame_line}, second else at line {pl})"
 								),
 								pl,
 								pc,
@@ -913,7 +913,7 @@ pub fn parse(
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
 									format!(
-										"{{% {kw} %}} with no open block (at line {pl}, column {pc})"
+										"@{kw} with no open block (at line {pl}, column {pc})"
 									),
 									pl,
 									pc,
@@ -937,7 +937,7 @@ pub fn parse(
 							return Err(make_err(
 								ErrorCode::MismatchedBlockEnd,
 								format!(
-									"{{% {close_kw} %}} does not match open {{% {open_kw} %}} (open at line {top_line}, column {top_col}; close at line {pl}, column {pc})"
+									"@{close_kw} does not match open @{open_kw} (open at line {top_line}, column {top_col}; close at line {pl}, column {pc})"
 								),
 								pl,
 								pc,
@@ -952,7 +952,7 @@ pub fn parse(
 								..
 							} => fold_if_branches(branches, else_nodes),
 							BlockFrame::Component { .. } => unreachable!(
-								"{{% endcomponent %}} is closed by the CloseComponent arm, never the generic if/each close"
+								"@endcomponent is closed by the CloseComponent arm, never the generic if/each close"
 							),
 							BlockFrame::Each {
 								line,
@@ -985,7 +985,7 @@ pub fn parse(
 		return Err(make_err(
 			ErrorCode::UnclosedBlock,
 			format!(
-				"{{% {kw_lower} %}} started at line {}, column {} was never closed",
+				"@{kw_lower} started at line {}, column {} was never closed",
 				top.line(),
 				top.column()
 			),
@@ -1074,7 +1074,7 @@ mod tests {
 
 	#[test]
 	fn if_block_assembles() {
-		let ast = parse_str("{% if active %}yes{% endif %}").unwrap();
+		let ast = parse_str("@if(active)yes@endif").unwrap();
 		assert_eq!(ast.nodes.len(), 1);
 		match &ast.nodes[0] {
 			InkerNode::If { then_nodes, else_nodes, .. } => {
@@ -1087,7 +1087,7 @@ mod tests {
 
 	#[test]
 	fn if_else_block() {
-		let ast = parse_str("{% if a %}T{% else %}F{% endif %}").unwrap();
+		let ast = parse_str("@if(a)T@else\nF@endif").unwrap();
 		match &ast.nodes[0] {
 			InkerNode::If { then_nodes, else_nodes, .. } => {
 				assert_eq!(then_nodes.len(), 1);
@@ -1099,7 +1099,7 @@ mod tests {
 
 	#[test]
 	fn each_block_assembles() {
-		let ast = parse_str("{% each items as i %}{{ i }}{% endeach %}").unwrap();
+		let ast = parse_str("@each(i in items){{ i }}@endeach").unwrap();
 		match &ast.nodes[0] {
 			InkerNode::Each { body_nodes, .. } => {
 				assert_eq!(body_nodes.len(), 1);
@@ -1110,38 +1110,38 @@ mod tests {
 
 	#[test]
 	fn unclosed_block_errors() {
-		let e = parse_str("{% if x %}body").unwrap_err();
+		let e = parse_str("@if(x)body").unwrap_err();
 		assert_eq!(e.code, ErrorCode::UnclosedBlock);
 	}
 
 	#[test]
 	fn unmatched_close_errors() {
-		let e = parse_str("body{% endif %}").unwrap_err();
+		let e = parse_str("body@endif").unwrap_err();
 		assert_eq!(e.code, ErrorCode::UnmatchedBlockEnd);
 	}
 
 	#[test]
 	fn mismatched_close_errors() {
-		let e = parse_str("{% if a %}{% endeach %}").unwrap_err();
+		let e = parse_str("@if(a)@endeach").unwrap_err();
 		assert_eq!(e.code, ErrorCode::MismatchedBlockEnd);
 	}
 
 	#[test]
 	fn layout_first_directive_ok() {
-		let ast = parse_str("{% layout 'main' %}body").unwrap();
+		let ast = parse_str("@layout('main')body").unwrap();
 		assert!(ast.layout.is_some());
 		assert_eq!(ast.nodes.len(), 1);
 	}
 
 	#[test]
 	fn layout_after_content_errors() {
-		let e = parse_str("hello {% layout 'main' %}").unwrap_err();
+		let e = parse_str("hello @layout('main')").unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidLayoutPosition);
 	}
 
 	#[test]
 	fn duplicate_layout_errors() {
-		let e = parse_str("{% layout 'main' %}{% layout 'other' %}").unwrap_err();
+		let e = parse_str("@layout('main')@layout('other')").unwrap_err();
 		assert_eq!(e.code, ErrorCode::DuplicateLayout);
 	}
 

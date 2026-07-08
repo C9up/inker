@@ -85,7 +85,7 @@ function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
 function normalizePartialKey(name: string): string {
 	let key = name;
 	while (key.startsWith("./")) key = key.slice(2);
-	// T2: refuse an empty key — `{% include './' %}` would otherwise collide
+	// T2: refuse an empty key — `@include('./')` would otherwise collide
 	// with the synthetic `<root>/.inker` dotfile path and silently include
 	// (or misreport) an unrelated file. validateName lets a literal `./`
 	// through (no `..`, no NUL, no backslash, length > 0), so the assertion
@@ -168,7 +168,7 @@ function assertSafeCharacters(name: string): void {
 /**
  * Reject absolute paths, `..` segments, backslashes, and Windows drive-letter
  * prefixes — each would bypass the lexical `path.join(root, …)` containment.
- * Mirrors parseBlockTag.validatePathName so `{% include %}` and the public
+ * Mirrors parseBlockTag.validatePathName so `@include()` and the public
  * Templates#render entrypoint agree.
  */
 function assertSafePathShape(name: string): void {
@@ -655,7 +655,7 @@ export class Templates {
 	/**
 	 * Mount a named templates "disk" (AdonisJS/Edge `edge.mount(name, dir)`
 	 * parity). Templates in a mounted disk are addressed as `name::template`
-	 * (including from `{% layout %}` / `{% include %}` / `{% component %}`
+	 * (including from `@layout()` / `@include()` / `@component()`
 	 * references); a BARE `template` name always resolves against the default
 	 * root, exactly like Edge. Re-mounting a name overwrites its root. `dir` is
 	 * canonicalised (absolute + realpath) the same way the constructor root is,
@@ -805,13 +805,13 @@ export class Templates {
 		);
 
 		const info = ast.composeInfo;
-		// The Rust parser separates a leading `{% layout %}` into `ast.layout`
+		// The Rust parser separates a leading `@layout()` into `ast.layout`
 		// (not a body node), so `firstDiskNode` won't surface it — check
 		// `hasLayout` explicitly to preserve the renderString disk-required guard.
 		if (info.hasLayout) {
 			throw new InkerRenderError(
 				"E_INKER_DISK_REQUIRED",
-				`Templates#renderString cannot resolve {% layout '${info.layoutName ?? ""}' %} — use Templates#render(name, data) instead`,
+				`Templates#renderString cannot resolve @layout('${info.layoutName ?? ""}') — use Templates#render(name, data) instead`,
 			);
 		}
 		const disk = info.firstDiskNode;
@@ -819,19 +819,19 @@ export class Templates {
 			if (disk.kind === "Layout") {
 				throw new InkerRenderError(
 					"E_INKER_DISK_REQUIRED",
-					`Templates#renderString cannot resolve {% layout '${disk.name}' %} — use Templates#render(name, data) instead`,
+					`Templates#renderString cannot resolve @layout('${disk.name}') — use Templates#render(name, data) instead`,
 				);
 			}
 			if (disk.kind === "Partial") {
 				throw new InkerRenderError(
 					"E_INKER_DISK_REQUIRED",
-					`Templates#renderString cannot resolve {% include '${disk.name}' %} — use Templates#render(name, data) instead`,
+					`Templates#renderString cannot resolve @include('${disk.name}') — use Templates#render(name, data) instead`,
 				);
 			}
 			if (disk.kind === "Component") {
 				throw new InkerRenderError(
 					"E_INKER_DISK_REQUIRED",
-					`Templates#renderString cannot resolve {% component '${disk.name}' %} — use Templates#render(name, data) instead`,
+					`Templates#renderString cannot resolve @component('${disk.name}') — use Templates#render(name, data) instead`,
 				);
 			}
 			throw new InkerRenderError(
@@ -1043,7 +1043,7 @@ export class Templates {
 		// T4: strip leading UTF-8 BOM if present. Windows editors (Notepad)
 		// commonly insert it; lex sees it as a Text token, defeating the
 		// "first non-stripped node must be Layout" composition rule and
-		// silently treating `{% layout %}` as body content.
+		// silently treating `@layout()` as body content.
 		if (source.charCodeAt(0) === 0xfeff) {
 			source = source.slice(1);
 		}
@@ -1070,7 +1070,7 @@ export class Templates {
 		const partialAsts = new Map<string, NapiInkerAst>();
 		const componentAsts = new Map<string, NapiInkerAst>();
 
-		// The Rust parser already separates the leading `{% layout %}` into
+		// The Rust parser already separates the leading `@layout()` into
 		// `ast.layout` and excludes it from `ast.nodes`, so `entryAst` IS the
 		// body AST (no slice). Duplicate / mis-placed layout directives are
 		// rejected at parse time (parseTemplate throws E_INKER_DUPLICATE_LAYOUT /
@@ -1169,7 +1169,7 @@ export class Templates {
 			if (layoutInfo.hasLayout) {
 				throw new InkerRenderError(
 					"E_INKER_NESTED_LAYOUT_UNSUPPORTED",
-					`Layout file '${layoutValidated}' itself contains {% layout %} — nested layouts are not supported`,
+					`Layout file '${layoutValidated}' itself contains @layout() — nested layouts are not supported`,
 					{
 						templatePath: layoutAbsPath,
 						templateName: layoutValidated,
@@ -1289,7 +1289,7 @@ export class Templates {
 				if (info.hasLayout) {
 					throw new InkerRenderError(
 						"E_INKER_LAYOUT_IN_PARTIAL",
-						`Partial file '${partialValidated}' contains {% layout %} — partials cannot declare layouts`,
+						`Partial file '${partialValidated}' contains @layout() — partials cannot declare layouts`,
 						{
 							templatePath: partialAbsPath,
 							templateName: partialValidated,
@@ -1392,7 +1392,7 @@ export class Templates {
 				if (info.hasLayout) {
 					throw new InkerRenderError(
 						"E_INKER_LAYOUT_IN_PARTIAL",
-						`Component file '${componentValidated}' contains {% layout %} — components cannot declare layouts`,
+						`Component file '${componentValidated}' contains @layout() — components cannot declare layouts`,
 						{
 							templatePath: componentAbsPath,
 							templateName: componentValidated,
@@ -1404,13 +1404,13 @@ export class Templates {
 
 				// A component template MAY contain slot placeholders: `{{> body }}`
 				// yields the default (block-body) slot and `{{> name }}` a named
-				// `{% slot 'name' %}` provided by the caller. Placeholders with no
+				// `@slot('name')` provided by the caller. Placeholders with no
 				// matching slot render empty (Edge parity), so no validation here.
 
 				componentAsts.set(componentKey, componentAst);
 
 				// Recurse into nested components AND partials included inside this
-				// component (mutual recursion → a {% include %} in a component is
+				// component (mutual recursion → a @include() in a component is
 				// pre-loaded, fixing E_INKER_DISK_REQUIRED at render time).
 				await this.#resolveComponentsIn(
 					info.components,

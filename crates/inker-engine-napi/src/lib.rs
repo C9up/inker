@@ -75,7 +75,7 @@ pub struct InkerAst {
 	inner: Arc<EngineAst>,
 }
 
-/// A `{% include %}` / `{% component %}` reference with its source position
+/// A `@include()` / `@component()` reference with its source position
 /// (for circular-include error context).
 #[napi(object)]
 pub struct NodeRefNapi {
@@ -257,8 +257,8 @@ fn collect_partials(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 				}
 			}
 			InkerNode::Component(c) => {
-				// A `{% component %}` block body / named slots is caller content
-				// that may `{% include %}` partials — walk it so they pre-load.
+				// A `@component()` block body / named slots is caller content
+				// that may `@include()` partials — walk it so they pre-load.
 				collect_partials(&c.body_nodes, out);
 				for slot in &c.named_slots {
 					collect_partials(&slot.nodes, out);
@@ -278,7 +278,7 @@ fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 					line: c.line,
 					column: c.column,
 				});
-				// A `{% component %}` block body / named slots is caller content
+				// A `@component()` block body / named slots is caller content
 				// that may invoke further components — walk it so they pre-load.
 				collect_components(&c.body_nodes, out);
 				for slot in &c.named_slots {

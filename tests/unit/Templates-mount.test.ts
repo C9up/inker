@@ -40,7 +40,7 @@ describe("Templates — named disks (edge.mount parity)", () => {
 		write(
 			pkgRoot,
 			"page.inker",
-			"{% layout 'pkg::layout' %}<main>pkg page</main>",
+			"@layout('pkg::layout')<main>pkg page</main>",
 		);
 	});
 
@@ -75,7 +75,7 @@ describe("Templates — named disks (edge.mount parity)", () => {
 		write(
 			defaultRoot,
 			"child.inker",
-			"{% layout 'pkg::layout' %}<main>default child</main>",
+			"@layout('pkg::layout')<main>default child</main>",
 		);
 		const t = new Templates({ root: defaultRoot, cacheMode: "never" });
 		t.mount("pkg", pkgRoot);

@@ -17,15 +17,13 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
-const UNKNOWN_DIRECTIVE_HINT: &str = "Inker supports `layout`, `include`/`includeIf`, `if`/`elseif`/`else`/`endif`, `each`/`endeach`, `let`, and `component`/`slot`.";
+const UNKNOWN_DIRECTIVE_HINT: &str = "Inker supports `@layout`, `@include`/`@includeIf`, `@if`/`@elseif`/`@else`/`@endif`, `@unless`, `@each`/`@endeach`, `@let`, and `@component`/`@slot`.";
 
 static REJECTED_DIRECTIVES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 	let mut s = HashSet::new();
 	for n in [
 		"for",
 		"endfor",
-		"unless",
-		"endunless",
 		"set",
 		"raw",
 		"endraw",
@@ -33,6 +31,7 @@ static REJECTED_DIRECTIVES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 		"endblock",
 		"section",
 		"endsection",
+		"super",
 		"extends",
 		"import",
 		"from",
@@ -61,6 +60,8 @@ static KNOWN_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 		"endcomponent",
 		"slot",
 		"endslot",
+		"unless",
+		"endunless",
 	] {
 		s.insert(n);
 	}
@@ -529,10 +530,11 @@ fn parse_destructured_binding(
 	Ok(EachBinding::Destructured([first, second]))
 }
 
-/// Locate the top-level ` as ` separator inside an each directive body.
-/// Honors string literals + bracket/brace/paren nesting.
-/// Returns (start, end) of the whitespace-as-whitespace span in `s`, or None.
-fn find_top_level_as(s: &[char]) -> Option<(usize, usize)> {
+/// Locate the top-level ` in ` separator inside an Edge each directive body
+/// (`<binding> in <iterable>`). Honors string literals + bracket/brace/paren
+/// nesting so `(a, b) in xs` and `x in obj.items` split correctly. Returns the
+/// (start, end) of the `in`-with-surrounding-whitespace span, or None.
+fn find_top_level_in(s: &[char]) -> Option<(usize, usize)> {
 	let mut depth: i32 = 0;
 	let mut string_delim: Option<char> = None;
 	let mut i = 0;
@@ -569,10 +571,13 @@ fn find_top_level_as(s: &[char]) -> Option<(usize, usize)> {
 			while i < s.len() && is_whitespace(s[i]) {
 				i += 1;
 			}
+			// `in` is bounded by whitespace on the left (the ws run that got us
+			// here) and by whitespace OR a delimiter (`(`/`[`) on the right, so
+			// `x in(items)` / `x in [a]` split correctly (JS keyword-then-paren).
 			if i + 2 < s.len()
-				&& s[i] == 'a'
-				&& s[i + 1] == 's'
-				&& is_whitespace(s[i + 2])
+				&& s[i] == 'i'
+				&& s[i + 1] == 'n'
+				&& (is_whitespace(s[i + 2]) || s[i + 2] == '(' || s[i + 2] == '[')
 			{
 				let mut j = i + 2;
 				while j < s.len() && is_whitespace(s[j]) {
@@ -585,6 +590,76 @@ fn find_top_level_as(s: &[char]) -> Option<(usize, usize)> {
 		i += 1;
 	}
 	None
+}
+
+/// Validate a single each-binding identifier (reused for `Single`, and each name
+/// inside an `(item, index)` indexed binding).
+fn validate_each_ident(
+	name: &str,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<(), InkerError> {
+	if !BINDING_RE.is_match(name) {
+		return Err(fail_invalid_expression(
+			format!(
+				"each binding '{name}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)"
+			),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_reserved_binding(name) {
+		return Err(fail_invalid_expression(
+			format!("each binding '{name}' is a reserved word"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_prototype_pollution_key(name) {
+		return Err(fail_invalid_expression(
+			format!("each binding '{name}' is forbidden (prototype-pollution surface)"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	Ok(())
+}
+
+/// Parse an Edge indexed binding `(item, index)` → `EachBinding::Indexed`.
+fn parse_indexed_binding(
+	inner: &str,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<EachBinding, InkerError> {
+	// `inner` is the text between the parens, e.g. `item, index`.
+	let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+	if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+		return Err(fail_invalid_expression(
+			"indexed each binding requires exactly two names: '(value, index)'",
+			line,
+			column,
+			template_path,
+		));
+	}
+	validate_each_ident(parts[0], line, column, template_path)?;
+	validate_each_ident(parts[1], line, column, template_path)?;
+	if parts[0] == parts[1] {
+		return Err(fail_invalid_expression(
+			format!("indexed each binding has duplicate name '{}'", parts[0]),
+			line,
+			column,
+			template_path,
+		));
+	}
+	Ok(EachBinding::Indexed {
+		item: parts[0].to_string(),
+		index: parts[1].to_string(),
+	})
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -815,7 +890,7 @@ fn parse_each_tag(
 	let start = skip_whitespace(chars, after_keyword);
 	if start >= chars.len() {
 		return Err(fail_invalid_expression(
-			"each directive requires '<iterable> as <binding>'",
+			"each directive requires '<binding> in <iterable>'",
 			line,
 			column,
 			template_path,
@@ -823,11 +898,11 @@ fn parse_each_tag(
 	}
 
 	let body = &chars[start..];
-	let as_match = match find_top_level_as(body) {
+	let in_match = match find_top_level_in(body) {
 		Some(m) => m,
 		None => {
 			return Err(fail_invalid_expression(
-				"each directive requires '<iterable> as <binding>' — missing 'as' keyword",
+				"each directive requires '<binding> in <iterable>' — missing 'in' keyword",
 				line,
 				column,
 				template_path,
@@ -835,11 +910,22 @@ fn parse_each_tag(
 		}
 	};
 
+	let binding_src: String =
+		body[..in_match.0].iter().collect::<String>().trim().to_string();
+	if binding_src.is_empty() {
+		return Err(fail_invalid_expression(
+			"each directive requires a binding before 'in'",
+			line,
+			column,
+			template_path,
+		));
+	}
+
 	let iterable_source: String =
-		body[..as_match.0].iter().collect::<String>().trim().to_string();
+		body[in_match.1..].iter().collect::<String>().trim().to_string();
 	if iterable_source.is_empty() {
 		return Err(fail_invalid_expression(
-			"each directive requires an iterable expression before 'as'",
+			"each directive requires an iterable expression after 'in'",
 			line,
 			column,
 			template_path,
@@ -857,70 +943,34 @@ fn parse_each_tag(
 		helper_id_start,
 	)?;
 
-	let after_as = start + as_match.1;
-	let binding_tail_raw: String = chars[after_as..].iter().collect();
-	let binding_tail = binding_tail_raw.trim().to_string();
-	if binding_tail.is_empty() {
-		return Err(fail_invalid_expression(
-			"each directive requires a binding identifier after 'as'",
+	// `(value, index)` → Indexed; `[k, v]` → Destructured (array-of-pairs /
+	// object entries); a bare identifier → Single.
+	let binding = if binding_src.starts_with('(') {
+		if !binding_src.ends_with(')') {
+			return Err(fail_invalid_expression(
+				"unbalanced parentheses in indexed each binding '(value, index)'",
+				line,
+				column,
+				template_path,
+			));
+		}
+		parse_indexed_binding(
+			&binding_src[1..binding_src.len() - 1],
 			line,
 			column,
 			template_path,
-		));
-	}
+		)?
+	} else if binding_src.starts_with('[') {
+		// Parse the destructured binding from the ISOLATED `[k, v]` text so its
+		// trailing-token check does not trip on the ` in <iterable>` that follows.
+		let bchars: Vec<char> = binding_src.chars().collect();
+		parse_destructured_binding(&bchars, 0, line, column, template_path)?
+	} else {
+		validate_each_ident(&binding_src, line, column, template_path)?;
+		EachBinding::Single(binding_src)
+	};
 
-	if binding_tail.starts_with('[') {
-		// Find the absolute char position of `[` in chars.
-		let bracket_at = after_as
-			+ binding_tail_raw
-				.char_indices()
-				.find(|(_, c)| *c == '[')
-				.map(|(b, _)| {
-					// b is byte position in binding_tail_raw; we need char position.
-					// chars in binding_tail_raw are 1:1 mapped to slice of chars.
-					binding_tail_raw[..b].chars().count()
-				})
-				.expect("starts_with '[' ensures one exists");
-		let binding =
-			parse_destructured_binding(chars, bracket_at, line, column, template_path)?;
-		return Ok((iterable, iterable_source, binding, next_id));
-	}
-
-	if !BINDING_RE.is_match(&binding_tail) {
-		return Err(fail_invalid_expression(
-			format!(
-				"each binding '{binding_tail}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)"
-			),
-			line,
-			column,
-			template_path,
-		));
-	}
-	if is_reserved_binding(&binding_tail) {
-		return Err(fail_invalid_expression(
-			format!("each binding '{binding_tail}' is a reserved word"),
-			line,
-			column,
-			template_path,
-		));
-	}
-	if is_prototype_pollution_key(&binding_tail) {
-		return Err(fail_invalid_expression(
-			format!(
-				"each binding '{binding_tail}' is forbidden (prototype-pollution surface)"
-			),
-			line,
-			column,
-			template_path,
-		));
-	}
-
-	Ok((
-		iterable,
-		iterable_source,
-		EachBinding::Single(binding_tail),
-		next_id,
-	))
+	Ok((iterable, iterable_source, binding, next_id))
 }
 
 /// Slice an object literal (`{ … }`) accounting for nested braces/brackets/
@@ -1026,6 +1076,11 @@ fn parse_component_tag(
 	validate_path_name(&name, line, column, template_path)?;
 
 	let mut i = skip_whitespace(chars, next);
+	// Edge separates the component name from its args object with a comma:
+	// `@component('name', { … })`. Accept (and skip) the optional comma.
+	if chars.get(i).copied() == Some(',') {
+		i = skip_whitespace(chars, i + 1);
+	}
 	let mut args: Vec<ComponentArg> = Vec::new();
 	let mut next_id = helper_id_start;
 
@@ -1210,7 +1265,15 @@ pub fn parse_block_tag(
 	let chars: Vec<char> = raw.chars().collect();
 
 	let start_of_keyword = skip_whitespace(&chars, 0);
-	let (keyword, after_keyword) = read_keyword(&chars, start_of_keyword);
+	let (raw_keyword, after_keyword) = read_keyword(&chars, start_of_keyword);
+	// Edge self-closing `@!component` reaches here as keyword `!component`. Strip
+	// the `!` → a normal `component`; parse.rs's lookahead treats a component with
+	// no matching `@endcomponent` as self-closing, which `@!component` always is.
+	let keyword = if raw_keyword == "!component" {
+		"component".to_string()
+	} else {
+		raw_keyword
+	};
 
 	if keyword.is_empty() {
 		return Err(fail_parse(
@@ -1307,6 +1370,60 @@ pub fn parse_block_tag(
 		));
 	}
 
+	if keyword == "unless" {
+		// `@unless(cond)` = `@if(!(cond))` — parse the negated condition so the
+		// block balances against `@endunless` (Close::If) exactly like if/endif.
+		let args: String =
+			chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if args.is_empty() {
+			return Err(fail_invalid_expression(
+				"unless directive requires a condition",
+				line,
+				column,
+				template_path,
+			));
+		}
+		let negated: Vec<char> = format!("!({args})").chars().collect();
+		let (condition, next_id) = parse_if_tag(
+			&negated,
+			line,
+			column,
+			template_path,
+			0,
+			helpers,
+			helper_id_start,
+		)?;
+		return Ok((
+			ParsedBlockTag::OpenIf {
+				condition,
+				line,
+				column,
+			},
+			next_id,
+		));
+	}
+
+	if keyword == "endunless" {
+		let trailing: String =
+			chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after endunless: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((
+			ParsedBlockTag::Close {
+				closes: BlockClosesKind::If,
+				line,
+				column,
+			},
+			helper_id_start,
+		));
+	}
+
 	if keyword == "endif" {
 		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
 		if !trailing.is_empty() {
@@ -1348,8 +1465,8 @@ pub fn parse_block_tag(
 	}
 
 	if keyword == "else" {
-		// `{% else if <cond> %}` is accepted as a spelled-out `elseif` — chained
-		// into the AST identically. The single-token `{% elseif %}` form is
+		// `@else` is accepted as a spelled-out `elseif` — chained
+		// into the AST identically. The single-token `@elseif()` form is
 		// handled above; this catches the space-separated spelling.
 		let after_else = skip_whitespace(&chars, after_keyword);
 		if after_else + 2 <= chars.len()
@@ -1382,7 +1499,7 @@ pub fn parse_block_tag(
 		if !trailing.is_empty() {
 			return Err(fail_invalid_expression(
 				format!(
-					"Unexpected tokens after else: '{trailing}' — use '{{% elseif <cond> %}}' (or '{{% else if <cond> %}}') for chained conditions"
+					"Unexpected tokens after else: '{trailing}' — use '@elseif(<cond>)' (or '@elseif(<cond>)') for chained conditions"
 				),
 				line,
 				column,
@@ -1568,7 +1685,7 @@ mod tests {
 
 	#[test]
 	fn each_single_binding() {
-		let (pb, _) = parse_block_tag("each items as item", 1, 1, &opts(), 0).unwrap();
+		let (pb, _) = parse_block_tag("each item in items", 1, 1, &opts(), 0).unwrap();
 		match pb {
 			ParsedBlockTag::OpenEach { binding, iterable_source, .. } => {
 				assert_eq!(binding, EachBinding::Single("item".into()));
@@ -1580,7 +1697,7 @@ mod tests {
 
 	#[test]
 	fn each_destructured_binding() {
-		let (pb, _) = parse_block_tag("each map as [k, v]", 1, 1, &opts(), 0).unwrap();
+		let (pb, _) = parse_block_tag("each [k, v] in map", 1, 1, &opts(), 0).unwrap();
 		match pb {
 			ParsedBlockTag::OpenEach { binding, .. } => {
 				assert_eq!(binding, EachBinding::Destructured(["k".into(), "v".into()]));
@@ -1618,13 +1735,13 @@ mod tests {
 
 	#[test]
 	fn each_single_binding_proto_pollution_rejected() {
-		let e = parse_block_tag("each items as __proto__", 1, 1, &opts(), 0).unwrap_err();
+		let e = parse_block_tag("each __proto__ in items", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
 	}
 
 	#[test]
 	fn each_destructured_binding_proto_pollution_rejected() {
-		let e = parse_block_tag("each items as [__proto__, v]", 1, 1, &opts(), 0).unwrap_err();
+		let e = parse_block_tag("each [__proto__, v] in items", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
 	}
 
@@ -1675,7 +1792,7 @@ mod tests {
 		let mut o = opts();
 		o.helpers.insert("sorted".into());
 		let (pb, next_id) =
-			parse_block_tag("each sorted(items) as item", 1, 1, &o, 5).unwrap();
+			parse_block_tag("each item in sorted(items)", 1, 1, &o, 5).unwrap();
 		match pb {
 			ParsedBlockTag::OpenEach { .. } => {}
 			_ => panic!("expected OpenEach"),
@@ -1686,7 +1803,7 @@ mod tests {
 	#[test]
 	fn destructured_binding_duplicate_rejected() {
 		let e =
-			parse_block_tag("each map as [k, k]", 1, 1, &opts(), 0).unwrap_err();
+			parse_block_tag("each [k, k] in map", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
 	}
 }

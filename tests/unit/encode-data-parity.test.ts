@@ -56,7 +56,7 @@ describe("encodeData — sparse arrays", () => {
 		sparse[0] = 1;
 		sparse[2] = 3;
 		expectThrow(
-			"{% each arr as i %}{{ i }}{% endeach %}",
+			"@each(i in arr){{ i }}@endeach",
 			{ arr: sparse },
 			"E_INKER_INVALID_ITERABLE",
 		);
@@ -70,7 +70,7 @@ describe("encodeData — undefined own-property", () => {
 	});
 
 	it("treats an undefined own-property as falsy in a condition", () => {
-		expect(render("{% if x %}Y{% else %}N{% endif %}", { x: undefined })).toBe(
+		expect(render("@if(x)Y@else\nN@endif", { x: undefined })).toBe(
 			"N",
 		);
 	});

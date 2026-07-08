@@ -21,7 +21,7 @@ pub static PROTOTYPE_POLLUTION_KEYS: Lazy<HashSet<&'static str>> = Lazy::new(|| 
 	s
 });
 
-/// Names blocked in `{% each items as <name> %}` and destructured-pair
+/// Names blocked in `@each(<name> in items)` and destructured-pair
 /// positions — collide with Inker grammar keywords or JS reserved words. The
 /// block is per-position; paths can use these names safely.
 pub static RESERVED_BINDING_NAMES: Lazy<HashSet<&'static str>> = Lazy::new(|| {

@@ -160,7 +160,7 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 
 		writeFileSync(
 			path.join(tplDir, "layouts/main.inker"),
-			"<html><head><title>{{ title }}</title></head><body>{% include 'partials/header' %}{{> body }}</body></html>",
+			"<html><head><title>{{ title }}</title></head><body>@include('partials/header'){{> body }}</body></html>",
 		);
 		writeFileSync(
 			path.join(tplDir, "partials/header.inker"),
@@ -169,15 +169,15 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 		writeFileSync(
 			path.join(tplDir, "invoice.inker"),
 			[
-				"{% layout 'layouts/main' %}",
-				"{% if total > 0 %}",
+				"@layout('layouts/main')",
+				"@if(total > 0)",
 				"<h1>Invoice for {{ user.name }}</h1>",
 				"<ul>",
-				"{% each items as item %}",
+				"@each(item in items)",
 				"<li>{{ item }}</li>",
-				"{% endeach %}",
+				"@endeach",
 				"</ul>",
-				"{% endif %}",
+				"@endif",
 			].join(""),
 		);
 

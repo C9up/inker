@@ -33,7 +33,7 @@ function platformSuffix(): string {
 	return suffix;
 }
 
-/** A `{% include %}` / `{% component %}` reference with source position. */
+/** A `@include()` / `@component()` reference with source position. */
 export interface NapiNodeRef {
 	readonly name: string;
 	readonly line: number;

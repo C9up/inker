@@ -653,7 +653,7 @@ fn parse_primary_inner(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 	if c == '[' {
 		return Err(fail_parse(
 			cursor,
-			"array literals are not supported in expression position — they are only valid as destructuring bindings in `{% each items as [k, v] %}`",
+			"array literals are not supported in expression position — they are only valid as destructuring bindings in `@each([k, v] in items)`",
 			cursor.pos,
 		));
 	}

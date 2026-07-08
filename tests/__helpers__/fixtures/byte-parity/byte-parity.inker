@@ -1,26 +1,26 @@
-{% layout 'layouts/main' %}
-{% include 'partials/header' %}
+@layout('layouts/main')
+@include('partials/header')
 <section>
   <h2>{{ title }}</h2>
-  {% if showItems %}
+  @if(showItems)
   <ul>
-    {% each items as item %}
+    @each(item in items)
     <li>{{ upper(item.name) }} — {{ item.price }}</li>
-    {% endeach %}
+    @endeach
   </ul>
-  {% else %}
+  @else
   <p>No items</p>
-  {% endif %}
+  @endif
 
-  {% each mappings as [k, v] %}
+  @each([k, v] in mappings)
   <p>{{ k }} = {{ v }}</p>
-  {% endeach %}
+  @endeach
 
   <p>{{{ rawHtml }}}</p>
   <p>{{ greeting }}</p>
   <p>{{ t('hello.world') }}</p>
   <p>{{ url('users.show', { id: userId }) }}</p>
 
-  {% component 'button' { label: title, disabled: active } %}
+  @component('button', { label: title, disabled: active })
 </section>
-{% include 'partials/footer' %}
+@include('partials/footer')

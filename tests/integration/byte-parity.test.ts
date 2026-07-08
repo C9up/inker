@@ -2,9 +2,9 @@
  * Story 55.1 byte-parity smoke gate (AC13 / T7.2).
  *
  * Renders a fixture covering every grammar production (interpolation + escape,
- * raw `{{{ ... }}}`, `{% if/else/endif %}`, `{% each ... as item %}` over Array,
- * `{% each ... as [k, v] %}` over Map, `{% include %}`, `{% layout %}` with
- * `{{> body }}`, `{% component %}` + 3 helper calls) against a fixed deterministic
+ * raw `{{{ ... }}}`, `@if/else/endif`, `@each(item in ...)` over Array,
+ * `@each([k, v] in ...)` over Map, `@include()`, `@layout()` with
+ * `{{> body }}`, `@component()` + 3 helper calls) against a fixed deterministic
  * data payload and asserts byte-equality against the expected output captured
  * once via `tests/__helpers__/capture-byte-parity.ts` BEFORE the Rust port.
  *
@@ -37,18 +37,22 @@ const fixturesRoot = path.resolve(
 	"byte-parity",
 );
 
-// Base64 of the canonical rendered output. Captured 2026-05-29 against the
-// pre-Rust-migration TS impl via `tests/__helpers__/capture-byte-parity.ts`.
+// Base64 of the canonical rendered output. Originally captured 2026-05-29 against
+// the pre-Rust-migration TS impl; RE-BASELINED 2026-07-08 (story 62.1) after the
+// Edge-syntax migration — the fixture moved to `@`-tags and the new
+// newline-trim-after-tag feature removed the blank lines that followed each tag.
+// The diff was verified content-identical (only tag-adjacent whitespace changed).
+// Re-capture via `tests/__helpers__/capture-byte-parity.ts` (see procedure above).
 const BYTE_PARITY_EXPECTED_B64 = [
-	"PCFkb2N0eXBlIGh0bWw+CjxodG1sPjxib2R5PgoKPGhlYWRlcj5XZWxjb21lICZsdDtib2xkJmd0",
-	"OzwvaGVhZGVyPgoKPHNlY3Rpb24+CiAgPGgyPkNhcnQgJmx0O0l0ZW1zJmd0OzwvaDI+CiAgCiAg",
-	"PHVsPgogICAgCiAgICA8bGk+QVBQTEUg4oCUIDEuMjA8L2xpPgogICAgCiAgICA8bGk+UEVBUiDi",
-	"gJQgMC44MDwvbGk+CiAgICAKICA8L3VsPgogIAoKICAKICA8cD5hID0gMTwvcD4KICAKICA8cD5i",
-	"ID0gMjwvcD4KICAKCiAgPHA+PGVtPm5vdCBlc2NhcGVkPC9lbT48L3A+CiAgPHA+Jmx0O2JvbGQm",
-	"Z3Q7PC9wPgogIDxwPlQ6aGVsbG8ud29ybGQ8L3A+CiAgPHA+L3UvdXNlcnMuc2hvdy80MjwvcD4K",
-	"CiAgPGJ1dHRvbiBkYXRhLWxhYmVsPSJDYXJ0ICZsdDtJdGVtcyZndDsiPkNhcnQgJmx0O0l0ZW1z",
-	"Jmd0OyAoYWN0aXZlPXRydWUpPC9idXR0b24+Cgo8L3NlY3Rpb24+Cjxmb290ZXI+wqkgMjAyNjwv",
-	"Zm9vdGVyPgoKCjwvYm9keT48L2h0bWw+Cg==",
+	"PCFkb2N0eXBlIGh0bWw+CjxodG1sPjxib2R5Pgo8aGVhZGVyPldlbGNvbWUgJmx0O2JvbGQmZ3Q7",
+	"PC9oZWFkZXI+CjxzZWN0aW9uPgogIDxoMj5DYXJ0ICZsdDtJdGVtcyZndDs8L2gyPgogICAgPHVs",
+	"PgogICAgICAgIDxsaT5BUFBMRSDigJQgMS4yMDwvbGk+CiAgICAgICAgPGxpPlBFQVIg4oCUIDAu",
+	"ODA8L2xpPgogICAgICA8L3VsPgogIAogICAgPHA+YSA9IDE8L3A+CiAgICA8cD5iID0gMjwvcD4K",
+	"ICAKICA8cD48ZW0+bm90IGVzY2FwZWQ8L2VtPjwvcD4KICA8cD4mbHQ7Ym9sZCZndDs8L3A+CiAg",
+	"PHA+VDpoZWxsby53b3JsZDwvcD4KICA8cD4vdS91c2Vycy5zaG93LzQyPC9wPgoKICA8YnV0dG9u",
+	"IGRhdGEtbGFiZWw9IkNhcnQgJmx0O0l0ZW1zJmd0OyI+Q2FydCAmbHQ7SXRlbXMmZ3Q7IChhY3Rp",
+	"dmU9dHJ1ZSk8L2J1dHRvbj4KPC9zZWN0aW9uPgo8Zm9vdGVyPsKpIDIwMjY8L2Zvb3Rlcj4KCjwv",
+	"Ym9keT48L2h0bWw+Cg==",
 ].join("");
 
 const BYTE_PARITY_EXPECTED = Buffer.from(

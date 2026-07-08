@@ -140,7 +140,7 @@ fn render_nodes(
 			context,
 		));
 	}
-	// `{% let x = expr %}` binds `x` for every SIBLING node that follows it in
+	// `@let(x = expr)` binds `x` for every SIBLING node that follows it in
 	// this list (block-scoped, like `each`). Thread an augmented scope forward.
 	let mut local_scope: Option<Value> = None;
 	for node in nodes {
@@ -233,7 +233,7 @@ fn render_node(
 				make_err(
 					ErrorCode::DiskRequired,
 					format!(
-						"render cannot resolve {{% include '{name}' %}} — partial not pre-loaded into context.partials"
+						"render cannot resolve @include('{name}') — partial not pre-loaded into context.partials"
 					),
 					*line,
 					*column,
@@ -248,7 +248,7 @@ fn render_node(
 			return Err(make_err(
 				ErrorCode::DiskRequired,
 				format!(
-					"render cannot resolve {{% layout '{name}' %}} — LayoutNode must be stripped by the composer before render"
+					"render cannot resolve @layout('{name}') — LayoutNode must be stripped by the composer before render"
 				),
 				*line,
 				*column,
@@ -277,7 +277,7 @@ fn render_node(
 				make_err(
 					ErrorCode::DiskRequired,
 					format!(
-						"render cannot resolve {{% component '{}' %}} — component not pre-loaded into context.components",
+						"render cannot resolve @component('{}') — component not pre-loaded into context.components",
 						c.name
 					),
 					c.line,
@@ -299,7 +299,7 @@ fn render_node(
 			// Slot content renders in the CALLER scope (Edge semantics: a slot
 			// sees the caller's data, not the component's props) and BEFORE the
 			// component template so the helper tape order matches collect. `body`
-			// is the default slot; each `{% slot 'x' %}` is a named slot.
+			// is the default slot; each `@slot('x')` is a named slot.
 			let mut slots: HashMap<String, String> = HashMap::new();
 			let mut body_buf = String::new();
 			render_nodes(&c.body_nodes, data, context, &mut body_buf, depth + 1, tape, cursor)?;
@@ -373,7 +373,7 @@ fn render_each(
 				other => {
 					let type_label = type_of_iterable(other);
 					let hint = match other {
-						Value::Null => format!(" — did you forget '{{% if {iterable_source} %}}' wrapper?"),
+						Value::Null => format!(" — did you forget '@if({iterable_source})' wrapper?"),
 						_ => " (single-binding 'as item' only accepts Array; use 'as [k, v]' for Map/Set/object)".to_string(),
 					};
 					return Err(fail_invalid_iterable(
@@ -406,7 +406,7 @@ fn render_each(
 					line,
 					column,
 					format!(
-						"expected Array | Map | Set | object; got null — did you forget '{{% if {iterable_source} %}}' wrapper?"
+						"expected Array | Map | Set | object; got null — did you forget '@if({iterable_source})' wrapper?"
 					),
 					context,
 				));
@@ -466,6 +466,54 @@ fn render_each(
 					column,
 					format!(
 						"destructured binding requires Array | Map | Set | object; got {}",
+						type_of_iterable(other)
+					),
+					context,
+				)),
+			}
+		}
+		EachBinding::Indexed { item, index } => {
+			// Edge `@each((value, index) in iterable)` — value + position. Array
+			// → numeric index; object → property key (Edge `(value, key)` order).
+			match &iterable {
+				Value::Array(arr) => {
+					if arr.is_empty() {
+						if let Some(els) = else_nodes {
+							render_nodes(els, data, context, buf, depth, tape, cursor)?;
+						}
+						return Ok(());
+					}
+					for (i, elem) in arr.iter().enumerate() {
+						let idx = Value::Number(serde_json::Number::from(i as u64));
+						let scoped = merge_scope_pair(data, item, elem, index, &idx);
+						render_nodes(body_nodes, &scoped, context, buf, depth, tape, cursor)?;
+					}
+					Ok(())
+				}
+				Value::Object(obj) => {
+					if obj.is_empty() {
+						if let Some(els) = else_nodes {
+							render_nodes(els, data, context, buf, depth, tape, cursor)?;
+						}
+						return Ok(());
+					}
+					for (k, v) in obj {
+						if is_prototype_pollution_key(k) {
+							continue;
+						}
+						let key = Value::String(k.clone());
+						let scoped = merge_scope_pair(data, item, v, index, &key);
+						render_nodes(body_nodes, &scoped, context, buf, depth, tape, cursor)?;
+					}
+					Ok(())
+				}
+				other => Err(fail_invalid_iterable(
+					iterable_source,
+					binding,
+					line,
+					column,
+					format!(
+						"indexed binding requires Array | object; got {} — did you forget an '@if' wrapper?",
 						type_of_iterable(other)
 					),
 					context,
@@ -833,6 +881,7 @@ fn binding_preview(b: &EachBinding) -> String {
 	match b {
 		EachBinding::Single(name) => name.clone(),
 		EachBinding::Destructured([a, b]) => format!("[{a}, {b}]"),
+		EachBinding::Indexed { item, index } => format!("({item}, {index})"),
 	}
 }
 
@@ -858,7 +907,7 @@ fn fail_invalid_iterable(
 	make_err(
 		ErrorCode::InvalidIterable,
 		format!(
-			"{{% each {iterable_source} as {} %}} {reason} at line {line}, column {column}",
+			"@each({} in {iterable_source}) {reason} at line {line}, column {column}",
 			binding_preview(binding)
 		),
 		line,
@@ -945,13 +994,37 @@ mod tests {
 
 	#[test]
 	fn if_truthy_then() {
-		let ast = parse_template("{% if active %}YES{% else %}NO{% endif %}");
+		let ast = parse_template("@if(active)YES@else\nNO@endif");
 		assert_eq!(render_no_helpers(&ast, &json!({ "active": true })).unwrap(), "YES");
 	}
 
 	#[test]
+	fn unless_renders_body_only_when_falsy() {
+		// `@unless(x)` = `@if(!(x))`: body renders when x is falsy, not when truthy.
+		let ast = parse_template("@unless(active)NO@endunless");
+		assert_eq!(render_no_helpers(&ast, &json!({ "active": false })).unwrap(), "NO");
+		assert_eq!(render_no_helpers(&ast, &json!({ "active": true })).unwrap(), "");
+	}
+
+	#[test]
+	fn each_indexed_binding_binds_value_and_index() {
+		// Array → numeric index (Edge `(value, index)`).
+		let arr = parse_template("@each((v, i) in xs)[{{ i }}:{{ v }}]@endeach");
+		assert_eq!(
+			render_no_helpers(&arr, &json!({ "xs": ["a", "b"] })).unwrap(),
+			"[0:a][1:b]"
+		);
+		// Object → property key (Edge `(value, key)` order: value first).
+		let obj = parse_template("@each((v, k) in o){{ k }}={{ v }};@endeach");
+		assert_eq!(
+			render_no_helpers(&obj, &json!({ "o": { "a": 1, "b": 2 } })).unwrap(),
+			"a=1;b=2;"
+		);
+	}
+
+	#[test]
 	fn each_single_binding() {
-		let ast = parse_template("{% each items as i %}[{{ i }}]{% endeach %}");
+		let ast = parse_template("@each(i in items)[{{ i }}]@endeach");
 		assert_eq!(
 			render_no_helpers(&ast, &json!({ "items": ["a", "b"] })).unwrap(),
 			"[a][b]"
@@ -960,7 +1033,7 @@ mod tests {
 
 	#[test]
 	fn each_destructured_array_of_pairs() {
-		let ast = parse_template("{% each m as [k, v] %}{{ k }}={{ v }};{% endeach %}");
+		let ast = parse_template("@each([k, v] in m){{ k }}={{ v }};@endeach");
 		assert_eq!(
 			render_no_helpers(&ast, &json!({ "m": [["a", "1"], ["b", "2"]] })).unwrap(),
 			"a=1;b=2;"
@@ -985,7 +1058,7 @@ mod tests {
 
 	#[test]
 	fn helper_in_condition_is_unsupported_error() {
-		let ast = parse_with_helpers("{% if isOn() %}Y{% endif %}", &["isOn"]);
+		let ast = parse_with_helpers("@if(isOn())Y@endif", &["isOn"]);
 		let e = render(&ast, &json!({}), &RenderContext::default(), &[]).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
 	}
@@ -1019,26 +1092,26 @@ mod tests {
 	#[test]
 	fn loose_eq_null_is_not_equal_to_zero() {
 		// JS: null == 0 is false (null/undefined loose-eq only each other).
-		let ast = parse_template("{% if x == 0 %}Y{% else %}N{% endif %}");
+		let ast = parse_template("@if(x == 0)Y@else\nN@endif");
 		assert_eq!(render_no_helpers(&ast, &json!({ "x": null })).unwrap(), "N");
 	}
 
 	#[test]
 	fn loose_eq_empty_string_equals_zero() {
 		// JS: "" == 0 is true (Number("") === 0).
-		let ast = parse_template("{% if x == 0 %}Y{% else %}N{% endif %}");
+		let ast = parse_template("@if(x == 0)Y@else\nN@endif");
 		assert_eq!(render_no_helpers(&ast, &json!({ "x": "" })).unwrap(), "Y");
 	}
 
 	#[test]
 	fn loose_eq_numeric_string_equals_number() {
-		let ast = parse_template("{% if x == 5 %}Y{% else %}N{% endif %}");
+		let ast = parse_template("@if(x == 5)Y@else\nN@endif");
 		assert_eq!(render_no_helpers(&ast, &json!({ "x": "5" })).unwrap(), "Y");
 	}
 
 	#[test]
 	fn each_over_object_skips_prototype_pollution_keys() {
-		let ast = parse_template("{% each obj as [k, v] %}{{ k }}={{ v }};{% endeach %}");
+		let ast = parse_template("@each([k, v] in obj){{ k }}={{ v }};@endeach");
 		let data = json!({ "obj": { "a": "1", "__proto__": "bad", "constructor": "bad" } });
 		assert_eq!(render_no_helpers(&ast, &data).unwrap(), "a=1;");
 	}
@@ -1061,7 +1134,7 @@ mod tests {
 	#[test]
 	fn component_body_renders_in_default_slot() {
 		let card = parse_template("[{{> body }}]");
-		let page = parse_template("{% component 'card' {} %}HELLO{% endcomponent %}");
+		let page = parse_template("@component('card', {})HELLO@endcomponent");
 		assert_eq!(
 			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
 			"[HELLO]"
@@ -1072,7 +1145,7 @@ mod tests {
 	fn component_named_slots_render_in_place() {
 		let card = parse_template("<h>{{> title }}</h><p>{{> body }}</p>");
 		let page = parse_template(
-			"{% component 'card' {} %}{% slot 'title' %}T{% endslot %}BODY{% endcomponent %}",
+			"@component('card', {})@slot('title')T@endslot\nBODY@endcomponent",
 		);
 		assert_eq!(
 			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
@@ -1085,7 +1158,7 @@ mod tests {
 		// Slots declared body-text, then 'a', then 'b'; template references b, a.
 		let card = parse_template("{{> b }}|{{> a }}");
 		let page = parse_template(
-			"{% component 'c' {} %}{% slot 'a' %}AA{% endslot %}{% slot 'b' %}BB{% endslot %}{% endcomponent %}",
+			"@component('c', {})@slot('a')AA@endslot@slot('b')BB@endslot@endcomponent",
 		);
 		assert_eq!(
 			render_with_components(&page, &json!({}), &[("c", &card)]).unwrap(),
@@ -1096,7 +1169,7 @@ mod tests {
 	#[test]
 	fn component_self_closing_still_renders() {
 		let card = parse_template("<{{ name }}>");
-		let page = parse_template("{% component 'card' { name: who } %}");
+		let page = parse_template("@component('card', { name: who })");
 		assert_eq!(
 			render_with_components(&page, &json!({ "who": "x" }), &[("card", &card)]).unwrap(),
 			"<x>"
@@ -1107,7 +1180,7 @@ mod tests {
 	fn component_missing_named_slot_renders_empty() {
 		// Template references {{> footer }} but the caller provides no such slot.
 		let card = parse_template("[{{> body }}|{{> footer }}]");
-		let page = parse_template("{% component 'card' {} %}B{% endcomponent %}");
+		let page = parse_template("@component('card', {})B@endcomponent");
 		assert_eq!(
 			render_with_components(&page, &json!({}), &[("card", &card)]).unwrap(),
 			"[B|]"
@@ -1118,7 +1191,7 @@ mod tests {
 	fn component_body_content_is_html_escaped() {
 		// Interpolation inside slot content escapes exactly as anywhere else.
 		let card = parse_template("[{{> body }}]");
-		let page = parse_template("{% component 'card' {} %}{{ danger }}{% endcomponent %}");
+		let page = parse_template("@component('card', {}){{ danger }}@endcomponent");
 		assert_eq!(
 			render_with_components(
 				&page,
@@ -1135,7 +1208,7 @@ mod tests {
 		// `title` exists in the CALLER data; the component prop is `heading`.
 		let card = parse_template("{{ heading }}:{{> body }}");
 		let page = parse_template(
-			"{% component 'card' { heading: 'H' } %}{{ title }}{% endcomponent %}",
+			"@component('card', { heading: 'H' }){{ title }}@endcomponent",
 		);
 		assert_eq!(
 			render_with_components(&page, &json!({ "title": "caller" }), &[("card", &card)])
@@ -1148,7 +1221,7 @@ mod tests {
 
 	#[test]
 	fn elseif_selects_matching_branch() {
-		let ast = parse_template("{% if a %}A{% elseif b %}B{% else %}C{% endif %}");
+		let ast = parse_template("@if(a)A@elseif(b)B@else\nC@endif");
 		assert_eq!(render_no_helpers(&ast, &json!({ "a": false, "b": true })).unwrap(), "B");
 		assert_eq!(render_no_helpers(&ast, &json!({ "a": true, "b": true })).unwrap(), "A");
 		assert_eq!(render_no_helpers(&ast, &json!({ "a": false, "b": false })).unwrap(), "C");
@@ -1158,7 +1231,7 @@ mod tests {
 
 	#[test]
 	fn let_binds_for_following_siblings() {
-		let ast = parse_template("{% let x = 5 %}{{ x }}");
+		let ast = parse_template("@let(x = 5){{ x }}");
 		assert_eq!(render_no_helpers(&ast, &json!({})).unwrap(), "5");
 	}
 }

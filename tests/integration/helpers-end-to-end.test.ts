@@ -117,13 +117,13 @@ describe("end-to-end — helpers + layouts + partials + components (53.4)", () =
 			root,
 			"index.inker",
 			[
-				"{% layout 'layouts/main' %}",
+				"@layout('layouts/main')",
 				"<form>{{ csrfField() }}</form>",
 				"<ul>",
-				"{% each users as user %}",
-				"{% include 'partials/user-row' %}",
-				"{% component 'role-badge' { label: user.role } %}",
-				"{% endeach %}",
+				"@each(user in users)",
+				"@include('partials/user-row')",
+				"@component('role-badge', { label: user.role })",
+				"@endeach",
 				"</ul>",
 			].join("\n"),
 		);
@@ -162,9 +162,9 @@ describe("end-to-end — helpers + layouts + partials + components (53.4)", () =
 		write(
 			root,
 			"layouts/main.inker",
-			"<html>{% if user.role === 'admin' %}<div>{{ t('role.admin') }}</div>{% else %}<div>{{ t('role.user') }}</div>{% endif %}{{> body }}</html>",
+			"<html>@if(user.role === 'admin')<div>{{ t('role.admin') }}</div>@else<div>{{ t('role.user') }}</div>@endif{{> body }}</html>",
 		);
-		write(root, "index.inker", "{% layout 'layouts/main' %}body");
+		write(root, "index.inker", "@layout('layouts/main')body");
 		const { helpers } = buildHelpers();
 		const tpl = new Templates({ root, helpers });
 		expect(await tpl.render("index", { user: { role: "admin" } })).toContain(
@@ -179,7 +179,7 @@ describe("end-to-end — helpers + layouts + partials + components (53.4)", () =
 		write(
 			root,
 			"index.inker",
-			"{% each prices as [k, v] %}{{ k }}={{ url('show', { id: v }) }} {% endeach %}",
+			"@each([k, v] in prices){{ k }}={{ url('show', { id: v }) }} @endeach",
 		);
 		const { helpers } = buildHelpers();
 		const tpl = new Templates({ root, helpers });
@@ -201,7 +201,7 @@ describe("end-to-end — helpers + layouts + partials + components (53.4)", () =
 		write(
 			root,
 			"index.inker",
-			"{% component 'banner' { kind: 'warning', text: t('greeting') } %}",
+			"@component('banner', { kind: 'warning', text: t('greeting') })",
 		);
 		const { helpers } = buildHelpers();
 		const tpl = new Templates({ root, helpers });
