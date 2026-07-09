@@ -4,8 +4,10 @@
 //! parsing and the top-level parser.
 
 use crate::parse_expression::Expression;
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type")]
 pub enum InkerNode {
 	Text {
 		value: String,
@@ -50,9 +52,44 @@ pub enum InkerNode {
 		column: u32,
 	},
 	Component(ComponentNode),
+	/// `@section('name')…@endsection` — a named layout section. In a layout it
+	/// is a yield point (with default content); in a child it fills the layout's
+	/// matching yield. The Node renderer resolves the role by position.
+	Section {
+		name: String,
+		body_nodes: Vec<InkerNode>,
+		line: u32,
+		column: u32,
+	},
+	/// `@super` — inside a child section, yields the layout's default content
+	/// for the enclosing section.
+	Super {
+		line: u32,
+		column: u32,
+	},
+	/// `@eval(expr)` — evaluate `source` for its side effects, emit nothing.
+	Eval {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@dump(expr)` — pretty-print `source`'s value for debugging.
+	Dump {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@<name>(args)` — a runtime-registered custom tag (Edge `registerTag`).
+	/// The Node renderer evaluates `args_source` and calls the handler for `name`.
+	CustomTag {
+		name: String,
+		args_source: String,
+		line: u32,
+		column: u32,
+	},
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LayoutNode {
 	pub name: String,
 	pub raw: String,
@@ -60,7 +97,7 @@ pub struct LayoutNode {
 	pub column: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PartialNode {
 	pub name: String,
 	pub raw: String,
@@ -68,20 +105,20 @@ pub struct PartialNode {
 	pub column: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SlotNode {
 	pub name: String,
 	pub line: u32,
 	pub column: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IfCondition {
 	pub expression: Expression,
 	pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum EachBinding {
 	Single(String),
 	Destructured([String; 2]),
@@ -94,7 +131,7 @@ pub enum EachBinding {
 	},
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ComponentArg {
 	pub key: String,
 	pub value: Expression,
@@ -104,7 +141,7 @@ pub struct ComponentArg {
 /// A `@slot('name')…@endslot` block captured inside a component
 /// invocation body. Its `nodes` render in the CALLER's scope and are injected
 /// at the matching `{{> name }}` placeholder in the component template.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NamedSlot {
 	pub name: String,
 	pub nodes: Vec<InkerNode>,
@@ -112,7 +149,7 @@ pub struct NamedSlot {
 	pub column: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ComponentNode {
 	pub name: String,
 	pub args: Vec<ComponentArg>,

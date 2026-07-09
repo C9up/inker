@@ -29,9 +29,6 @@ static REJECTED_DIRECTIVES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 		"endraw",
 		"block",
 		"endblock",
-		"section",
-		"endsection",
-		"super",
 		"extends",
 		"import",
 		"from",
@@ -62,6 +59,11 @@ static KNOWN_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 		"endslot",
 		"unless",
 		"endunless",
+		"section",
+		"endsection",
+		"super",
+		"eval",
+		"dump",
 	] {
 		s.insert(n);
 	}
@@ -1184,6 +1186,7 @@ fn parse_component_tag(
 pub enum BlockClosesKind {
 	If,
 	Each,
+	Section,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1191,6 +1194,40 @@ pub enum ParsedBlockTag {
 	Layout(LayoutNode),
 	Partial(PartialNode),
 	Component(ComponentNode),
+	/// `@section('name')` — a named layout section (yield in a layout, fill in a
+	/// child). Closed by `@endsection`.
+	OpenSection {
+		name: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@super` — inside a child section, yields the layout's default content
+	/// for the enclosing section. Self-closing.
+	Super {
+		line: u32,
+		column: u32,
+	},
+	/// `@eval(expr)` — evaluate an expression for its side effects, emitting
+	/// nothing. Self-closing.
+	Eval {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@dump(expr)` — pretty-print `expr` for debugging. Self-closing.
+	Dump {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@<name>(args)` — a runtime-registered custom tag (Edge `registerTag`).
+	/// Self-closing; `args_source` is the raw expression list inside the parens.
+	CustomTag {
+		name: String,
+		args_source: String,
+		line: u32,
+		column: u32,
+	},
 	OpenIf {
 		condition: IfCondition,
 		line: u32,
@@ -1249,6 +1286,8 @@ pub enum ParsedBlockTag {
 pub struct ParseBlockTagOptions {
 	pub template_path: Option<String>,
 	pub helpers: HashSet<String>,
+	/// Runtime-registered custom tag names (Edge `registerTag`).
+	pub custom_tags: HashSet<String>,
 }
 
 /// Returns the parsed block tag AND the updated helper-id counter (the parser
@@ -1286,6 +1325,24 @@ pub fn parse_block_tag(
 
 	if REJECTED_DIRECTIVES.contains(keyword.as_str()) {
 		return Err(fail_unknown_directive(&keyword, line, column, template_path));
+	}
+	// A runtime-registered custom tag (Edge `registerTag`): `@<name>(args)` →
+	// a `CustomTag` node; the Node renderer evaluates the args and invokes the
+	// registered handler. Built-in keywords take precedence.
+	if !KNOWN_KEYWORDS.contains(keyword.as_str())
+		&& options.custom_tags.contains(keyword.as_str())
+	{
+		let i = skip_whitespace(&chars, after_keyword);
+		let args_source: String = chars[i..].iter().collect::<String>().trim().to_string();
+		return Ok((
+			ParsedBlockTag::CustomTag {
+				name: keyword,
+				args_source,
+				line,
+				column,
+			},
+			helper_id_start,
+		));
 	}
 	if !KNOWN_KEYWORDS.contains(keyword.as_str()) {
 		return Err(fail_unknown_directive(&keyword, line, column, template_path));
@@ -1607,6 +1664,100 @@ pub fn parse_block_tag(
 		return Ok((ParsedBlockTag::CloseSlot { line, column }, helper_id_start));
 	}
 
+	if keyword == "section" {
+		let after_kw_space = skip_whitespace(&chars, after_keyword);
+		if after_kw_space >= chars.len() {
+			return Err(fail_parse(
+				"section directive requires a quoted section name",
+				line,
+				column,
+				template_path,
+			));
+		}
+		let (name, next) =
+			read_quoted_string(&chars, after_kw_space, line, column, template_path)?;
+		if !SLOT_NAME_RE.is_match(&name) {
+			return Err(fail_parse(
+				format!("Invalid section name '{name}' — must match /^[a-zA-Z_][a-zA-Z0-9_-]*$/"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		let after_name = skip_whitespace(&chars, next);
+		if after_name < chars.len() {
+			let trailing: String = chars[next..].iter().collect();
+			return Err(fail_parse(
+				format!("Unexpected tokens after section name: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::OpenSection { name, line, column }, helper_id_start));
+	}
+
+	if keyword == "endsection" {
+		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after endsection: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((
+			ParsedBlockTag::Close {
+				closes: BlockClosesKind::Section,
+				line,
+				column,
+			},
+			helper_id_start,
+		));
+	}
+
+	if keyword == "super" {
+		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after super: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::Super { line, column }, helper_id_start));
+	}
+
+	if keyword == "eval" {
+		let i = skip_whitespace(&chars, after_keyword);
+		let source: String = chars[i..].iter().collect::<String>().trim().to_string();
+		if source.is_empty() {
+			return Err(fail_invalid_expression(
+				"eval directive requires an expression",
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::Eval { source, line, column }, helper_id_start));
+	}
+
+	if keyword == "dump" {
+		let i = skip_whitespace(&chars, after_keyword);
+		let source: String = chars[i..].iter().collect::<String>().trim().to_string();
+		if source.is_empty() {
+			return Err(fail_invalid_expression(
+				"dump directive requires an expression",
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::Dump { source, line, column }, helper_id_start));
+	}
+
 	if keyword == "endcomponent" {
 		let trailing: String = chars[after_keyword..].iter().collect::<String>().trim().to_string();
 		if !trailing.is_empty() {
@@ -1729,8 +1880,19 @@ mod tests {
 
 	#[test]
 	fn rejected_directive_lists_hint() {
-		let e = parse_block_tag("section 'foo'", 1, 1, &opts(), 0).unwrap_err();
+		// `block` is still reserved/unsupported; `section` is now supported (62-3).
+		let e = parse_block_tag("block", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::UnknownDirective);
+	}
+
+	#[test]
+	fn section_and_super_parse() {
+		let (pb, _) = parse_block_tag("section 'scripts'", 1, 1, &opts(), 0).unwrap();
+		assert!(matches!(pb, ParsedBlockTag::OpenSection { .. }));
+		let (close, _) = parse_block_tag("endsection", 1, 1, &opts(), 0).unwrap();
+		assert!(matches!(close, ParsedBlockTag::Close { closes: BlockClosesKind::Section, .. }));
+		let (sup, _) = parse_block_tag("super", 1, 1, &opts(), 0).unwrap();
+		assert!(matches!(sup, ParsedBlockTag::Super { .. }));
 	}
 
 	#[test]

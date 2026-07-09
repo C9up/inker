@@ -98,17 +98,15 @@ interface NativeExports {
 	readonly parseTemplate: (
 		source: string,
 		helpers: readonly string[],
+		customTags: readonly string[],
 	) => NapiInkerAst;
-	readonly collectInvocations: (
-		ast: NapiInkerAst,
-		data: unknown,
-		ctx: NapiRenderContext,
-	) => NapiInvocation[];
-	readonly renderAst: (
-		ast: NapiInkerAst,
-		data: unknown,
-		resolved: readonly NapiHelperResult[],
-		ctx: NapiRenderContext,
+	/** Serialize a parsed AST handle to a walkable JSON string (62-2 Node renderer). */
+	readonly astToJson: (ast: NapiInkerAst) => string;
+	/** Parse a template directly to a walkable JSON AST string (62-2 Node renderer). */
+	readonly parseTemplateJson: (
+		source: string,
+		helpers: readonly string[],
+		customTags: readonly string[],
 	) => string;
 }
 
@@ -117,8 +115,8 @@ function isNativeExports(value: unknown): value is NativeExports {
 	return (
 		typeof Reflect.get(value, "engineVersion") === "function" &&
 		typeof Reflect.get(value, "parseTemplate") === "function" &&
-		typeof Reflect.get(value, "collectInvocations") === "function" &&
-		typeof Reflect.get(value, "renderAst") === "function"
+		typeof Reflect.get(value, "astToJson") === "function" &&
+		typeof Reflect.get(value, "parseTemplateJson") === "function"
 	);
 }
 

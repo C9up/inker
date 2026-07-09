@@ -67,7 +67,15 @@ export interface InkerProviderConfig {
 // ─── Peer-module shape duck-types ──────────────────────────────────
 
 interface ReamRouter {
+	/** AdonisJS v7 name (`makeUrl` is the deprecated alias). */
+	urlFor(name: string, params?: Record<string, string>): string;
 	makeUrl(name: string, params?: Record<string, string>): string;
+	/** Signed URL (HMAC via APP_KEY). AdonisJS v7 exposes it as `signedUrlFor`. */
+	makeSignedUrl(
+		name: string,
+		params?: Record<string, string>,
+		options?: Record<string, unknown>,
+	): string;
 }
 
 interface RosettaTranslator {
@@ -496,13 +504,14 @@ export function buildCanonicalHelpers(
 		return rosetta.t(key, rosettaParams, { locale: ctx.locale });
 	});
 
+	// D6 (Shield parity): csrfField/csrfMeta DEGRADE — when there is no token
+	// (no request context, or CSRF not enabled), return an empty SafeString
+	// instead of throwing, so templates can write `{{ csrfField() }}`
+	// unconditionally (no `@if(csrfEnabled)` guard).
 	helpers.set("csrfField", (..._args: readonly unknown[]): SafeString => {
-		const ctx = requireCtx("csrfField");
-		const token = ctx.store.get("csrfToken");
+		const token = als.getStore()?.store.get("csrfToken");
 		if (typeof token !== "string" || token.length === 0) {
-			throw new Error(
-				"[inker] csrfField() requires the @c9up/blackhole middleware with csrf enabled (csrfToken not found in ctx.store).",
-			);
+			return new SafeString("");
 		}
 		return new SafeString(
 			`<input type="hidden" name="_csrf" value="${escapeAttr(token)}">`,
@@ -510,12 +519,9 @@ export function buildCanonicalHelpers(
 	});
 
 	helpers.set("csrfMeta", (..._args: readonly unknown[]): SafeString => {
-		const ctx = requireCtx("csrfMeta");
-		const token = ctx.store.get("csrfToken");
+		const token = als.getStore()?.store.get("csrfToken");
 		if (typeof token !== "string" || token.length === 0) {
-			throw new Error(
-				"[inker] csrfMeta() requires the @c9up/blackhole middleware with csrf enabled (csrfToken not found in ctx.store).",
-			);
+			return new SafeString("");
 		}
 		return new SafeString(
 			`<meta name="csrf-token" content="${escapeAttr(token)}">`,
@@ -530,15 +536,28 @@ export function buildCanonicalHelpers(
 		return typeof nonce === "string" ? nonce : "";
 	});
 
-	helpers.set("url", (...args: readonly unknown[]): string => {
+	// AdonisJS v7 URL builder parity: `urlFor` (v7; `makeUrl` is deprecated) and
+	// `signedUrlFor` (HMAC-signed). `url` is kept as a legacy alias of `urlFor`.
+	const buildUrl = (label: string, args: readonly unknown[]): string => {
 		const [name, params] = args;
 		if (typeof name !== "string") {
 			throw new Error(
-				`[inker] url() requires a string route name; got ${typeof name}.`,
+				`[inker] ${label}() requires a string route name; got ${typeof name}.`,
 			);
 		}
-		const coerced = coerceUrlParams(params);
-		return router.makeUrl(name, coerced);
+		return router.urlFor(name, coerceUrlParams(params));
+	};
+	helpers.set("url", (...args: readonly unknown[]): string => buildUrl("url", args));
+	helpers.set("urlFor", (...args: readonly unknown[]): string => buildUrl("urlFor", args));
+	helpers.set("signedUrlFor", (...args: readonly unknown[]): string => {
+		const [name, params, options] = args;
+		if (typeof name !== "string") {
+			throw new Error(
+				`[inker] signedUrlFor() requires a string route name; got ${typeof name}.`,
+			);
+		}
+		const opts = isPlainRecord(options) ? options : undefined;
+		return router.makeSignedUrl(name, coerceUrlParams(params), opts);
 	});
 
 	helpers.set("asset", (...args: readonly unknown[]): string => {
@@ -555,6 +574,10 @@ export function buildCanonicalHelpers(
 }
 
 // ─── Internal predicates / casts ──────────────────────────────────
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 function isRosettaShape(value: unknown): value is RosettaTranslator {
 	return (

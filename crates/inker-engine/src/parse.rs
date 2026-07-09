@@ -46,6 +46,8 @@ pub struct HelperCallSite {
 pub struct ParseOptions {
 	pub template_path: Option<String>,
 	pub helpers: HashSet<String>,
+	/// Runtime-registered custom tag names (Edge `registerTag`).
+	pub custom_tags: HashSet<String>,
 }
 
 fn is_whitespace_only(value: &str) -> bool {
@@ -100,6 +102,12 @@ enum BlockFrame {
 		named_slots: Vec<NamedSlot>,
 		active_slot: Option<SlotBuild>,
 	},
+	Section {
+		line: u32,
+		column: u32,
+		name: String,
+		body_nodes: Vec<InkerNode>,
+	},
 }
 
 impl BlockFrame {
@@ -140,6 +148,7 @@ impl BlockFrame {
 				Some(slot) => &mut slot.nodes,
 				None => body_nodes,
 			},
+			BlockFrame::Section { body_nodes, .. } => body_nodes,
 		}
 	}
 
@@ -149,6 +158,7 @@ impl BlockFrame {
 			BlockFrame::If { .. } => "if",
 			BlockFrame::Each { .. } => "each",
 			BlockFrame::Component { .. } => "component",
+			BlockFrame::Section { .. } => "section",
 		}
 	}
 
@@ -156,7 +166,8 @@ impl BlockFrame {
 		match self {
 			BlockFrame::If { line, .. }
 			| BlockFrame::Each { line, .. }
-			| BlockFrame::Component { line, .. } => *line,
+			| BlockFrame::Component { line, .. }
+			| BlockFrame::Section { line, .. } => *line,
 		}
 	}
 
@@ -164,7 +175,8 @@ impl BlockFrame {
 		match self {
 			BlockFrame::If { column, .. }
 			| BlockFrame::Each { column, .. }
-			| BlockFrame::Component { column, .. } => *column,
+			| BlockFrame::Component { column, .. }
+			| BlockFrame::Section { column, .. } => *column,
 		}
 	}
 }
@@ -290,7 +302,8 @@ fn collect_helpers_in_expr(expr: &Expression, out: &mut Vec<HelperCallSite>) {
 			collect_helpers_in_expr(right, out);
 		}
 		Expression::Group { expression, .. } => collect_helpers_in_expr(expression, out),
-		Expression::Literal { .. } | Expression::Path { .. } => {}
+		// `Raw` is helper-free by construction (see `parse_expression::raw_fallback`).
+		Expression::Literal { .. } | Expression::Path { .. } | Expression::Raw { .. } => {}
 	}
 }
 
@@ -347,10 +360,19 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
 		InkerNode::Let { expression, .. } => {
 			collect_helpers_in_expr(expression, out);
 		}
+		InkerNode::Section { body_nodes, .. } => {
+			for n in body_nodes {
+				collect_helpers_in_node(n, out);
+			}
+		}
 		InkerNode::Text { .. }
 		| InkerNode::Layout(_)
 		| InkerNode::Partial(_)
-		| InkerNode::Slot(_) => {}
+		| InkerNode::Slot(_)
+		| InkerNode::Super { .. }
+		| InkerNode::Eval { .. }
+		| InkerNode::Dump { .. }
+		| InkerNode::CustomTag { .. } => {}
 	}
 }
 
@@ -431,6 +453,7 @@ pub fn parse(
 				let bt_opts = ParseBlockTagOptions {
 					template_path: template_path.map(|s| s.to_string()),
 					helpers: options.helpers.clone(),
+					custom_tags: options.custom_tags.clone(),
 				};
 				let (parsed, next_id) =
 					parse_block_tag(raw, *line, *column, &bt_opts, helper_id_counter)?;
@@ -828,6 +851,90 @@ pub fn parse(
 							seen_non_whitespace_content = true;
 						}
 					}
+					ParsedBlockTag::OpenSection {
+						name,
+						line: pl,
+						column: pc,
+					} => {
+						open_blocks.push(BlockFrame::Section {
+							line: pl,
+							column: pc,
+							name,
+							body_nodes: Vec::new(),
+						});
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Super {
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Super { line: pl, column: pc },
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Eval {
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Eval {
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Dump {
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Dump {
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::CustomTag {
+						name,
+						args_source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::CustomTag {
+								name,
+								args_source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
 					ParsedBlockTag::Else {
 						line: pl,
 						column: pc,
@@ -849,11 +956,12 @@ pub fn parse(
 						let already = match top {
 							BlockFrame::If { in_else, .. } => *in_else,
 							BlockFrame::Each { in_else, .. } => *in_else,
-							BlockFrame::Component { .. } => {
+							BlockFrame::Component { .. } | BlockFrame::Section { .. } => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
 									format!(
-										"@else inside a @component() block — 'else' is only valid in @if / @each (at line {pl}, column {pc})"
+										"@else inside a @{} block — 'else' is only valid in @if / @each (at line {pl}, column {pc})",
+										top.open_keyword()
 									),
 									pl,
 									pc,
@@ -866,6 +974,7 @@ pub fn parse(
 								BlockFrame::If { .. } => "if",
 								BlockFrame::Each { .. } => "each",
 								BlockFrame::Component { .. } => "component",
+								BlockFrame::Section { .. } => "section",
 							};
 							let frame_line = top.line();
 							return Err(make_err(
@@ -895,7 +1004,7 @@ pub fn parse(
 								*in_else = true;
 								*else_nodes = Some(Vec::new());
 							}
-							BlockFrame::Component { .. } => {}
+							BlockFrame::Component { .. } | BlockFrame::Section { .. } => {}
 						}
 					}
 					ParsedBlockTag::Close {
@@ -909,6 +1018,7 @@ pub fn parse(
 								let kw = match closes {
 									BlockClosesKind::If => "endif",
 									BlockClosesKind::Each => "endeach",
+									BlockClosesKind::Section => "endsection",
 								};
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
@@ -924,6 +1034,7 @@ pub fn parse(
 						let matches_close = match top {
 							BlockFrame::If { .. } => closes == BlockClosesKind::If,
 							BlockFrame::Each { .. } => closes == BlockClosesKind::Each,
+							BlockFrame::Section { .. } => closes == BlockClosesKind::Section,
 							BlockFrame::Component { .. } => false,
 						};
 						if !matches_close {
@@ -931,6 +1042,7 @@ pub fn parse(
 							let close_kw = match closes {
 								BlockClosesKind::If => "endif",
 								BlockClosesKind::Each => "endeach",
+								BlockClosesKind::Section => "endsection",
 							};
 							let top_line = top.line();
 							let top_col = top.column();
@@ -969,6 +1081,17 @@ pub fn parse(
 								binding,
 								body_nodes,
 								else_nodes,
+								line,
+								column,
+							},
+							BlockFrame::Section {
+								name,
+								body_nodes,
+								line,
+								column,
+							} => InkerNode::Section {
+								name,
+								body_nodes,
 								line,
 								column,
 							},
@@ -1155,6 +1278,7 @@ mod tests {
 				s.insert("upper".to_string());
 				s
 			},
+			custom_tags: HashSet::new(),
 		};
 		let ast = parse(&tokens, &opts).unwrap();
 		assert_eq!(ast.helper_call_sites.len(), 1);
@@ -1172,6 +1296,7 @@ mod tests {
 		let opts = ParseOptions {
 			template_path: None,
 			helpers,
+			custom_tags: HashSet::new(),
 		};
 		let ast = parse(&tokens, &opts).unwrap();
 		assert_eq!(ast.helper_call_sites.len(), 2);
@@ -1179,5 +1304,41 @@ mod tests {
 		assert_eq!(ast.helper_call_sites[0].name, "b");
 		assert_eq!(ast.helper_call_sites[1].id, 1); // a() second (outer)
 		assert_eq!(ast.helper_call_sites[1].name, "a");
+	}
+
+	#[test]
+	fn custom_tag_is_inert_without_registration() {
+		// `@svg(...)` with no registered tag is plain text — the lexer never
+		// treats an unknown `@word` as a block tag (Edge parity).
+		let tokens = lex("@svg('x')", &LexOptions::default()).unwrap();
+		let ast = parse(&tokens, &ParseOptions::default()).unwrap();
+		assert_eq!(ast.nodes.len(), 1);
+		assert!(matches!(&ast.nodes[0], InkerNode::Text { value } if value == "@svg('x')"));
+	}
+
+	#[test]
+	fn registered_custom_tag_parses_to_custom_tag_node() {
+		let mut custom_tags = HashSet::new();
+		custom_tags.insert("svg".to_string());
+		let lex_opts = LexOptions {
+			template_path: None,
+			custom_tags: custom_tags.clone(),
+		};
+		let tokens = lex("@svg('user', { class: size })", &lex_opts).unwrap();
+		let opts = ParseOptions {
+			template_path: None,
+			helpers: HashSet::new(),
+			custom_tags,
+		};
+		let ast = parse(&tokens, &opts).unwrap();
+		assert_eq!(ast.nodes.len(), 1);
+		match &ast.nodes[0] {
+			InkerNode::CustomTag { name, args_source, .. } => {
+				assert_eq!(name, "svg");
+				// The block-tag lexer strips the outer parens; args survive verbatim.
+				assert_eq!(args_source, "'user', { class: size }");
+			}
+			other => panic!("expected CustomTag node, got {other:?}"),
+		}
 	}
 }

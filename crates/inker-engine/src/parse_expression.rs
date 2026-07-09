@@ -128,6 +128,17 @@ pub enum Expression {
 		line: u32,
 		column: u32,
 	},
+	/// A full-JS expression the restricted grammar does not model (method
+	/// calls, ternary, arrow fns, arithmetic, arrays, …). The source is
+	/// captured verbatim and evaluated by the embedded QuickJS VM (62-2,
+	/// Edge parity). Only produced when the source contains no registered
+	/// helper call — helper-in-rich-expression is deferred to the 62-2 helper
+	/// bridge. Carries no structured children (helper-free by construction).
+	Raw {
+		source: String,
+		line: u32,
+		column: u32,
+	},
 }
 
 impl Expression {
@@ -139,7 +150,8 @@ impl Expression {
 			| Expression::Object { source, .. }
 			| Expression::Unary { source, .. }
 			| Expression::Binary { source, .. }
-			| Expression::Group { source, .. } => source,
+			| Expression::Group { source, .. }
+			| Expression::Raw { source, .. } => source,
 		}
 	}
 
@@ -151,7 +163,8 @@ impl Expression {
 			| Expression::Object { line, .. }
 			| Expression::Unary { line, .. }
 			| Expression::Binary { line, .. }
-			| Expression::Group { line, .. } => *line,
+			| Expression::Group { line, .. }
+			| Expression::Raw { line, .. } => *line,
 		}
 	}
 
@@ -163,7 +176,8 @@ impl Expression {
 			| Expression::Object { column, .. }
 			| Expression::Unary { column, .. }
 			| Expression::Binary { column, .. }
-			| Expression::Group { column, .. } => *column,
+			| Expression::Group { column, .. }
+			| Expression::Raw { column, .. } => *column,
 		}
 	}
 
@@ -188,7 +202,9 @@ impl Expression {
 				right.collect_call_sites(out);
 			}
 			Expression::Group { expression, .. } => expression.collect_call_sites(out),
-			Expression::Literal { .. } | Expression::Path { .. } => {}
+			// `Raw` is helper-free by construction (only emitted when the source
+			// contains no registered helper call), so it has no call sites.
+			Expression::Literal { .. } | Expression::Path { .. } | Expression::Raw { .. } => {}
 		}
 	}
 }
@@ -1081,6 +1097,29 @@ fn parse_or(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 	parse_binary(cursor, 1)
 }
 
+/// Fallback for a source the restricted grammar could not parse: if it contains
+/// no registered helper call, capture it as a full-JS `Raw` node (evaluated by
+/// the QuickJS VM — Edge parity, 62-2). If it DOES call a helper, the helper
+/// bridge (62-2 Task 4) is not in yet, so surface the original strict error.
+fn raw_fallback(
+	source: &str,
+	line: u32,
+	column: u32,
+	strict_err: InkerError,
+) -> Result<Expression, InkerError> {
+	// Only RELAX pure grammar-shape rejections (`ParseError`: method calls,
+	// ternary, arrow fns, arithmetic, arrays, unary minus, …) into a full-JS
+	// `Raw` node. PRESERVE the semantic guards — unknown helper (`UnknownHelper`,
+	// typo detection) and proto-pollution / reserved-shorthand (`InvalidExpression`)
+	// keep erroring at parse time. A rich expression that CALLS a registered
+	// helper (`filter(u => can(u))`) is a `ParseError` (method call) → `Raw`; the
+	// Node renderer evaluates it in V8 with the helper in scope (62-2 Edge pivot).
+	if strict_err.code != ErrorCode::ParseError {
+		return Err(strict_err);
+	}
+	Ok(Expression::Raw { source: source.to_string(), line, column })
+}
+
 /// Top-level entry. Parses an entire expression and asserts no trailing
 /// content. Also returns the helper-callsite counter so the caller can fold it
 /// into the parent AST's `helper_count`.
@@ -1101,20 +1140,23 @@ pub fn parse_expression(
 		}
 		return Err(e);
 	}
-	let mut cursor = make_cursor(source, line, column, options);
-	skip_whitespace(&mut cursor);
-	let expr = parse_or(&mut cursor)?;
-	skip_whitespace(&mut cursor);
-	if cursor.pos < cursor.chars.len() {
-		let tail: String = cursor.chars[cursor.pos..].iter().collect();
-		let pos = cursor.pos;
-		return Err(fail_parse(
-			&cursor,
-			format!("trailing content after expression: '{tail}'"),
-			pos,
-		));
-	}
-	Ok(expr)
+	let strict: Result<Expression, InkerError> = (|| {
+		let mut cursor = make_cursor(source, line, column, options);
+		skip_whitespace(&mut cursor);
+		let expr = parse_or(&mut cursor)?;
+		skip_whitespace(&mut cursor);
+		if cursor.pos < cursor.chars.len() {
+			let tail: String = cursor.chars[cursor.pos..].iter().collect();
+			let pos = cursor.pos;
+			return Err(fail_parse(
+				&cursor,
+				format!("trailing content after expression: '{tail}'"),
+				pos,
+			));
+		}
+		Ok(expr)
+	})();
+	strict.or_else(|e| raw_fallback(source, line, column, e))
 }
 
 /// Parse and ALSO return the helper-callsite count so it can be folded into
@@ -1129,21 +1171,26 @@ pub fn parse_expression_with_helper_count(
 	if source.is_empty() {
 		return parse_expression(source, line, column, options).map(|e| (e, start_id));
 	}
-	let mut cursor = make_cursor(source, line, column, options);
-	cursor.next_helper_id = start_id;
-	skip_whitespace(&mut cursor);
-	let expr = parse_or(&mut cursor)?;
-	skip_whitespace(&mut cursor);
-	if cursor.pos < cursor.chars.len() {
-		let tail: String = cursor.chars[cursor.pos..].iter().collect();
-		let pos = cursor.pos;
-		return Err(fail_parse(
-			&cursor,
-			format!("trailing content after expression: '{tail}'"),
-			pos,
-		));
-	}
-	Ok((expr, cursor.next_helper_id))
+	let strict: Result<(Expression, u32), InkerError> = (|| {
+		let mut cursor = make_cursor(source, line, column, options);
+		cursor.next_helper_id = start_id;
+		skip_whitespace(&mut cursor);
+		let expr = parse_or(&mut cursor)?;
+		skip_whitespace(&mut cursor);
+		if cursor.pos < cursor.chars.len() {
+			let tail: String = cursor.chars[cursor.pos..].iter().collect();
+			let pos = cursor.pos;
+			return Err(fail_parse(
+				&cursor,
+				format!("trailing content after expression: '{tail}'"),
+				pos,
+			));
+		}
+		Ok((expr, cursor.next_helper_id))
+	})();
+	// A `Raw` fallback contains no helper calls, so the helper-id counter is
+	// unchanged (stays `start_id`).
+	strict.or_else(|e| raw_fallback(source, line, column, e).map(|expr| (expr, start_id)))
 }
 
 #[cfg(test)]
@@ -1272,12 +1319,15 @@ mod tests {
 
 	#[test]
 	fn deep_unary_chain_is_bounded_not_stack_overflow() {
-		// A long `!` chain must hit the depth guard (ParseError), not recurse
-		// unboundedly and overflow the native stack (which would abort the
-		// process across the NAPI boundary).
+		// A long `!` chain must not overflow the native stack (which would abort
+		// the process across the NAPI boundary). The strict parser still hits its
+		// depth guard (a ParseError) BEFORE recursing to overflow; that grammar
+		// rejection then falls back to a full-JS `Raw` node evaluated by the VM
+		// (which has its own bounded stack). The invariant preserved here is
+		// "no native stack overflow", not the specific error.
 		let src = format!("{}x", "!".repeat(MAX_EXPRESSION_DEPTH as usize + 50));
-		let e = parse_expression(&src, 1, 1, &opts_no_helpers()).unwrap_err();
-		assert_eq!(e.code, ErrorCode::ParseError);
+		let e = parse_expression(&src, 1, 1, &opts_no_helpers()).unwrap();
+		assert!(matches!(e, Expression::Raw { .. }));
 	}
 
 	#[test]
@@ -1290,15 +1340,19 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_unary_minus_in_path_position() {
-		let e = parse_expression("-foo", 1, 1, &opts_no_helpers()).unwrap_err();
-		assert_eq!(e.code, ErrorCode::ParseError);
+	fn unary_minus_is_full_js_raw() {
+		// `-foo` (numeric negation) is valid JS the restricted grammar rejected;
+		// it now falls back to a `Raw` node evaluated by the VM (Edge parity).
+		let e = parse_expression("-foo", 1, 1, &opts_no_helpers()).unwrap();
+		assert!(matches!(e, Expression::Raw { .. }));
 	}
 
 	#[test]
-	fn rejects_array_literal() {
-		let e = parse_expression("[1, 2]", 1, 1, &opts_no_helpers()).unwrap_err();
-		assert_eq!(e.code, ErrorCode::ParseError);
+	fn array_literal_is_full_js_raw() {
+		// Array literals in expression position are valid JS (Edge parity); the
+		// restricted grammar rejected them, they now fall back to a `Raw` node.
+		let e = parse_expression("[1, 2]", 1, 1, &opts_no_helpers()).unwrap();
+		assert!(matches!(e, Expression::Raw { .. }));
 	}
 
 	#[test]

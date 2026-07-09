@@ -9,14 +9,17 @@ import {
 } from "./identifierGuards.js";
 import {
 	getNative,
-	type NapiHelperResult,
 	type NapiInkerAst,
-	type NapiInvocation,
 	type NapiNodeRef,
-	type NapiRenderContext,
 	napiThrowToInker,
 } from "./loadNapi.js";
-import { SafeString } from "./SafeString.js";
+import { EDGE_GLOBAL_NAMES } from "./globals.js";
+import {
+	collectSections,
+	type InkerNodeJson,
+	type InkerTag,
+	renderNodeTree,
+} from "./renderNode.js";
 
 export type CacheMode = "auto" | "mtime" | "never";
 
@@ -74,6 +77,17 @@ const VALID_CACHE_MODES: ReadonlySet<string> = new Set([
 	"auto",
 	"mtime",
 	"never",
+]);
+
+// Built-in block/directive keywords a custom tag may not shadow (registerTag).
+// The parser already ignores these as custom tags; rejecting them here makes the
+// collision loud instead of silently inert.
+const RESERVED_TAG_NAMES: ReadonlySet<string> = new Set([
+	"if", "elseif", "else", "endif",
+	"each", "endeach",
+	"let", "layout", "include", "component", "endcomponent",
+	"slot", "endslot", "section", "endsection", "super",
+	"eval", "dump",
 ]);
 
 function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
@@ -556,7 +570,7 @@ function validateHelpers(
 			`Templates.helpers must be a Map; got ${Object.prototype.toString.call(helpers).slice(8, -1)}`,
 		);
 	}
-	const helperNames = new Set<string>();
+	const helperNames = new Set<string>(EDGE_GLOBAL_NAMES);
 	for (const [key, value] of helpers) {
 		// T3: validate the key is a string BEFORE handing it to
 		// HELPER_NAME_RE.test(), which ToString-coerces and throws a raw
@@ -617,6 +631,11 @@ export class Templates {
 	#cacheGeneration = 0;
 	readonly #helpers: ReadonlyMap<string, HelperFn>;
 	readonly #helperNames: ReadonlySet<string>;
+	// Runtime-registered custom tags (Edge `registerTag`). Names here make the
+	// parser recognise `@<tagName>(jsArg)` as a `CustomTag` node; the tag's
+	// `compile` runs at render time. A LIVE map, like `#helpers` — but because
+	// tag names change how a template PARSES, registerTag() invalidates the cache.
+	readonly #tags: Map<string, InkerTag> = new Map();
 	// Named template "disks" (AdonisJS/Edge `edge.mount(name, dir)` parity).
 	// The DEFAULT disk is `#root` (the constructor `root`), addressed by a bare
 	// `template` name; a NAMED disk is addressed as `name::template`. Each value
@@ -678,6 +697,53 @@ export class Templates {
 	}
 
 	/**
+	 * Register a custom tag (AdonisJS/Edge `edge.registerTag` parity). The `tag`
+	 * definition — `{ tagName, block, seekable, compile(parser, buffer, token) }` —
+	 * makes the parser recognise `@<tagName>(jsArg)` in every template and emit a
+	 * `CustomTag` node. At render time inker calls `compile`, whose `buffer`
+	 * writes the output (`writeRaw` for verbatim markup, `outputExpression` to
+	 * evaluate a template expression) and whose `token.properties.jsArg` is the
+	 * verbatim argument source, e.g. an `@svg('icon')` or `@time()` tag.
+	 *
+	 * INKER DEVIATION (named): Edge runs `compile` once at compilation (it emits
+	 * JS); inker parses in Rust and renders by walking the JSON AST, so `compile`
+	 * runs at RENDER time. Only inline tags (`block: false`) are supported for now.
+	 *
+	 * Because tag names change how a template PARSES, registering (or overwriting)
+	 * a tag clears the AST cache — call `registerTag` during boot, before rendering.
+	 */
+	registerTag(tag: InkerTag): void {
+		const name = tag?.tagName;
+		if (typeof name !== "string" || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTag — tagName must be a valid identifier (letters, digits, underscore; not starting with a digit); got ${JSON.stringify(name)}`,
+			);
+		}
+		if (RESERVED_TAG_NAMES.has(name)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTag({ tagName: '${name}' }) — '${name}' is a built-in inker directive and cannot be overridden`,
+			);
+		}
+		if (typeof tag.compile !== "function") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTag({ tagName: '${name}' }) — compile must be a function`,
+			);
+		}
+		if (tag.block === true) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTag({ tagName: '${name}' }) — block custom tags (@${name}…@end${name}) are not supported yet; register an inline tag (block: false)`,
+			);
+		}
+		this.#tags.set(name, tag);
+		// A new tag name changes parse output; drop any AST parsed without it.
+		this.clearCache();
+	}
+
+	/**
 	 * Split an optionally-namespaced template name into its resolution root and
 	 * bare (disk-relative) name. `name::path` → the mounted disk's root; a bare
 	 * `path` → the default root. Unknown disk → loud E_INKER_INVALID_PATH.
@@ -721,6 +787,12 @@ export class Templates {
 	): Promise<string> {
 		const { root, validated, absPath } = this.#resolveTemplateFile(name);
 
+		// Validate the data tree (rejects NaN / ±Infinity / out-of-range bigint /
+		// sparse holes / circular refs) — the Node renderer evaluates the ORIGINAL
+		// data in V8 (Maps/Sets intact), so `encodeData`'s result is discarded and
+		// only its guard side-effects are kept.
+		encodeData(data);
+
 		const entryAst = await this.#loadAst(absPath, validated, root);
 		const composed = await this.#compose(
 			entryAst,
@@ -729,61 +801,63 @@ export class Templates {
 			new Set([absPath]),
 		);
 
-		const native = getNative();
-		const encoded = encodeData(data);
-		const partials = Object.fromEntries(composed.partialAsts);
-		const components = Object.fromEntries(composed.componentAsts);
-
-		// Body pass — collect helper invocations in render order, invoke them
-		// TS-side, then render consuming the resolved tape (ADR-007 as adapted
-		// for 55.1: collect→invoke→render, no V8 callback).
-		const bodyCtx: NapiRenderContext = {
-			partials,
-			components,
-			bodyHtml: undefined,
-			templateName: validated,
-			templatePath: absPath,
-		};
-		const bodyTape = callNative(() =>
-			native.collectInvocations(composed.bodyAst, encoded, bodyCtx),
-		);
-		const bodyResolved = this.#invokeHelpers(bodyTape, validated, absPath);
-		const bodyHtml = callNative(() =>
-			native.renderAst(composed.bodyAst, encoded, bodyResolved, bodyCtx),
-		);
-
-		if (composed.layoutAst === undefined) {
-			return bodyHtml;
+		// Node renderer (62-2 pivot): convert the loaded AST handles to JSON node
+		// lists and evaluate every expression in Node's own V8 with the helpers in
+		// scope (Edge model — no tape, no QuickJS, no FFI).
+		const partials = new Map<string, readonly InkerNodeJson[]>();
+		for (const [key, handle] of composed.partialAsts) {
+			partials.set(key, this.#astNodes(handle));
+		}
+		const components = new Map<string, readonly InkerNodeJson[]>();
+		for (const [key, handle] of composed.componentAsts) {
+			components.set(key, this.#astNodes(handle));
 		}
 
-		const layoutAst = composed.layoutAst;
-		const layoutName = composed.layoutName ?? validated;
-		const layoutPath = composed.layoutAbsPath ?? absPath;
-		// Layout collect ctx omits bodyHtml (slots carry no helpers); render ctx
-		// injects it. Both walk identically so the tape aligns.
-		const layoutTape = callNative(() =>
-			native.collectInvocations(layoutAst, encoded, {
-				partials,
-				components,
-				bodyHtml: undefined,
-				templateName: layoutName,
-				templatePath: layoutPath,
-			}),
+		const childNodes = this.#astNodes(composed.bodyAst);
+		const baseCtx = { partials, components, tags: this.#tags };
+
+		// No layout → render the child directly (`@section`s render inline).
+		if (composed.layoutAst === undefined) {
+			return renderNodeTree(childNodes, data, this.#helpers, baseCtx);
+		}
+
+		// With a layout: separate the child's `@section` fills from the default
+		// body, render each section (with `@super` = the layout's default for it),
+		// and inject them at the layout's matching yields (62-3).
+		const { sections: childSections, body: childBody } = collectSections(childNodes);
+		const bodyHtml = renderNodeTree(childBody, data, this.#helpers, baseCtx);
+
+		const layoutNodes = this.#astNodes(composed.layoutAst);
+		const { sections: layoutDefaults } = collectSections(layoutNodes);
+		const sections = new Map<string, string>();
+		for (const [name, sectionNodes] of childSections) {
+			const layoutDefault = layoutDefaults.get(name);
+			const superHtml =
+				layoutDefault !== undefined
+					? renderNodeTree(layoutDefault, data, this.#helpers, baseCtx)
+					: "";
+			sections.set(
+				name,
+				renderNodeTree(sectionNodes, data, this.#helpers, {
+					...baseCtx,
+					superHtml,
+				}),
+			);
+		}
+
+		return renderNodeTree(layoutNodes, data, this.#helpers, {
+			...baseCtx,
+			bodyHtml,
+			sections,
+		});
+	}
+
+	/** Convert a parsed AST handle to its JSON node list (62-2 Node renderer). */
+	#astNodes(handle: NapiInkerAst): readonly InkerNodeJson[] {
+		const parsed: { nodes: readonly InkerNodeJson[] } = JSON.parse(
+			getNative().astToJson(handle),
 		);
-		const layoutResolved = this.#invokeHelpers(
-			layoutTape,
-			layoutName,
-			layoutPath,
-		);
-		return callNative(() =>
-			native.renderAst(layoutAst, encoded, layoutResolved, {
-				partials,
-				components,
-				bodyHtml,
-				templateName: layoutName,
-				templatePath: layoutPath,
-			}),
-		);
+		return parsed.nodes;
 	}
 
 	renderString(
@@ -801,7 +875,9 @@ export class Templates {
 			: source;
 		const native = getNative();
 		const ast = callNative(() =>
-			native.parseTemplate(normalisedSource, [...this.#helperNames]),
+			native.parseTemplate(normalisedSource, [...this.#helperNames], [
+				...this.#tags.keys(),
+			]),
 		);
 
 		const info = ast.composeInfo;
@@ -840,78 +916,13 @@ export class Templates {
 			);
 		}
 
-		const ctx: NapiRenderContext = {
-			partials: {},
-			components: {},
-			bodyHtml: undefined,
-			templateName: undefined,
-			templatePath: undefined,
-		};
-		const encoded = encodeData(data);
-		const tape = callNative(() => native.collectInvocations(ast, encoded, ctx));
-		const resolved = this.#invokeHelpers(tape, undefined, undefined);
-		return callNative(() => native.renderAst(ast, encoded, resolved, ctx));
-	}
-
-	// Invoke each collected helper TS-side in tape order, producing the resolved
-	// values the renderer consumes. Mirrors the old `render.ts` Call-arm
-	// contract: SafeString → raw; null/undefined → ""; non-string/SafeString or
-	// a throw / thenable → E_INKER_HELPER_THROW (preserving InkerRenderError
-	// passthrough + cause chain).
-	#invokeHelpers(
-		tape: readonly NapiInvocation[],
-		templateName: string | undefined,
-		templatePath: string | undefined,
-	): NapiHelperResult[] {
-		const out: NapiHelperResult[] = [];
-		for (const inv of tape) {
-			const helper = this.#helpers.get(inv.name);
-			if (helper === undefined) {
-				throw new InkerRenderError(
-					"E_INKER_UNKNOWN_HELPER",
-					`Helper '${inv.name}' is not registered in this Templates instance`,
-					{ templatePath, templateName, expression: inv.name },
-				);
-			}
-			let result: string | SafeString;
-			let thenProp: unknown;
-			try {
-				result = helper(...inv.args);
-				if (result !== null && typeof result === "object") {
-					thenProp = Reflect.get(result, "then");
-				}
-			} catch (cause) {
-				if (cause instanceof InkerRenderError) throw cause;
-				const message = cause instanceof Error ? cause.message : String(cause);
-				throw new InkerRenderError(
-					"E_INKER_HELPER_THROW",
-					`Helper '${inv.name}' threw: ${message}`,
-					{ templatePath, templateName, expression: inv.name },
-					{ cause },
-				);
-			}
-			if (typeof thenProp === "function") {
-				throw new InkerRenderError(
-					"E_INKER_HELPER_THROW",
-					`Helper '${inv.name}' returned a Promise/thenable — Inker renderers are synchronous (D2)`,
-					{ templatePath, templateName, expression: inv.name },
-				);
-			}
-			if (result instanceof SafeString) {
-				out.push({ value: result.value, isSafe: true });
-			} else if (result === null || result === undefined) {
-				out.push({ value: "", isSafe: false });
-			} else if (typeof result === "string") {
-				out.push({ value: result, isSafe: false });
-			} else {
-				throw new InkerRenderError(
-					"E_INKER_HELPER_THROW",
-					`Helper '${inv.name}' returned ${typeof result} — Inker helpers must return string | SafeString | null | undefined (D2)`,
-					{ templatePath, templateName, expression: inv.name },
-				);
-			}
-		}
-		return out;
+		// No disk directives here (rejected above), so a bare node list renders
+		// through the Node renderer (62-2 pivot) with the helpers in scope.
+		// Validate the data tree (guard side-effects only; render the original).
+		encodeData(data);
+		return renderNodeTree(this.#astNodes(ast), data, this.#helpers, {
+			tags: this.#tags,
+		});
 	}
 
 	clearCache(): void {
@@ -1049,7 +1060,9 @@ export class Templates {
 		}
 
 		const ast = callNative(() =>
-			getNative().parseTemplate(source, [...this.#helperNames]),
+			getNative().parseTemplate(source, [...this.#helperNames], [
+				...this.#tags.keys(),
+			]),
 		);
 
 		// T7: only populate the cache if the generation is unchanged. If

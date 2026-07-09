@@ -12,16 +12,12 @@ pub mod escape;
 pub mod identifiers;
 pub mod lex;
 pub mod ast;
-pub mod collect;
 pub mod parse;
 pub mod parse_block_tag;
 pub mod parse_expression;
 pub mod parse_path;
-pub mod render;
 pub mod resolve_path;
 
-pub use collect::{collect_invocations, Invocation};
 pub use error::{ErrorCode, InkerError};
 pub use escape::{escape_attr, escape_text};
 pub use parse::{parse, InkerAst, ParseOptions};
-pub use render::{render, RenderContext, ResolvedHelperValue};

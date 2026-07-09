@@ -21,6 +21,12 @@ import { SafeString } from "../../src/SafeString.js";
 
 interface StubRouter {
 	makeUrl(name: string, params?: Record<string, string>): string;
+	urlFor(name: string, params?: Record<string, string>): string;
+	makeSignedUrl(
+		name: string,
+		params?: Record<string, string>,
+		options?: Record<string, unknown>,
+	): string;
 }
 
 interface StubRosetta {
@@ -49,7 +55,14 @@ function mkAppContext(
 	const resolved: Record<string, unknown> =
 		"router" in bindings
 			? bindings
-			: { router: { makeUrl: () => "/" }, ...bindings };
+			: {
+					router: {
+						makeUrl: () => "/",
+						urlFor: () => "/",
+						makeSignedUrl: () => "/?signature=stub",
+					},
+					...bindings,
+				};
 	const app: InkerAppContext = {
 		container: {
 			singleton<T>(token: unknown, factory: () => T) {
@@ -344,11 +357,14 @@ describe("buildCanonicalHelpers", () => {
 				opts.rosettaT ??
 				((key, _params, options) => `${options?.locale ?? "en"}:${key}`),
 		};
+		const makeUrl =
+			opts.routerMakeUrl ??
+			((name: string, params?: Record<string, string>) =>
+				params ? `/${name}/${Object.values(params).join("/")}` : `/${name}`);
 		const router: StubRouter = {
-			makeUrl:
-				opts.routerMakeUrl ??
-				((name, params) =>
-					params ? `/${name}/${Object.values(params).join("/")}` : `/${name}`),
+			makeUrl,
+			urlFor: makeUrl, // v7 name delegates to the same stub
+			makeSignedUrl: (name, params, _options) => `${makeUrl(name, params)}?signature=stub`,
 		};
 		const helpers = buildCanonicalHelpers(
 			als,
@@ -426,21 +442,25 @@ describe("buildCanonicalHelpers", () => {
 		);
 	});
 
-	it("csrfField() throws when csrfToken is missing from store", () => {
+	it("csrfField() degrades to an empty SafeString when csrfToken is missing (D6)", () => {
 		const { als, helpers } = setup();
 		const helper = helpers.get("csrfField");
-		expect(() => runInCtx(als, ctx(), () => helper?.())).toThrow(
-			/blackhole middleware with csrf enabled/,
-		);
+		const result = runInCtx(als, ctx(), () => helper?.());
+		if (!(result instanceof SafeString)) {
+			throw new Error("expected SafeString return");
+		}
+		expect(result.value).toBe("");
 	});
 
-	it("csrfField() throws when csrfToken is an empty string", () => {
+	it("csrfField() degrades to an empty SafeString when csrfToken is an empty string (D6)", () => {
 		const { als, helpers } = setup();
 		const helper = helpers.get("csrfField");
 		const store = new Map<string, unknown>([["csrfToken", ""]]);
-		expect(() => runInCtx(als, ctx({ store }), () => helper?.())).toThrow(
-			/csrfToken not found in ctx\.store/,
-		);
+		const result = runInCtx(als, ctx({ store }), () => helper?.());
+		if (!(result instanceof SafeString)) {
+			throw new Error("expected SafeString return");
+		}
+		expect(result.value).toBe("");
 	});
 
 	it("csrfMeta() renders the <meta name=csrf-token> tag from the store", () => {
@@ -456,12 +476,14 @@ describe("buildCanonicalHelpers", () => {
 		);
 	});
 
-	it("csrfMeta() throws when csrfToken is missing", () => {
+	it("csrfMeta() degrades to an empty SafeString when csrfToken is missing (D6)", () => {
 		const { als, helpers } = setup();
 		const helper = helpers.get("csrfMeta");
-		expect(() => runInCtx(als, ctx(), () => helper?.())).toThrow(
-			/blackhole middleware with csrf enabled/,
-		);
+		const result = runInCtx(als, ctx(), () => helper?.());
+		if (!(result instanceof SafeString)) {
+			throw new Error("expected SafeString return");
+		}
+		expect(result.value).toBe("");
 	});
 
 	it("cspNonce() returns the store nonce, or '' when absent (opt-in)", () => {
@@ -494,6 +516,21 @@ describe("buildCanonicalHelpers", () => {
 		expect(() => runInCtx(als, ctx(), () => url?.(42))).toThrow(
 			/url\(\) requires a string route name/,
 		);
+	});
+
+	it("urlFor() is the AdonisJS v7 name (delegates to router.urlFor)", () => {
+		const { als, helpers } = setup();
+		const urlFor = helpers.get("urlFor");
+		expect(runInCtx(als, ctx(), () => urlFor?.("users.show", { id: 7 }))).toBe("/users.show/7");
+	});
+
+	it("signedUrlFor() delegates to router.makeSignedUrl (v7 signed URL)", () => {
+		const { als, helpers } = setup();
+		const signed = helpers.get("signedUrlFor");
+		const result = runInCtx(als, ctx(), () =>
+			signed?.("users.show", { id: 7 }, { expiresIn: "30m" }),
+		);
+		expect(result).toBe("/users.show/7?signature=stub");
 	});
 
 	it("url() propagates router throws (unknown name)", () => {

@@ -12,5 +12,11 @@ export {
 	type InkerErrorContext,
 	InkerRenderError,
 } from "./InkerRenderError.js";
+export type {
+	InkerTag,
+	InkerTagBuffer,
+	InkerTagParser,
+	InkerTagToken,
+} from "./renderNode.js";
 export { SafeString } from "./SafeString.js";
 export { Templates, type TemplatesOptions } from "./Templates.js";

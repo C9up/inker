@@ -62,6 +62,9 @@ pub enum Token {
 #[derive(Debug, Default, Clone)]
 pub struct LexOptions {
 	pub template_path: Option<String>,
+	/// Runtime-registered custom tag names (Edge `registerTag`). `@<name>` lexes
+	/// as a block tag when `name` is a built-in OR in this set.
+	pub custom_tags: std::collections::HashSet<String>,
 }
 
 static SLOT_NAME_RE: Lazy<Regex> = Lazy::new(|| {
@@ -103,7 +106,8 @@ fn is_block_keyword(word: &str) -> bool {
 			| "endcomponent" | "slot"
 			| "endslot" | "layout"
 			| "section" | "endsection"
-			| "super"
+			| "super" | "eval"
+			| "dump"
 	)
 }
 
@@ -208,7 +212,7 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 			let (word, after_word) = read_ident(&chars, word_start);
 			// `@!` is only valid for `component`; `@!other` is literal.
 			if !word.is_empty()
-				&& is_block_keyword(&word)
+				&& (is_block_keyword(&word) || options.custom_tags.contains(word.as_str()))
 				&& (!self_closing || word == "component")
 			{
 				flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);

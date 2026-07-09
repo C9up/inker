@@ -87,17 +87,19 @@ describe("Templates — helpers option (constructor)", () => {
 		expect(await tpl.render("x", {})).toBe("v2");
 	});
 
-	it("without helpers option, any {{ name(…) }} throws at parse time", async () => {
+	it("without helpers option, a non-global {{ name(…) }} throws at parse time", async () => {
 		const tpl = new Templates({ root });
+		// `foo` is neither a registered helper nor an Edge-core global (62-7),
+		// so it is still rejected at parse time (typo detection). The Edge globals
+		// ARE always registered, so the message lists them rather than saying
+		// "no helpers are registered".
 		fs.writeFileSync(path.join(root, "x.inker"), "{{ foo() }}");
 		try {
 			await tpl.render("x", {});
 			expect.fail("should have thrown");
 		} catch (e) {
 			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_UNKNOWN_HELPER");
-			expect(asTyped<InkerRenderError>(e).message).toContain(
-				"no helpers are registered",
-			);
+			expect(asTyped<InkerRenderError>(e).message).toContain("Unknown helper 'foo'");
 		}
 	});
 

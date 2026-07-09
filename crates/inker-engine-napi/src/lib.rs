@@ -17,9 +17,6 @@
 use inker_engine::ast::InkerNode;
 use inker_engine::error::InkerError;
 use inker_engine::parse::{parse as engine_parse, InkerAst as EngineAst, ParseOptions};
-use inker_engine::render::{
-	render as engine_render, RenderContext, ResolvedHelperValue,
-};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde::Serialize;
@@ -315,10 +312,23 @@ fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 /// `helpers_set` lists the helper names the parser should accept inside
 /// `{{ name(...) }}` call positions. Names not in this set produce an
 /// `E_INKER_UNKNOWN_HELPER` at parse time (no rendering required).
+///
+/// `custom_tags_set` lists the runtime-registered custom-tag names (Edge
+/// `registerTag`); the lexer/parser recognise `@<name>(args)` for each and emit
+/// a `CustomTag` node the Node renderer resolves against its handler registry.
 #[napi]
-pub fn parse_template(source: String, helpers_set: Vec<String>) -> Result<InkerAst> {
+pub fn parse_template(
+	source: String,
+	helpers_set: Vec<String>,
+	custom_tags_set: Vec<String>,
+) -> Result<InkerAst> {
 	wrap(move || {
-		let toks = inker_engine::lex::lex(&source, &inker_engine::lex::LexOptions::default())?;
+		let custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let lex_opts = inker_engine::lex::LexOptions {
+			template_path: None,
+			custom_tags: custom_tags.clone(),
+		};
+		let toks = inker_engine::lex::lex(&source, &lex_opts)?;
 		let mut helpers: HashSet<String> = HashSet::new();
 		for h in helpers_set {
 			helpers.insert(h);
@@ -326,6 +336,7 @@ pub fn parse_template(source: String, helpers_set: Vec<String>) -> Result<InkerA
 		let opts = ParseOptions {
 			template_path: None,
 			helpers,
+			custom_tags,
 		};
 		let ast = engine_parse(&toks, &opts)?;
 		Ok(InkerAst {
@@ -334,106 +345,51 @@ pub fn parse_template(source: String, helpers_set: Vec<String>) -> Result<InkerA
 	})
 }
 
-/// One pre-resolved helper result, consumed in tape order by the renderer.
-#[napi(object)]
-pub struct HelperResultNapi {
-	pub value: String,
-	pub is_safe: bool,
-}
-
-/// One helper invocation request produced by `collectInvocations`. The TS side
-/// invokes `helpers.get(name)(...args)` and packs the result into the
-/// corresponding `HelperResultNapi` slot (same order).
-#[napi(object)]
-pub struct InvocationNapi {
-	pub id: u32,
-	pub name: String,
-	/// JSON array of the in-scope-evaluated argument values.
-	pub args: serde_json::Value,
-}
-
-#[napi(object)]
-pub struct RenderContextNapi {
-	#[napi(ts_type = "Record<string, InkerAst>")]
-	pub partials: std::collections::HashMap<String, ClassInstance<InkerAst>>,
-	#[napi(ts_type = "Record<string, InkerAst>")]
-	pub components: std::collections::HashMap<String, ClassInstance<InkerAst>>,
-	pub body_html: Option<String>,
-	pub template_name: Option<String>,
-	pub template_path: Option<String>,
-}
-
-fn build_render_context(ctx: RenderContextNapi) -> RenderContext {
-	let partials_typed = ctx
-		.partials
-		.into_iter()
-		.map(|(k, v)| (k, (*v.inner).clone()))
-		.collect::<std::collections::HashMap<String, EngineAst>>();
-	let components_typed = ctx
-		.components
-		.into_iter()
-		.map(|(k, v)| (k, (*v.inner).clone()))
-		.collect::<std::collections::HashMap<String, EngineAst>>();
-	RenderContext {
-		template_path: ctx.template_path,
-		template_name: ctx.template_name,
-		partials: partials_typed,
-		components: components_typed,
-		body_html: ctx.body_html,
-		component_slots: None,
-	}
-}
-
-/// ADR-007 pass 1 — walk the control flow with `data` and return the ordered
-/// tape of helper invocations (one entry per execution, loop/conditional aware).
-/// The TS side invokes each helper and feeds the results to `renderAst`.
+/// Parse a template and return its AST as a walkable JSON string (nodes +
+/// layout). This is the artifact the Node-side renderer consumes: Rust does the
+/// CPU-bound lex/parse, Node evaluates expressions in V8 and renders (Edge
+/// model — 62-2 pivot away from the embedded QuickJS VM). Each node carries the
+/// verbatim `source` of its expressions, which the Node renderer evaluates.
 #[napi]
-pub fn collect_invocations(
-	ast: &InkerAst,
-	data: serde_json::Value,
-	ctx: RenderContextNapi,
-) -> Result<Vec<InvocationNapi>> {
-	let inner_ast = ast.inner.clone();
-	// build_render_context consumes the napi ClassInstance handles, so it runs
-	// outside wrap() (the closure must be UnwindSafe — only owned Rust data).
-	let render_ctx = build_render_context(ctx);
+pub fn parse_template_json(
+	source: String,
+	helpers_set: Vec<String>,
+	custom_tags_set: Vec<String>,
+) -> Result<String> {
 	wrap(move || {
-		let tape = inker_engine::collect::collect_invocations(&inner_ast, &data, &render_ctx)?;
-		Ok(tape
-			.into_iter()
-			.map(|inv| InvocationNapi {
-				id: inv.id,
-				name: inv.name,
-				args: serde_json::Value::Array(inv.args),
-			})
-			.collect())
+		let custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let lex_opts = inker_engine::lex::LexOptions {
+			template_path: None,
+			custom_tags: custom_tags.clone(),
+		};
+		let toks = inker_engine::lex::lex(&source, &lex_opts)?;
+		let mut helpers: HashSet<String> = HashSet::new();
+		for h in helpers_set {
+			helpers.insert(h);
+		}
+		let opts = ParseOptions {
+			template_path: None,
+			helpers,
+			custom_tags,
+		};
+		let ast = engine_parse(&toks, &opts)?;
+		let json = serde_json::json!({ "nodes": ast.nodes, "layout": ast.layout });
+		serde_json::to_string(&json).map_err(|e| {
+			inker_engine::error::InkerError::new(
+				inker_engine::error::ErrorCode::ParseError,
+				format!("AST serialization failed: {e}"),
+			)
+		})
 	})
 }
 
-/// ADR-007 pass 2 — render the AST consuming the pre-resolved helper tape in
-/// the identical walk order that `collectInvocations` produced it.
+/// Serialize an already-parsed AST handle to a walkable JSON string (nodes +
+/// layout) for the Node-side renderer (62-2 pivot). Reuses the cached parse —
+/// no re-parse — so `Templates` keeps its disk/cache/compose machinery intact.
 #[napi]
-pub fn render_ast(
-	ast: &InkerAst,
-	data: serde_json::Value,
-	resolved: Vec<HelperResultNapi>,
-	ctx: RenderContextNapi,
-) -> Result<String> {
-	let inner_ast = ast.inner.clone();
-	let tape: Vec<ResolvedHelperValue> = resolved
-		.into_iter()
-		.map(|r| {
-			if r.is_safe {
-				ResolvedHelperValue::Safe(r.value)
-			} else {
-				ResolvedHelperValue::Plain(r.value)
-			}
-		})
-		.collect();
-	// build_render_context consumes the napi ClassInstance handles, so it runs
-	// outside wrap() (the closure must be UnwindSafe — only owned Rust data).
-	let render_ctx = build_render_context(ctx);
-	wrap(move || engine_render(&inner_ast, &data, &render_ctx, &tape))
+pub fn ast_to_json(ast: &InkerAst) -> Result<String> {
+	let json = serde_json::json!({ "nodes": ast.inner.nodes, "layout": ast.inner.layout });
+	serde_json::to_string(&json).map_err(|e| Error::from_reason(e.to_string()))
 }
 
 /// Crate version — useful for the TS-side `loadNapi.ts` startup diagnostic.
