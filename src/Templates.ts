@@ -82,10 +82,15 @@ const VALID_CACHE_MODES: ReadonlySet<string> = new Set([
 // Built-in block/directive keywords a custom tag may not shadow (registerTag).
 // The parser already ignores these as custom tags; rejecting them here makes the
 // collision loud instead of silently inert.
+// MUST mirror the lexer's `is_block_keyword` set (crates/inker-engine/src/lex.rs)
+// exactly — a name the lexer treats as a built-in but that is missing here would
+// pass registration and then sit silently inert (its `@name` never becomes a
+// CustomTag node), the very failure this blocklist exists to make loud.
 const RESERVED_TAG_NAMES: ReadonlySet<string> = new Set([
 	"if", "elseif", "else", "endif",
+	"unless", "endunless",
 	"each", "endeach",
-	"let", "layout", "include", "component", "endcomponent",
+	"let", "layout", "include", "includeIf", "component", "endcomponent",
 	"slot", "endslot", "section", "endsection", "super",
 	"eval", "dump",
 ]);

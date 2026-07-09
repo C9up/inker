@@ -169,11 +169,18 @@ function escapeAttr(value: string): string {
 		.replace(/"/g, "&quot;");
 }
 
+// A valid HTML attribute name — no whitespace, quotes, `=`, `/`, `>` or control
+// chars that could break out of the tag. The result is a raw SafeString, so an
+// unvalidated key (e.g. `x onload=alert(1)` from a request-derived object) would
+// be attribute-injection XSS; such keys are dropped rather than emitted.
+const ATTR_NAME_RE = /^[A-Za-z_:][A-Za-z0-9_:.-]*$/;
+
 export function htmlAttrs(attrs: unknown): SafeString {
 	if (attrs === null || typeof attrs !== "object") return new SafeString("");
 	const parts: string[] = [];
 	for (const [key, val] of Object.entries(attrs)) {
 		if (val === false || val === null || val === undefined) continue;
+		if (!ATTR_NAME_RE.test(key)) continue; // drop unsafe attribute names
 		if (val === true) {
 			parts.push(key);
 		} else {

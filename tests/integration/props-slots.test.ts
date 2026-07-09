@@ -45,4 +45,14 @@ describe("Templates — component $props / $slots (62-4)", () => {
 		expect(await tpl.render("with-header", {})).toBe("<h>HEAD</h>|body");
 		expect(await tpl.render("no-header", {})).toBe("|just body");
 	});
+
+	it("a @slot('__proto__') does not pollute Object.prototype ($slots is null-proto)", async () => {
+		write("components/c.inker", "{{ $slots.main() }}");
+		write("page.inker", "@component('c', {})body@slot('__proto__')PWN@endslot@endcomponent");
+		await new Templates({ root }).render("page", {});
+		// If the named-slot assignment had set the prototype, this key would leak.
+		const probe: Record<string, unknown> = {};
+		expect(Object.prototype.hasOwnProperty.call(probe, "__proto__")).toBe(false);
+		expect(probe.polluted).toBeUndefined();
+	});
 });

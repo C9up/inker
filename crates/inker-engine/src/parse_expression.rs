@@ -130,10 +130,10 @@ pub enum Expression {
 	},
 	/// A full-JS expression the restricted grammar does not model (method
 	/// calls, ternary, arrow fns, arithmetic, arrays, …). The source is
-	/// captured verbatim and evaluated by the embedded QuickJS VM (62-2,
-	/// Edge parity). Only produced when the source contains no registered
-	/// helper call — helper-in-rich-expression is deferred to the 62-2 helper
-	/// bridge. Carries no structured children (helper-free by construction).
+	/// captured verbatim and evaluated by the Node renderer in V8, with the
+	/// registered helpers and the render scope in scope (62-2 Edge pivot — no
+	/// embedded JS VM). May reference helpers (`filter(u => can(u))`); an
+	/// UNKNOWN helper is still rejected at parse time (see `raw_fallback`).
 	Raw {
 		source: String,
 		line: u32,
@@ -1097,10 +1097,10 @@ fn parse_or(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 	parse_binary(cursor, 1)
 }
 
-/// Fallback for a source the restricted grammar could not parse: if it contains
-/// no registered helper call, capture it as a full-JS `Raw` node (evaluated by
-/// the QuickJS VM — Edge parity, 62-2). If it DOES call a helper, the helper
-/// bridge (62-2 Task 4) is not in yet, so surface the original strict error.
+/// Fallback for a source the restricted grammar could not parse: relax a
+/// grammar-shape `ParseError` into a full-JS `Raw` node (evaluated by the Node
+/// renderer in V8 — Edge parity, 62-2). Semantic guards (unknown helper,
+/// proto-pollution) are preserved and still error at parse time.
 fn raw_fallback(
 	source: &str,
 	line: u32,

@@ -2,7 +2,8 @@
 resolver = "2"
 members = ["crates/inker-engine", "crates/inker-engine-napi"]
 
-# Release profile for the shipped .node (62-2): QuickJS + expression hot path.
+# Release profile for the shipped .node (62-2): the lex/parse hot path (Node
+# evaluates expressions in V8 — no embedded JS VM in the .node).
 # LTO + single codegen unit per the 62-0 spike (opt-level 3, lto, codegen-units=1).
 [profile.release]
 opt-level = 3

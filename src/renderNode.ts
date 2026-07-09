@@ -182,6 +182,27 @@ const TAG_PARSER: InkerTagParser = { utils: {} };
 
 type CompiledExpr = (scope: object, helpers: object) => unknown;
 
+// INKER DEVIATION (named, hardening): a guard object shadowing the Node globals
+// that turn "template = author-controlled code" into RCE / secret-leak. Placed
+// as the OUTERMOST `with` so a legitimately-registered helper or a data key of
+// the same name still wins, but a bare `process` / `require` / `globalThis` in
+// an expression resolves to `undefined` instead of the real global. This is a
+// bar-raise, NOT a sandbox: property-chain escapes (`({}).constructor…`) are not
+// blocked — templates remain trusted code (see ADR-008). `renderString` compiles
+// arbitrary source through this path, so it too must be fed trusted input only.
+const SANDBOX_SHADOW: Readonly<Record<string, undefined>> = Object.freeze({
+	process: undefined,
+	globalThis: undefined,
+	global: undefined,
+	require: undefined,
+	module: undefined,
+	exports: undefined,
+	Function: undefined,
+	eval: undefined,
+	__dirname: undefined,
+	__filename: undefined,
+});
+
 // Compile-once cache: expression source → a JS fn evaluating it with helpers +
 // scope in scope (`with` — a `new Function` body is non-strict).
 const exprCache = new Map<string, CompiledExpr>();
@@ -194,12 +215,14 @@ function compileExpr(source: string): CompiledExpr {
 		// `new Function` — the author-controlled template expression compiled to a
 		// V8 closure (Edge model); the source comes from `.inker` files, not user
 		// input, so this is the same trust level as the rest of the app's code.
+		// `$g` (the global shadow) is outermost, then helpers `$h`, then scope `$s`.
 		const compiled = new Function(
-			"$s",
+			"$g",
 			"$h",
-			`with($h){ with($s){ return (${source}); } }`,
+			"$s",
+			`with($g){ with($h){ with($s){ return (${source}); } } }`,
 		);
-		fn = (s, h) => compiled(s, h);
+		fn = (s, h) => compiled(SANDBOX_SHADOW, h, s);
 	} catch (cause) {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_EXPRESSION",
@@ -487,6 +510,12 @@ function renderEach(
 ): void {
 	const iterable = evalExpr(node.iterable_source, scope, helpers, node);
 
+	// A `[k, v]` destructured binding means "each element is a pair" ONLY when
+	// iterating an array of pairs; over an object/Map/Set it binds key + value.
+	// Decide by the ITERABLE kind, never by the element shape (an object whose
+	// value happens to be an array must not be mistaken for a pair).
+	const arrayOfPairs = Array.isArray(iterable);
+
 	// [value, key/index] pairs in iteration order.
 	const entries: Array<readonly [unknown, unknown]> = [];
 	if (Array.isArray(iterable)) {
@@ -527,10 +556,11 @@ function renderEach(
 			childScope = { ...scope, [binding.Single]: value };
 		} else if ("Destructured" in binding) {
 			const [kName, vName] = binding.Destructured;
-			// array-of-pairs: `value` is `[k, v]`; object: value/key already split
-			childScope = Array.isArray(value)
-				? { ...scope, [kName]: value[0], [vName]: value[1] }
-				: { ...scope, [kName]: key, [vName]: value };
+			// array-of-pairs: `value` is `[k, v]`; object/Map/Set: key + value.
+			childScope =
+				arrayOfPairs && Array.isArray(value)
+					? { ...scope, [kName]: value[0], [vName]: value[1] }
+					: { ...scope, [kName]: key, [vName]: value };
 		} else {
 			childScope = {
 				...scope,
@@ -623,9 +653,11 @@ function renderComponent(
 	// slot; `$slots.<name>` is undefined when absent (so `@if($slots.footer)`
 	// works). `$props` is the chainable prop API. Both are in the component scope
 	// alongside the raw prop values (Edge parity, 62-4).
-	const $slots: Record<string, unknown> = {
-		main: () => new SafeString(slots.get("body") ?? ""),
-	};
+	// Null-proto: a `@slot('__proto__')` (which the parser's name regex allows)
+	// then assigns an OWN `__proto__` key instead of mutating the object's
+	// prototype — no prototype pollution.
+	const $slots: Record<string, unknown> = Object.create(null);
+	$slots.main = () => new SafeString(slots.get("body") ?? "");
 	for (const [name, html] of slots) {
 		if (name === "body") continue;
 		$slots[name] = () => new SafeString(html);

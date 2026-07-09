@@ -79,6 +79,17 @@ describe("Templates — registerTag (Edge custom tags)", () => {
 		).toThrow(/built-in|E_INKER_INVALID_PATH/);
 	});
 
+	it("rejects built-ins the lexer knows but were once missing from the blocklist (unless/endunless/includeIf)", () => {
+		// These are `is_block_keyword` in the Rust lexer; registering them would
+		// have sat silently inert before the blocklist was completed.
+		const tpl = new Templates({ root });
+		for (const name of ["unless", "endunless", "includeIf"]) {
+			expect(() =>
+				tpl.registerTag({ tagName: name, block: false, seekable: true, compile() {} }),
+			).toThrow(/built-in|E_INKER_INVALID_PATH/);
+		}
+	});
+
 	it("rejects a block custom tag (not supported yet)", () => {
 		const tpl = new Templates({ root });
 		expect(() =>

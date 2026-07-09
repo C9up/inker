@@ -67,6 +67,14 @@ describe("Edge-core globals (62-7)", () => {
 		expect(render("{{ html.safe('<i>x</i>') }}")).toBe("<i>x</i>");
 	});
 
+	it("html.attrs drops unsafe attribute NAMES (attribute-injection guard)", () => {
+		// The value is escaped; an injection-shaped KEY must be dropped, not emitted
+		// verbatim into the raw SafeString.
+		expect(
+			render("{{ html.attrs(o) }}", { o: { id: "ok", "x onload=alert(1)": "y", "a<b": "z" } }),
+		).toBe('id="ok"');
+	});
+
 	it("a registered helper can override a global", () => {
 		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
 			native.parseTemplateJson("{{ truncate('x') }}", [...EDGE_GLOBAL_NAMES], []),

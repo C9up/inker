@@ -179,4 +179,33 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 			/E_INKER_UNKNOWN_TAG|no tag registered/,
 		);
 	});
+
+	it("dangerous Node globals are shadowed to undefined in the eval scope (hardening)", () => {
+		// `process` / `globalThis` / `require` resolve to undefined, not the real
+		// Node globals — blocks the easy secret-leak / RCE while staying full-JS.
+		expect(render("{{ globalThis }}", {})).toBe(""); // undefined → empty
+		expect(() => render("{{ process.env.SECRET }}", {})).toThrowError(
+			/E_INKER_UNKNOWN_IDENTIFIER|cannot read propert/i,
+		);
+		expect(() => render("{{ require('fs') }}", {})).toThrowError(/E_INKER/);
+	});
+
+	it("a legitimate data/helper name still wins over the global shadow", () => {
+		// The shadow is the OUTERMOST scope, so real data named `process` is used.
+		expect(render("{{ process.tier }}", { process: { tier: "prod" } })).toBe("prod");
+	});
+
+	it("@each([k, v] in object) binds key+value even when a value is an array (P2)", () => {
+		// Regression: the pair-vs-entry decision must key off the ITERABLE kind,
+		// not the element shape — an object value that is an array is not a pair.
+		expect(render("@each([k, v] in obj){{ k }}={{ v.join('/') }};@endeach", {
+			obj: { home: [1, 2], away: [3, 4] },
+		})).toBe("home=1/2;away=3/4;");
+	});
+
+	it("@each([k, v] in arrayOfPairs) still destructures each pair", () => {
+		expect(render("@each([k, v] in rows){{ k }}:{{ v }};@endeach", {
+			rows: [["a", 1], ["b", 2]],
+		})).toBe("a:1;b:2;");
+	});
 });
