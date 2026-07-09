@@ -51,6 +51,12 @@ export type InkerNodeJson =
 			readonly type: "Let";
 			readonly name: string;
 			readonly source: string;
+			/** When true, `name` is a destructuring pattern (`{ a, b }` /
+			 * `[x, ...rest]`), `source` is the right-hand expression, and `names`
+			 * carries the bound identifiers extracted + validated by the Rust
+			 * parser (62-2). */
+			readonly destructure?: boolean;
+			readonly names?: readonly string[];
 			readonly line?: number;
 			readonly column?: number;
 	  }
@@ -264,6 +270,74 @@ function evalExpr(
 	}
 }
 
+// ---- @let destructuring (62-2 Edge parity): `@let({ a, b } = obj)` ----
+//
+// Like Edge (which compiles the pattern with a real JS parser), the Rust parser
+// captures the verbatim pattern (as `name`) + the right-hand `source`, AND
+// extracts + validates the bound identifiers (`names`) at parse time — invalid /
+// reserved / prototype-pollution binding names error there, with a JS-aware
+// scanner so a `,`/`=` inside a default value never mis-splits the pattern. Here
+// we only compile `const <pattern> = (<rhs>); return { <names> }` in V8 and
+// thread the bound values into the render scope; `names` is already trusted.
+
+const destructureCache = new Map<
+	string,
+	(scope: object, helpers: object) => Record<string, unknown>
+>();
+
+/** Evaluate a destructuring `@let` and return the newly-bound names as an
+ * object to fold into the render scope. `names` are the Rust-validated bound
+ * identifiers. */
+function evalLetDestructure(
+	pattern: string,
+	rhs: string,
+	names: readonly string[],
+	scope: object,
+	helpers: object,
+	pos: { readonly line?: number; readonly column?: number },
+): Record<string, unknown> {
+	const key = `${pattern} ${rhs}`;
+	let fn = destructureCache.get(key);
+	if (fn === undefined) {
+		try {
+			const compiled = new Function(
+				"$g",
+				"$h",
+				"$s",
+				`with($g){ with($h){ with($s){ const ${pattern} = (${rhs}); return { ${names.join(", ")} }; } } }`,
+			);
+			// `compiled` (a `Function`) returns `any`, assignable to the declared
+			// `Record<string, unknown>` result without a cast.
+			fn = (s, h) => compiled(SANDBOX_SHADOW, h, s);
+		} catch (cause) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_EXPRESSION",
+				`invalid @let destructuring \`${pattern} = ${rhs}\`: ${errMessage(cause)}`,
+				{ line: pos.line, column: pos.column },
+				{ cause },
+			);
+		}
+		destructureCache.set(key, fn);
+	}
+	try {
+		return fn(scope, helpers);
+	} catch (cause) {
+		if (cause instanceof InkerRenderError) throw cause;
+		const msg = errMessage(cause);
+		const code = /is not defined|cannot read propert|cannot destructure/i.test(
+			msg,
+		)
+			? "E_INKER_UNKNOWN_IDENTIFIER"
+			: "E_INKER_INVALID_EXPRESSION";
+		throw new InkerRenderError(
+			code,
+			msg,
+			{ line: pos.line, column: pos.column },
+			{ cause },
+		);
+	}
+}
+
 /** Stringify a scalar for interpolation (parity with the Rust `safe_stringify`). */
 function stringifyScalar(v: unknown, source: string): string {
 	switch (typeof v) {
@@ -345,8 +419,22 @@ function renderNodes(
 	let scope = data;
 	for (const node of nodes) {
 		if (node.type === "Let") {
-			const value = evalExpr(node.source, scope, helpers, node);
-			scope = { ...scope, [node.name]: value };
+			if (node.destructure) {
+				scope = {
+					...scope,
+					...evalLetDestructure(
+						node.name,
+						node.source,
+						node.names ?? [],
+						scope,
+						helpers,
+						node,
+					),
+				};
+			} else {
+				const value = evalExpr(node.source, scope, helpers, node);
+				scope = { ...scope, [node.name]: value };
+			}
 			continue;
 		}
 		renderNode(node, scope, helpers, ctx, out);

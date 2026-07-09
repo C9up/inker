@@ -23,7 +23,7 @@ function render(
 	tags: TagMap = new Map(),
 ): string {
 	const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-		native.parseTemplateJson(source, [], [...tags.keys()]),
+		native.parseTemplateJson(source, [...helpers.keys()], [...tags.keys()]),
 	);
 	return renderNodeTree(ast.nodes, data, helpers, { tags });
 }
@@ -207,5 +207,68 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 		expect(render("@each([k, v] in rows){{ k }}:{{ v }};@endeach", {
 			rows: [["a", 1], ["b", 2]],
 		})).toBe("a:1;b:2;");
+	});
+});
+
+describe("@let destructuring (62-2 Edge parity)", () => {
+	it("object destructuring binds each key into scope", () => {
+		expect(
+			render("@let({ name, email } = user){{ name }} <{{ email }}>", {
+				user: { name: "Ada", email: "ada@x.io" },
+			}),
+		).toBe("Ada <ada@x.io>");
+	});
+
+	it("array destructuring with a rest element", () => {
+		expect(
+			render("@let([first, second, ...rest] = items){{ first }}/{{ second }}/{{ rest.join(',') }}", {
+				items: [1, 2, 3, 4],
+			}),
+		).toBe("1/2/3,4");
+	});
+
+	it("object rename `key: local` binds the local name", () => {
+		expect(render("@let({ a: b } = obj){{ b }}", { obj: { a: 7 } })).toBe("7");
+	});
+
+	it("object destructuring with a rest element", () => {
+		expect(
+			render("@let({ a, ...rest } = obj){{ a }}/{{ rest.b }},{{ rest.c }}", {
+				obj: { a: 1, b: 2, c: 3 },
+			}),
+		).toBe("1/2,3");
+	});
+
+	it("shorthand default fills a missing key", () => {
+		expect(render("@let({ role = 'guest' } = user){{ role }}", { user: {} })).toBe("guest");
+	});
+
+	it("the right-hand side can be a full-JS expression using a helper", () => {
+		const helpers: HelperMap = new Map([["pair", () => ({ x: 1, y: 2 })]]);
+		expect(render("@let({ x, y } = pair()){{ x }},{{ y }}", {}, helpers)).toBe("1,2");
+	});
+
+	it("destructured bindings are block-scoped to following siblings (Edge)", () => {
+		// The binding threads forward through @let, exactly like the simple form.
+		expect(
+			render("@let({ a } = o){{ a }}@let({ b } = o){{ b }}", { o: { a: "A", b: "B" } }),
+		).toBe("AB");
+	});
+
+	it("nested @let destructuring inside an @each loop scope", () => {
+		expect(
+			render("@each(u in users)@let({ id, tag } = u)[{{ id }}:{{ tag }}]@endeach", {
+				users: [
+					{ id: 1, tag: "x" },
+					{ id: 2, tag: "y" },
+				],
+			}),
+		).toBe("[1:x][2:y]");
+	});
+
+	it("rejects a prototype-pollution binding name at parse", () => {
+		expect(() => render("@let({ __proto__ } = payload)ok", { payload: {} })).toThrowError(
+			/prototype-pollution/i,
+		);
 	});
 });

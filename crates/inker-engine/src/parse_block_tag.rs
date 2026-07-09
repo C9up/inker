@@ -664,6 +664,12 @@ fn parse_indexed_binding(
 	})
 }
 
+/// Parsed `@let` payload: `(name-or-verbatim-pattern, RHS expression, verbatim
+/// RHS source, is_destructure, bound names, next helper id)`. `names` is empty
+/// for a simple `@let(x = …)` and carries the extracted+validated identifiers
+/// for a destructuring `@let({ a, b } = …)`.
+type ParsedLet = (String, Expression, String, bool, Vec<String>, u32);
+
 #[allow(clippy::too_many_arguments)]
 fn parse_let_tag(
 	chars: &[char],
@@ -673,8 +679,23 @@ fn parse_let_tag(
 	after_keyword: usize,
 	helpers: &HashSet<String>,
 	helper_id_start: u32,
-) -> Result<(String, Expression, String, u32), InkerError> {
-	let mut i = skip_whitespace(chars, after_keyword);
+) -> Result<ParsedLet, InkerError> {
+	let pattern_start = skip_whitespace(chars, after_keyword);
+	// Destructuring binding — `@let({ a, b } = obj)` / `@let([x, ...rest] = pair)`
+	// (Edge parity, 62-2). The pattern is the leading balanced `{…}`/`[…]` group;
+	// Rust only balances brackets, the Node renderer owns the JS destructuring.
+	if matches!(chars.get(pattern_start).copied(), Some('{') | Some('[')) {
+		return parse_let_destructure(
+			chars,
+			line,
+			column,
+			template_path,
+			pattern_start,
+			helpers,
+			helper_id_start,
+		);
+	}
+	let mut i = pattern_start;
 	let start = i;
 	while i < chars.len() && IDENT_CONT_RE.is_match(&chars[i].to_string()) {
 		i += 1;
@@ -750,7 +771,570 @@ fn parse_let_tag(
 		&options,
 		helper_id_start,
 	)?;
-	Ok((name, expression, expr_source, next_id))
+	Ok((name, expression, expr_source, false, Vec::new(), next_id))
+}
+
+/// Parse a destructuring `@let` — `@let({ a, b } = obj)` / `@let([x, ...rest] =
+/// pair)` (Edge parity, 62-2). The leading balanced `{…}`/`[…]` group is the
+/// binding pattern (captured verbatim as the returned `name`); the rest after
+/// the top-level `=` is the right-hand expression (parsed for helper/proto
+/// guards + verbatim source). Like Edge (which compiles the pattern with a real
+/// JS parser at compile time), Rust extracts + validates the bound identifiers
+/// HERE, at parse: a JS-aware scanner (strings, template literals, regex,
+/// comments) walks the pattern so a `,`/`=` inside a default value never mis-
+/// splits it, and each bound name goes through the same identifier / reserved-
+/// word / prototype-pollution guards as the simple-`@let` and `@each` paths.
+/// The Node renderer only evaluates the (already-validated) pattern in V8.
+fn parse_let_destructure(
+	chars: &[char],
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+	pattern_start: usize,
+	helpers: &HashSet<String>,
+	helper_id_start: u32,
+) -> Result<ParsedLet, InkerError> {
+	let (pattern_raw, after) =
+		slice_balanced_pattern(chars, pattern_start, line, column, template_path)?;
+	let pattern = pattern_raw.trim().to_string();
+	let pattern_chars: Vec<char> = pattern.chars().collect();
+	let names = collect_let_names(&pattern_chars, line, column, template_path)?;
+	let mut i = skip_whitespace(chars, after);
+	if chars.get(i).copied() != Some('=') {
+		return Err(fail_parse(
+			format!("let destructuring '{pattern}' requires '=' after the pattern"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if chars.get(i + 1).copied() == Some('=') {
+		return Err(fail_parse(
+			"let directive uses a single '=' for assignment, not '=='",
+			line,
+			column,
+			template_path,
+		));
+	}
+	i += 1;
+	let expr_source: String = chars[i..].iter().collect::<String>().trim().to_string();
+	if expr_source.is_empty() {
+		return Err(fail_invalid_expression(
+			format!("let destructuring '{pattern}' requires an expression after '='"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	let options = ParseExpressionOptions {
+		template_path: template_path.map(|s| s.to_string()),
+		helpers: helpers.clone(),
+	};
+	let (expression, next_id) = parse_expression_with_helper_count(
+		&expr_source,
+		line,
+		column,
+		&options,
+		helper_id_start,
+	)?;
+	Ok((pattern, expression, expr_source, true, names, next_id))
+}
+
+/// Slice the leading balanced `{…}` or `[…]` group starting at `start`. JS-aware
+/// (see [`skip_js_token`]): brackets inside string / template / regex / comment
+/// spans do not count, so a `}` inside `@let({ a = /}/.test(s) } = obj)` cannot
+/// prematurely close the pattern. Returns the verbatim group (incl. delimiters)
+/// and the index just past its closing bracket.
+fn slice_balanced_pattern(
+	chars: &[char],
+	start: usize,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<(String, usize), InkerError> {
+	let close = match chars.get(start).copied() {
+		Some('{') => '}',
+		Some('[') => ']',
+		_ => {
+			return Err(fail_invalid_expression(
+				"expected '{' or '[' to start a destructuring pattern",
+				line,
+				column,
+				template_path,
+			));
+		}
+	};
+	let mut opener_stack: Vec<char> = Vec::new();
+	let mut prev_sig = '\0';
+	let mut i = start;
+	while i < chars.len() {
+		if let Some(next) = skip_js_token(chars, i, prev_sig) {
+			prev_sig = token_prev_sig(chars, i, prev_sig);
+			i = next;
+			continue;
+		}
+		let ch = chars[i];
+		if ch == '{' || ch == '[' || ch == '(' {
+			opener_stack.push(ch);
+		} else if ch == '}' || ch == ']' || ch == ')' {
+			let expected_opener = match ch {
+				'}' => '{',
+				']' => '[',
+				')' => '(',
+				_ => unreachable!(),
+			};
+			let top = opener_stack.last().copied();
+			if top != Some(expected_opener) {
+				let top_s = top.map(|c| c.to_string()).unwrap_or_else(|| "<empty>".into());
+				return Err(fail_invalid_expression(
+					format!(
+						"mismatched bracket in let destructuring pattern: '{ch}' has no matching opener (expected to close '{top_s}')"
+					),
+					line,
+					column,
+					template_path,
+				));
+			}
+			opener_stack.pop();
+			if opener_stack.is_empty() {
+				let slice: String = chars[start..=i].iter().collect();
+				return Ok((slice, i + 1));
+			}
+		}
+		if !ch.is_whitespace() {
+			prev_sig = ch;
+		}
+		i += 1;
+	}
+	Err(fail_invalid_expression(
+		format!("let destructuring pattern is unterminated; expected '{close}'"),
+		line,
+		column,
+		template_path,
+	))
+}
+
+// ---- JS-aware pattern scanner (62-2 review) ------------------------------
+//
+// A destructuring `@let` pattern is real JS: `{ a, b: c, d = expr, ...rest }`.
+// Extracting the bound names means splitting on TOP-LEVEL commas and finding
+// each entry's default `=` — but a default value is an arbitrary JS expression
+// that may contain commas / `=` / brackets inside strings, template literals
+// (incl. `${…}`), regex literals, or comments. These skip helpers walk over
+// such spans exactly as a JS lexer would, so those inner chars never read as
+// structural. This is the Rust equivalent of Edge parsing the pattern with a
+// real JS parser at compile time.
+
+/// After skipping the token that starts at `i`, the "significant char" to carry
+/// forward for regex-vs-division disambiguation: a comment leaves it unchanged;
+/// a string / template / regex is a value, so it terminates a regex context.
+fn token_prev_sig(chars: &[char], i: usize, prev: char) -> char {
+	let is_comment =
+		chars[i] == '/' && matches!(chars.get(i + 1).copied(), Some('/') | Some('*'));
+	if is_comment { prev } else { 'x' }
+}
+
+/// If `chars[i]` begins a string / template literal / regex literal / comment,
+/// return the index just past that token; otherwise `None`. `prev_sig` is the
+/// last significant char before `i`, used to tell a regex literal (`= /re/`)
+/// from a division operator (`a / b`).
+fn skip_js_token(chars: &[char], i: usize, prev_sig: char) -> Option<usize> {
+	match chars[i] {
+		'\'' | '"' => Some(skip_string(chars, i)),
+		'`' => Some(skip_template(chars, i)),
+		'/' => match chars.get(i + 1).copied() {
+			Some('/') => Some(skip_line_comment(chars, i)),
+			Some('*') => Some(skip_block_comment(chars, i)),
+			_ if regex_allowed(prev_sig) => Some(skip_regex(chars, i)),
+			_ => None, // division
+		},
+		_ => None,
+	}
+}
+
+/// A `/` starts a regex literal (rather than division) when the previous
+/// significant char is not a value terminator (identifier char, `)`, `]`, `}`,
+/// `.`, or a just-closed literal — marked `'x'`).
+fn regex_allowed(prev: char) -> bool {
+	!(prev.is_alphanumeric()
+		|| prev == '_'
+		|| prev == '$'
+		|| prev == ')'
+		|| prev == ']'
+		|| prev == '}'
+		|| prev == '.')
+}
+
+/// Skip a `'`/`"` string starting at `i`; returns the index past the close.
+fn skip_string(chars: &[char], i: usize) -> usize {
+	let quote = chars[i];
+	let mut j = i + 1;
+	while j < chars.len() {
+		match chars[j] {
+			'\\' => j += 2,
+			c if c == quote => return j + 1,
+			_ => j += 1,
+		}
+	}
+	j
+}
+
+/// Skip a `` ` `` template literal starting at `i`, balancing nested `${…}`
+/// interpolations (which may themselves contain strings/templates/brackets).
+fn skip_template(chars: &[char], i: usize) -> usize {
+	let mut j = i + 1;
+	while j < chars.len() {
+		match chars[j] {
+			'\\' => j += 2,
+			'`' => return j + 1,
+			'$' if chars.get(j + 1).copied() == Some('{') => j = skip_braces(chars, j + 1),
+			_ => j += 1,
+		}
+	}
+	j
+}
+
+/// Skip a balanced `{…}` group starting at `i` (JS-aware for inner tokens).
+fn skip_braces(chars: &[char], i: usize) -> usize {
+	let mut depth = 0i32;
+	let mut prev_sig = '\0';
+	let mut j = i;
+	while j < chars.len() {
+		if let Some(next) = skip_js_token(chars, j, prev_sig) {
+			prev_sig = token_prev_sig(chars, j, prev_sig);
+			j = next;
+			continue;
+		}
+		let c = chars[j];
+		match c {
+			'{' => depth += 1,
+			'}' => {
+				depth -= 1;
+				if depth == 0 {
+					return j + 1;
+				}
+			}
+			_ => {}
+		}
+		if !c.is_whitespace() {
+			prev_sig = c;
+		}
+		j += 1;
+	}
+	j
+}
+
+/// Skip a `//` line comment; returns the index of the terminating newline (or
+/// end of input).
+fn skip_line_comment(chars: &[char], i: usize) -> usize {
+	let mut j = i + 2;
+	while j < chars.len() && chars[j] != '\n' {
+		j += 1;
+	}
+	j
+}
+
+/// Skip a `/* … */` block comment; returns the index past `*/`.
+fn skip_block_comment(chars: &[char], i: usize) -> usize {
+	let mut j = i + 2;
+	while j + 1 < chars.len() {
+		if chars[j] == '*' && chars[j + 1] == '/' {
+			return j + 2;
+		}
+		j += 1;
+	}
+	chars.len()
+}
+
+/// Skip a `/…/flags` regex literal starting at `i`, honouring `\` escapes and
+/// `[…]` character classes (a `/` inside a class is literal).
+fn skip_regex(chars: &[char], i: usize) -> usize {
+	let mut j = i + 1;
+	let mut in_class = false;
+	while j < chars.len() {
+		match chars[j] {
+			'\\' => {
+				j += 2;
+				continue;
+			}
+			'[' => in_class = true,
+			']' => in_class = false,
+			'/' if !in_class => {
+				j += 1;
+				while j < chars.len() && chars[j].is_alphabetic() {
+					j += 1;
+				}
+				return j;
+			}
+			'\n' => return j, // unterminated
+			_ => {}
+		}
+		j += 1;
+	}
+	j
+}
+
+/// Trim leading/trailing ASCII/Unicode whitespace from a `[a, b)` char range.
+fn trim_range(chars: &[char], mut a: usize, mut b: usize) -> (usize, usize) {
+	while a < b && chars[a].is_whitespace() {
+		a += 1;
+	}
+	while b > a && chars[b - 1].is_whitespace() {
+		b -= 1;
+	}
+	(a, b)
+}
+
+/// Return the first top-level index in `[a, b)` (bracket depth 0, outside
+/// string/template/regex/comment spans) for which `pred` holds, or `None`.
+fn scan_top_level<F: Fn(&[char], usize) -> bool>(
+	chars: &[char],
+	a: usize,
+	b: usize,
+	pred: F,
+) -> Option<usize> {
+	let mut depth = 0i32;
+	let mut prev_sig = '\0';
+	let mut i = a;
+	while i < b {
+		if let Some(next) = skip_js_token(chars, i, prev_sig) {
+			prev_sig = token_prev_sig(chars, i, prev_sig);
+			i = next.min(b);
+			continue;
+		}
+		let ch = chars[i];
+		match ch {
+			'(' | '[' | '{' => depth += 1,
+			')' | ']' | '}' => depth -= 1,
+			_ if depth == 0 && pred(chars, i) => return Some(i),
+			_ => {}
+		}
+		if !ch.is_whitespace() {
+			prev_sig = ch;
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Split `[a, b)` into top-level comma-separated spans (nested brackets /
+/// strings / templates / regex / comments respected). Holes / trailing commas
+/// surface as empty spans.
+fn split_top_level(chars: &[char], a: usize, b: usize) -> Vec<(usize, usize)> {
+	let mut spans = Vec::new();
+	let mut depth = 0i32;
+	let mut prev_sig = '\0';
+	let mut start = a;
+	let mut i = a;
+	while i < b {
+		if let Some(next) = skip_js_token(chars, i, prev_sig) {
+			prev_sig = token_prev_sig(chars, i, prev_sig);
+			i = next.min(b);
+			continue;
+		}
+		let ch = chars[i];
+		match ch {
+			'(' | '[' | '{' => depth += 1,
+			')' | ']' | '}' => depth -= 1,
+			',' if depth == 0 => {
+				spans.push((start, i));
+				start = i + 1;
+			}
+			_ => {}
+		}
+		if !ch.is_whitespace() {
+			prev_sig = ch;
+		}
+		i += 1;
+	}
+	spans.push((start, b));
+	spans
+}
+
+/// Index of a top-level default-assignment `=` in `[a, b)` (a lone `=`, not
+/// `==`/`===`/`!=`/`<=`/`>=`/`=>`), or `None`.
+fn find_default_eq(chars: &[char], a: usize, b: usize) -> Option<usize> {
+	scan_top_level(chars, a, b, |c, i| {
+		c[i] == '='
+			&& c.get(i + 1).copied() != Some('=')
+			&& c.get(i + 1).copied() != Some('>')
+			&& (i == a || {
+				let p = c[i - 1];
+				p != '=' && p != '!' && p != '<' && p != '>'
+			})
+	})
+}
+
+/// Collect + validate the identifiers a destructuring `@let` pattern binds.
+/// Errors (empty pattern, invalid/reserved/proto name) surface at parse.
+fn collect_let_names(
+	pattern: &[char],
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<Vec<String>, InkerError> {
+	let mut out = Vec::new();
+	collect_pattern_names(pattern, 0, pattern.len(), &mut out, line, column, template_path)?;
+	if out.is_empty() {
+		return Err(fail_invalid_expression(
+			"let destructuring binds no variables",
+			line,
+			column,
+			template_path,
+		));
+	}
+	Ok(out)
+}
+
+/// Recurse over a binding target `[a, b)` (identifier, nested `{…}`/`[…]`
+/// pattern, or a `target = default`), pushing each bound identifier into `out`.
+fn collect_pattern_names(
+	chars: &[char],
+	a: usize,
+	b: usize,
+	out: &mut Vec<String>,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<(), InkerError> {
+	let (a, b) = trim_range(chars, a, b);
+	// A `target = default` binds only the target side.
+	let (a, b) = match find_default_eq(chars, a, b) {
+		Some(eq) => trim_range(chars, a, eq),
+		None => (a, b),
+	};
+	if a >= b {
+		return Ok(()); // array hole / empty
+	}
+	let first = chars[a];
+	let last = chars[b - 1];
+	if first == '{' && last == '}' {
+		for (sa, sb) in split_top_level(chars, a + 1, b - 1) {
+			collect_object_entry(chars, sa, sb, out, line, column, template_path)?;
+		}
+		return Ok(());
+	}
+	if first == '[' && last == ']' {
+		for (sa, sb) in split_top_level(chars, a + 1, b - 1) {
+			let (ea, eb) = trim_range(chars, sa, sb);
+			let ea = if eb - ea >= 3 && chars[ea] == '.' && chars[ea + 1] == '.' && chars[ea + 2] == '.'
+			{
+				ea + 3
+			} else {
+				ea
+			};
+			collect_pattern_names(chars, ea, eb, out, line, column, template_path)?;
+		}
+		return Ok(());
+	}
+	push_binding_name(chars, a, b, out, line, column, template_path)
+}
+
+/// Handle one `{…}` entry: rest (`...target`), rename (`key: target`), or a
+/// shorthand / defaulted key.
+fn collect_object_entry(
+	chars: &[char],
+	a: usize,
+	b: usize,
+	out: &mut Vec<String>,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<(), InkerError> {
+	let (a, b) = trim_range(chars, a, b);
+	if a >= b {
+		return Ok(()); // trailing comma
+	}
+	if b - a >= 3 && chars[a] == '.' && chars[a + 1] == '.' && chars[a + 2] == '.' {
+		return collect_pattern_names(chars, a + 3, b, out, line, column, template_path);
+	}
+	let colon = scan_top_level(chars, a, b, |c, i| c[i] == ':');
+	let eq = find_default_eq(chars, a, b);
+	// `key: target` binds the target; `key` / `key = default` binds the key.
+	match colon {
+		Some(c) if eq.is_none_or(|e| c < e) => {
+			collect_pattern_names(chars, c + 1, b, out, line, column, template_path)
+		}
+		_ => collect_pattern_names(chars, a, b, out, line, column, template_path),
+	}
+}
+
+/// Advance past leading whitespace and `//`/`/* */` comments in `[a, b)`.
+fn skip_trivia(chars: &[char], mut a: usize, b: usize) -> usize {
+	while a < b {
+		let c = chars[a];
+		if c.is_whitespace() {
+			a += 1;
+			continue;
+		}
+		if c == '/' {
+			match chars.get(a + 1).copied() {
+				Some('/') => a = skip_line_comment(chars, a).min(b),
+				Some('*') => a = skip_block_comment(chars, a).min(b),
+				_ => break,
+			}
+			continue;
+		}
+		break;
+	}
+	a
+}
+
+/// Validate a leaf binding identifier in `[a, b)` (same guards as the simple
+/// `@let` and `@each` binding paths) and push it. Leading/trailing whitespace
+/// and comments (JS trivia) around the identifier are tolerated.
+fn push_binding_name(
+	chars: &[char],
+	a: usize,
+	b: usize,
+	out: &mut Vec<String>,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<(), InkerError> {
+	let start = skip_trivia(chars, a, b);
+	let mut end = start;
+	while end < b && IDENT_CONT_RE.is_match(&chars[end].to_string()) {
+		end += 1;
+	}
+	let name: String = chars[start..end].iter().collect();
+	// Anything after the identifier must be trivia only.
+	let rest_is_trivia = skip_trivia(chars, end, b) == b;
+	if name.is_empty() || !rest_is_trivia {
+		let raw: String = chars[a..b].iter().collect();
+		return Err(fail_invalid_expression(
+			format!("let destructuring binding '{}' is not a valid identifier", raw.trim()),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if !BINDING_RE.is_match(&name) {
+		return Err(fail_invalid_expression(
+			format!("let destructuring binding '{name}' is not a valid identifier"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_reserved_binding(&name) {
+		return Err(fail_invalid_expression(
+			format!("let destructuring binding '{name}' is a reserved word"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	if is_prototype_pollution_key(&name) {
+		return Err(fail_invalid_expression(
+			format!("let destructuring binding '{name}' is forbidden (prototype-pollution surface)"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	out.push(name);
+	Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1258,6 +1842,8 @@ pub enum ParsedBlockTag {
 		name: String,
 		expression: Expression,
 		source: String,
+		destructure: bool,
+		names: Vec<String>,
 		line: u32,
 		column: u32,
 	},
@@ -1567,7 +2153,7 @@ pub fn parse_block_tag(
 	}
 
 	if keyword == "let" {
-		let (name, expression, source, next_id) = parse_let_tag(
+		let (name, expression, source, destructure, names, next_id) = parse_let_tag(
 			&chars,
 			line,
 			column,
@@ -1581,6 +2167,8 @@ pub fn parse_block_tag(
 				name,
 				expression,
 				source,
+				destructure,
+				names,
 				line,
 				column,
 			},
@@ -1966,6 +2554,134 @@ mod tests {
 	fn destructured_binding_duplicate_rejected() {
 		let e =
 			parse_block_tag("each [k, k] in map", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn let_simple_binding_is_not_destructure() {
+		let (pb, _) = parse_block_tag("let n = i + 1", 1, 1, &opts(), 0).unwrap();
+		match pb {
+			ParsedBlockTag::Let { name, source, destructure, .. } => {
+				assert_eq!(name, "n");
+				assert_eq!(source, "i + 1");
+				assert!(!destructure, "a bare identifier binding is not destructuring");
+			}
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_object_destructure() {
+		let (pb, _) = parse_block_tag("let { name, email } = user", 1, 1, &opts(), 0).unwrap();
+		match pb {
+			ParsedBlockTag::Let { name, source, destructure, .. } => {
+				assert!(destructure, "object pattern is a destructuring binding");
+				assert_eq!(name, "{ name, email }", "pattern captured verbatim as name");
+				assert_eq!(source, "user", "right-hand expression captured as source");
+			}
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_array_destructure_with_rest() {
+		let (pb, _) =
+			parse_block_tag("let [first, second, ...rest] = items", 1, 1, &opts(), 0).unwrap();
+		match pb {
+			ParsedBlockTag::Let { name, source, destructure, .. } => {
+				assert!(destructure);
+				assert_eq!(name, "[first, second, ...rest]");
+				assert_eq!(source, "items");
+			}
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_destructure_nested_default_keeps_inner_equals() {
+		// The top-level `=` splits pattern/rhs; an inner default `= 1` stays inside
+		// the balanced pattern (a bracket-depth question, not a JS-semantics one).
+		let (pb, _) = parse_block_tag("let { a = 1, b } = obj", 1, 1, &opts(), 0).unwrap();
+		match pb {
+			ParsedBlockTag::Let { name, source, destructure, .. } => {
+				assert!(destructure);
+				assert_eq!(name, "{ a = 1, b }");
+				assert_eq!(source, "obj");
+			}
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_destructure_missing_equals_rejected() {
+		let e = parse_block_tag("let { a, b } obj", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::ParseError);
+	}
+
+	#[test]
+	fn let_destructure_empty_rhs_rejected() {
+		let e = parse_block_tag("let { a, b } =", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	fn let_names(src: &str) -> Vec<String> {
+		match parse_block_tag(src, 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Let { names, .. } => names,
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_destructure_extracts_bound_names_at_parse() {
+		assert_eq!(let_names("let { name, email } = user"), ["name", "email"]);
+		assert_eq!(let_names("let [first, second, ...rest] = items"), ["first", "second", "rest"]);
+		// rename binds the local; default binds the key; object rest included.
+		assert_eq!(let_names("let { a: b, role = 'guest', ...others } = u"), ["b", "role", "others"]);
+		// array hole contributes no name.
+		assert_eq!(let_names("let [, x] = pair"), ["x"]);
+		// nested pattern.
+		assert_eq!(let_names("let { a: { b }, c: [d] } = o"), ["b", "d"]);
+	}
+
+	#[test]
+	fn let_destructure_regex_default_with_comma_is_not_mis_split() {
+		// The `,` inside `/x,y/` must NOT split the pattern — a JS-aware scanner
+		// skips the regex literal (review 62-2: closes the lexer blind spot).
+		assert_eq!(let_names("let { a = /x,y/, b } = obj"), ["a", "b"]);
+		// bracket inside a regex default must not fool the pattern balancer.
+		let (pb, _) = parse_block_tag("let { a = /}/.test(s), b } = obj", 1, 1, &opts(), 0).unwrap();
+		match pb {
+			ParsedBlockTag::Let { name, names, .. } => {
+				assert_eq!(name, "{ a = /}/.test(s), b }");
+				assert_eq!(names, ["a", "b"]);
+			}
+			_ => panic!("expected Let"),
+		}
+	}
+
+	#[test]
+	fn let_destructure_template_and_comment_defaults_are_not_mis_split() {
+		// nested `${…}` template with an inner comma, and a block comment.
+		assert_eq!(let_names("let { a = `${x},${y}`, b } = obj"), ["a", "b"]);
+		assert_eq!(let_names("let { a /* , */, b } = obj"), ["a", "b"]);
+	}
+
+	#[test]
+	fn let_destructure_rejects_proto_binding() {
+		let e = parse_block_tag("let { __proto__ } = payload", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn let_destructure_rejects_reserved_binding() {
+		// `this` is a reserved binding name (parity with the simple `@let` path).
+		let e = parse_block_tag("let { this } = o", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn let_destructure_empty_pattern_binds_nothing_rejected() {
+		let e = parse_block_tag("let {} = obj", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
 	}
 }

@@ -716,6 +716,8 @@ pub fn parse(
 						name,
 						expression,
 						source,
+						destructure,
+						names,
 						line: pl,
 						column: pc,
 					} => {
@@ -724,6 +726,8 @@ pub fn parse(
 								name,
 								expression,
 								source,
+								destructure,
+								names,
 								line: pl,
 								column: pc,
 							},

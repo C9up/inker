@@ -64,6 +64,21 @@ describe("Templates — full-JS expressions (62-2 Edge parity)", () => {
 		}
 	});
 
+	it("@let object destructuring binds through the real Templates path", async () => {
+		const out = await render("@let({ name, role } = user){{ name }}/{{ role }}", {
+			user: { name: "Ada", role: "admin" },
+		});
+		expect(out).toBe("Ada/admin");
+	});
+
+	it("@let array destructuring with rest + computed reduce still works", async () => {
+		const out = await render(
+			"@let([head, ...tail] = xs)@let(sum = tail.reduce((s, n) => s + n, 0)){{ head }}+{{ sum }}",
+			{ xs: [10, 1, 2, 3] },
+		);
+		expect(out).toBe("10+6");
+	});
+
 	// NOTE (62-2 Node pivot): expressions now evaluate in Node's own V8, not a
 	// sandboxed QuickJS VM. Templates are author-controlled (`.inker` files) — the
 	// same trust level as the rest of the app's code — exactly like Adonis Edge,

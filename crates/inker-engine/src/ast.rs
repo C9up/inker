@@ -38,16 +38,21 @@ pub enum InkerNode {
 		line: u32,
 		column: u32,
 	},
-	/// Template-local binding: `@let(x = <member/literal/operator expr>)`.
-	/// The value is added to the render scope for every SIBLING node that
-	/// follows it in the same node list (block-scoped, like `each`). Helper
-	/// calls in the expression are rejected by the restricted-grammar
-	/// `eval_pure` (helpers resolve only at interpolation / component-arg
-	/// positions), so `let` stays inside the pure-expression grammar.
+	/// Template-local binding: `@let(x = <expr>)` or a destructuring pattern
+	/// `@let({ a, b } = obj)` / `@let([x, ...rest] = pair)` (Edge parity, 62-2).
+	/// The value(s) are added to the render scope for every SIBLING node that
+	/// follows it in the same node list (block-scoped, like `each`). The Node
+	/// renderer evaluates `source` in V8 with helpers + scope in scope. When
+	/// `destructure` is true, `name` holds the verbatim pattern (`{ a, b }`) and
+	/// `names` holds the bound identifiers extracted + validated at parse time
+	/// (proto-pollution / reserved-word / shape guards, parity with the simple
+	/// `@let` path); the Node side folds them into the scope.
 	Let {
 		name: String,
 		expression: Expression,
 		source: String,
+		destructure: bool,
+		names: Vec<String>,
 		line: u32,
 		column: u32,
 	},
