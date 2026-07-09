@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "inker-engine"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "once_cell",
  "regex",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "inker-engine-napi"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "inker-engine",
  "napi",
