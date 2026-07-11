@@ -120,7 +120,7 @@ describe("Templates — named disks (edge.mount parity)", () => {
 		});
 	});
 
-	it("re-mounting a name overwrites its root", async () => {
+	it("re-mounting a name to a different root throws E_INKER_DISK_COLLISION (unmount to replace)", async () => {
 		const other = makeTempRoot("inker-other-");
 		write(other, "hello.inker", "<p>other hello</p>");
 		try {
@@ -129,6 +129,24 @@ describe("Templates — named disks (edge.mount parity)", () => {
 			expect(await t.render("pkg::hello", { name: "x" })).toBe(
 				"<p>pkg hello x</p>",
 			);
+			// Accidental clash to a different directory fails loud, not silent clobber.
+			try {
+				t.mount("pkg", other);
+				expect.unreachable("mounting a taken disk name to a new root must throw");
+			} catch (e) {
+				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_COLLISION");
+			}
+			// The rejected mount left the original disk untouched.
+			expect(await t.render("pkg::hello", { name: "x" })).toBe(
+				"<p>pkg hello x</p>",
+			);
+			// Re-mounting the SAME root is an idempotent no-op.
+			t.mount("pkg", pkgRoot);
+			expect(await t.render("pkg::hello", { name: "x" })).toBe(
+				"<p>pkg hello x</p>",
+			);
+			// Intentional replacement stays possible — explicit unmount, then mount.
+			t.unmount("pkg");
 			t.mount("pkg", other);
 			expect(await t.render("pkg::hello", {})).toBe("<p>other hello</p>");
 		} finally {

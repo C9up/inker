@@ -681,13 +681,29 @@ export class Templates {
 	 * parity). Templates in a mounted disk are addressed as `name::template`
 	 * (including from `@layout()` / `@include()` / `@component()`
 	 * references); a BARE `template` name always resolves against the default
-	 * root, exactly like Edge. Re-mounting a name overwrites its root. `dir` is
-	 * canonicalised (absolute + realpath) the same way the constructor root is,
-	 * so each disk carries its own containment boundary.
+	 * root, exactly like Edge. `dir` is canonicalised (absolute + realpath) the
+	 * same way the constructor root is, so each disk carries its own containment
+	 * boundary.
+	 *
+	 * Re-mounting a name to the SAME canonicalised root is an idempotent no-op;
+	 * re-mounting to a DIFFERENT root throws `E_INKER_DISK_COLLISION` (call
+	 * `unmount` first for an intentional replacement). This is a NAMED deviation
+	 * from Edge's silent overwrite: this engine is shared process-wide and
+	 * consumed by multiple integration packages, so an accidental disk-name
+	 * clash must fail loud rather than silently clobber another package's
+	 * containment boundary.
 	 */
 	mount(diskName: string, dir: string): void {
 		assertDiskName(diskName);
-		this.#disks.set(diskName, canonicalizeTemplatesRoot(dir));
+		const root = canonicalizeTemplatesRoot(dir);
+		const existing = this.#disks.get(diskName);
+		if (existing !== undefined && existing !== root) {
+			throw new InkerRenderError(
+				"E_INKER_DISK_COLLISION",
+				`Disk "${diskName}" is already mounted to "${existing}"; refusing to overwrite it with "${root}". Call unmount(${JSON.stringify(diskName)}) first to replace it.`,
+			);
+		}
+		this.#disks.set(diskName, root);
 	}
 
 	/**
