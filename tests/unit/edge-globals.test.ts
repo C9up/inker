@@ -1,16 +1,11 @@
-import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { EDGE_GLOBAL_NAMES } from "../../src/globals.js";
+import { getNative } from "../../src/loadNapi.js";
 import { type InkerNodeJson, renderNodeTree } from "../../src/renderNode.js";
 
-const require = createRequire(import.meta.url);
-const native: {
-	parseTemplateJson: (
-		src: string,
-		helpers: readonly string[],
-		customTags: readonly string[],
-	) => string;
-} = require("../../index.linux-x64-gnu.node");
+// Load the native binary through the platform-aware loader (picks the right
+// `index.<suffix>.node` per OS/arch) — never a hardcoded platform path.
+const native = getNative();
 
 function render(source: string, data: Record<string, unknown> = {}): string {
 	// Declare the global names so bare `{{ camelCase(x) }}` calls parse.

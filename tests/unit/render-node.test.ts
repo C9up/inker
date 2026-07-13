@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
+import { getNative } from "../../src/loadNapi.js";
 import {
 	type HelperMap,
 	type InkerNodeJson,
@@ -9,12 +9,9 @@ import {
 import { SafeString } from "../../src/SafeString.js";
 
 // The Node renderer consumes the JSON AST from the Rust `parseTemplateJson`
-// export. We call the native binary directly (this export is not yet in the
-// typed loadNapi surface — it lands with the Templates rewire).
-const require = createRequire(import.meta.url);
-const native: {
-	parseTemplateJson: (src: string, helpers: string[], customTags: string[]) => string;
-} = require("../../index.linux-x64-gnu.node");
+// export, loaded through the platform-aware loader (never a hardcoded
+// `index.<suffix>.node` path — that broke every non-linux-x64 CI leg).
+const native = getNative();
 
 function render(
 	source: string,
