@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: '22'
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm typecheck
+      - run: pnpm exec tsc -p tsconfig.build.json --noEmit
       - run: pnpm lint
   # Native-runner build matrix. No cross-compilation — each runner produces the
   # binary for its own platform via `pnpm build:napi` (cargo + scripts/copy-napi.mjs).
