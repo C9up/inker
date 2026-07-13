@@ -213,4 +213,30 @@ describe("InkerRenderer", () => {
 			expect(renderer._templates).toBe(stub);
 		});
 	});
+
+	describe("mount / unmount (edge parity — delegate to Templates)", () => {
+		it("forwards mount(name, dir) and unmount(name) to the underlying Templates", () => {
+			const calls: Array<{ method: string; args: unknown[] }> = [];
+			const stub = bypassTypeCheck<Templates>({
+				mount: (name: string, dir: string) => {
+					calls.push({ method: "mount", args: [name, dir] });
+				},
+				unmount: (name: string) => {
+					calls.push({ method: "unmount", args: [name] });
+				},
+			});
+			const renderer = new InkerRenderer(
+				stub,
+				new AsyncLocalStorage<InkerHttpContext>(),
+			);
+
+			renderer.mount("admin", "/pkg/templates");
+			renderer.unmount("admin");
+
+			expect(calls).toEqual([
+				{ method: "mount", args: ["admin", "/pkg/templates"] },
+				{ method: "unmount", args: ["admin"] },
+			]);
+		});
+	});
 });

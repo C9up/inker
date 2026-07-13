@@ -51,9 +51,7 @@
     "LICENSE",
     "README.md",
     "dist",
-    "index.*.node",
-    "scripts",
-    "src"
+    "index.*.node"
   ],
   "publishConfig": {
     "main": "./dist/index.js",

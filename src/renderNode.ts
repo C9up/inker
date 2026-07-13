@@ -136,7 +136,9 @@ export type HelperMap = ReadonlyMap<
 export interface InkerTagToken {
 	readonly properties: { readonly jsArg: string };
 	readonly filename: string;
-	readonly loc: { readonly start: { readonly line: number; readonly col: number } };
+	readonly loc: {
+		readonly start: { readonly line: number; readonly col: number };
+	};
 }
 
 /**
@@ -150,7 +152,7 @@ export interface InkerTagBuffer {
 		jsExpression: string,
 		filename: string,
 		line: number,
-		escape: boolean,
+		shouldEscape: boolean,
 	): void;
 }
 
@@ -561,13 +563,16 @@ function renderNode(
 				writeRaw: (text) => {
 					out.push(text);
 				},
-				outputExpression: (expr, _filename, line, escape) => {
-					const v = evalExpr(expr, scope, helpers, { line, column: node.column });
+				outputExpression: (expr, _filename, line, shouldEscape) => {
+					const v = evalExpr(expr, scope, helpers, {
+						line,
+						column: node.column,
+					});
 					if (v instanceof SafeString) {
 						out.push(v.value);
 					} else if (v === null || v === undefined) {
 						// renders empty
-					} else if (escape) {
+					} else if (shouldEscape) {
 						out.push(escapeHtml(stringifyScalar(v, expr)));
 					} else {
 						out.push(stringifyScalar(v, expr));
@@ -678,7 +683,11 @@ function mergeProps(
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = { ...values };
 	for (const [key, val] of Object.entries(defaults)) {
-		if (key === "class" && typeof val === "string" && typeof out.class === "string") {
+		if (
+			key === "class" &&
+			typeof val === "string" &&
+			typeof out.class === "string"
+		) {
 			out.class = `${val} ${out.class}`.trim(); // classes are combined (Edge)
 		} else if (!Object.hasOwn(out, key)) {
 			out[key] = val; // caller props win; defaults fill gaps
@@ -690,16 +699,23 @@ function mergeProps(
 function makeProps(values: Record<string, unknown>): PropsApi {
 	return {
 		all: () => ({ ...values }),
-		get: (key, fallback) => (Object.hasOwn(values, key) ? values[key] : fallback),
+		get: (key, fallback) =>
+			Object.hasOwn(values, key) ? values[key] : fallback,
 		has: (key) => Object.hasOwn(values, key),
 		only: (keys) =>
 			makeProps(
 				Object.fromEntries(
-					keys.filter((k) => Object.hasOwn(values, k)).map((k) => [k, values[k]]),
+					keys
+						.filter((k) => Object.hasOwn(values, k))
+						.map((k) => [k, values[k]]),
 				),
 			),
 		except: (keys) =>
-			makeProps(Object.fromEntries(Object.entries(values).filter(([k]) => !keys.includes(k)))),
+			makeProps(
+				Object.fromEntries(
+					Object.entries(values).filter(([k]) => !keys.includes(k)),
+				),
+			),
 		merge: (defaults) => makeProps(mergeProps(values, defaults)),
 		toAttrs: () => htmlAttrs(values),
 	};

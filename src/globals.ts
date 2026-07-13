@@ -60,7 +60,11 @@ interface TruncateOptions {
 	readonly completeWords?: boolean;
 }
 
-function truncate(value: unknown, length = 20, options: TruncateOptions = {}): string {
+function truncate(
+	value: unknown,
+	length = 20,
+	options: TruncateOptions = {},
+): string {
 	const s = str(value);
 	if (s.length <= length) return s;
 	const suffix = options.suffix ?? "…";
@@ -72,7 +76,11 @@ function truncate(value: unknown, length = 20, options: TruncateOptions = {}): s
 	return s.slice(0, end).trimEnd() + suffix;
 }
 
-function excerpt(value: unknown, length = 20, options: TruncateOptions = {}): string {
+function excerpt(
+	value: unknown,
+	length = 20,
+	options: TruncateOptions = {},
+): string {
 	const plain = str(value).replace(/<[^>]*>/g, "");
 	return truncate(plain, length, options);
 }
@@ -121,7 +129,8 @@ function prettyBytes(value: unknown): string {
 	const abs = Math.abs(n);
 	const exp = Math.min(Math.floor(Math.log10(abs) / 3), BYTE_UNITS.length - 1);
 	const scaled = abs / 1000 ** exp;
-	const rounded = exp === 0 ? String(scaled) : scaled.toFixed(2).replace(/\.?0+$/, "");
+	const rounded =
+		exp === 0 ? String(scaled) : scaled.toFixed(2).replace(/\.?0+$/, "");
 	return `${negative ? "-" : ""}${rounded} ${BYTE_UNITS[exp]}`;
 }
 
@@ -245,6 +254,6 @@ export const EDGE_GLOBALS: Readonly<Record<string, unknown>> = Object.freeze({
  * declared to the parser so `{{ camelCase(x) }}` is recognized as a call rather
  * than an unknown-helper parse error. `html.attrs(...)` is a method call → `Raw`,
  * so `html` needs no registration. */
-export const EDGE_GLOBAL_NAMES: readonly string[] = Object.keys(EDGE_GLOBALS).filter(
-	(k) => k !== "html",
-);
+export const EDGE_GLOBAL_NAMES: readonly string[] = Object.keys(
+	EDGE_GLOBALS,
+).filter((k) => k !== "html");

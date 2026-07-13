@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
+import { EDGE_GLOBAL_NAMES } from "./globals.js";
 import type { HelperFn } from "./helpers.js";
 import { InkerRenderError } from "./InkerRenderError.js";
 import {
@@ -13,7 +14,6 @@ import {
 	type NapiNodeRef,
 	napiThrowToInker,
 } from "./loadNapi.js";
-import { EDGE_GLOBAL_NAMES } from "./globals.js";
 import {
 	collectSections,
 	type InkerNodeJson,
@@ -87,12 +87,27 @@ const VALID_CACHE_MODES: ReadonlySet<string> = new Set([
 // pass registration and then sit silently inert (its `@name` never becomes a
 // CustomTag node), the very failure this blocklist exists to make loud.
 const RESERVED_TAG_NAMES: ReadonlySet<string> = new Set([
-	"if", "elseif", "else", "endif",
-	"unless", "endunless",
-	"each", "endeach",
-	"let", "layout", "include", "includeIf", "component", "endcomponent",
-	"slot", "endslot", "section", "endsection", "super",
-	"eval", "dump",
+	"if",
+	"elseif",
+	"else",
+	"endif",
+	"unless",
+	"endunless",
+	"each",
+	"endeach",
+	"let",
+	"layout",
+	"include",
+	"includeIf",
+	"component",
+	"endcomponent",
+	"slot",
+	"endslot",
+	"section",
+	"endsection",
+	"super",
+	"eval",
+	"dump",
 ]);
 
 function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
@@ -845,7 +860,8 @@ export class Templates {
 		// With a layout: separate the child's `@section` fills from the default
 		// body, render each section (with `@super` = the layout's default for it),
 		// and inject them at the layout's matching yields (62-3).
-		const { sections: childSections, body: childBody } = collectSections(childNodes);
+		const { sections: childSections, body: childBody } =
+			collectSections(childNodes);
 		const bodyHtml = renderNodeTree(childBody, data, this.#helpers, baseCtx);
 
 		const layoutNodes = this.#astNodes(composed.layoutAst);
@@ -896,9 +912,11 @@ export class Templates {
 			: source;
 		const native = getNative();
 		const ast = callNative(() =>
-			native.parseTemplate(normalisedSource, [...this.#helperNames], [
-				...this.#tags.keys(),
-			]),
+			native.parseTemplate(
+				normalisedSource,
+				[...this.#helperNames],
+				[...this.#tags.keys()],
+			),
 		);
 
 		const info = ast.composeInfo;
@@ -1081,9 +1099,11 @@ export class Templates {
 		}
 
 		const ast = callNative(() =>
-			getNative().parseTemplate(source, [...this.#helperNames], [
-				...this.#tags.keys(),
-			]),
+			getNative().parseTemplate(
+				source,
+				[...this.#helperNames],
+				[...this.#tags.keys()],
+			),
 		);
 
 		// T7: only populate the cache if the generation is unchanged. If

@@ -547,8 +547,12 @@ export function buildCanonicalHelpers(
 		}
 		return router.urlFor(name, coerceUrlParams(params));
 	};
-	helpers.set("url", (...args: readonly unknown[]): string => buildUrl("url", args));
-	helpers.set("urlFor", (...args: readonly unknown[]): string => buildUrl("urlFor", args));
+	helpers.set("url", (...args: readonly unknown[]): string =>
+		buildUrl("url", args),
+	);
+	helpers.set("urlFor", (...args: readonly unknown[]): string =>
+		buildUrl("urlFor", args),
+	);
 	helpers.set("signedUrlFor", (...args: readonly unknown[]): string => {
 		const [name, params, options] = args;
 		if (typeof name !== "string") {

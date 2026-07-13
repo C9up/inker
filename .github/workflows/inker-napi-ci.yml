@@ -23,6 +23,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
+  # Typecheck + lint quality gate — one ubuntu run (no matrix). Mirrors the
+  # aggregate `verify:all` gate at the ream-dev root so a standalone clone of
+  # this package enforces the same bar.
+  quality:
+    name: Typecheck & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
   # Native-runner build matrix. No cross-compilation — each runner produces the
   # binary for its own platform via `pnpm build:napi` (cargo + scripts/copy-napi.mjs).
   # Inker's TS suite (~200 facade/integration tests + the byte-parity smoke from
@@ -61,9 +78,12 @@ jobs:
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
 
-      - name: Vitest (NAPI-loaded branch)
+      - name: Vitest + v8 coverage gate (NAPI-loaded branch)
         if: matrix.test
-        run: pnpm exec vitest run --reporter=json --outputFile=test-results.json
+        # `--coverage` enforces the vitest.config.ts thresholds (the gate the
+        # README advertises) in the SAME run that writes the JSON for the smoke
+        # gate below — a drop under the floors fails CI.
+        run: pnpm exec vitest run --coverage --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)

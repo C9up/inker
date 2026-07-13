@@ -30,6 +30,19 @@ describe("Templates — component $props / $slots (62-4)", () => {
 		expect(out).toBe("md/false");
 	});
 
+	it("$props.all() exposes every prop; $props.only([...]) selects a subset", async () => {
+		write(
+			"components/dbg.inker",
+			"[{{ Object.keys($props.all()).sort().join(',') }}]<i {{ $props.only(['a', 'c']).toAttrs() }}></i>",
+		);
+		write("page.inker", "@component('dbg', { a: '1', b: '2', c: '3' })@endcomponent");
+		const out = await new Templates({ root }).render("page", {});
+		expect(out).toContain("[a,b,c]"); // all() carries every key
+		expect(out).toContain('a="1"');
+		expect(out).toContain('c="3"');
+		expect(out).not.toContain('b="2"'); // only(['a','c']) drops b
+	});
+
 	it("$slots.main() renders the default slot content", async () => {
 		write("components/card.inker", "[{{ $slots.main() }}]");
 		write("page.inker", "@component('card', {})hello@endcomponent");
