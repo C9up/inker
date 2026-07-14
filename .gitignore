@@ -2,6 +2,7 @@ node_modules/
 target/
 dist/
 coverage/
+test-results.json
 *.node
 .env
 .env.local
