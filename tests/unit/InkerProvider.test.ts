@@ -68,11 +68,15 @@ function mkAppContext(
 			singleton<T>(token: unknown, factory: () => T) {
 				singletons.set(String(token), factory);
 			},
-			resolve<T = unknown>(token: unknown): T {
+			// ASYNC, like ream's real Container (`resolve(): Promise<T>`). A
+			// synchronous stub lets production code that forgets an `await` pass
+			// here and fail in the app — the exact shape of the `ream migrate`
+			// bug ("db.execute is not a function").
+			async resolve<T = unknown>(token: unknown): Promise<T> {
 				const key = String(token);
 				if (key in resolved) return resolved[key] as T;
 				const factory = singletons.get(key);
-				if (factory) return factory() as T;
+				if (factory) return (await factory()) as T;
 				// Mirror Ream's Container shape — provider duck-types on `code`
 				// to distinguish "binding missing" (silent degradation) from
 				// "factory threw" (re-throw).
@@ -597,11 +601,11 @@ describe("InkerProvider lifecycle", () => {
 		expect(singletons.has("inker")).toBe(true);
 	});
 
-	it("resolving InkerRenderer pre-start throws the load-bearing message", () => {
+	it("resolving InkerRenderer pre-start throws the load-bearing message", async () => {
 		const { app } = mkAppContext();
 		const provider = new InkerProvider(app);
 		provider.register();
-		expect(() => app.container.resolve(InkerRenderer)).toThrow(
+		await expect(app.container.resolve(InkerRenderer)).rejects.toThrow(
 			/resolved before InkerProvider\.start\(\) ran/,
 		);
 	});
@@ -664,8 +668,8 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		// — i.e. the #started guard didn't construct a new one on the second
 		// start (which would have been a silent leak even though the
 		// container's own caching would mask it).
-		const first = app.container.resolve(InkerRenderer);
-		const second = app.container.resolve(InkerRenderer);
+		const first = await app.container.resolve(InkerRenderer);
+		const second = await app.container.resolve(InkerRenderer);
 		expect(first).toBe(second);
 		expect(first).toBeInstanceOf(InkerRenderer);
 	});
@@ -680,7 +684,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 				singleton(token: unknown, factory: () => unknown) {
 					singletons.set(String(token), factory);
 				},
-				resolve(): never {
+				async resolve(): Promise<never> {
 					throw Object.assign(new Error("no binding"), {
 						code: "CONTAINER_NOT_FOUND",
 					});
@@ -719,7 +723,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		const provider = new InkerProvider(app);
 		provider.register();
 		await provider.start();
-		expect(() => app.container.resolve(InkerRenderer)).toThrow(
+		await expect(app.container.resolve(InkerRenderer)).rejects.toThrow(
 			/before InkerProvider\.start\(\) ran/,
 		);
 		warn.mockRestore();
