@@ -35,6 +35,15 @@ export function getInker(): InkerRenderer | undefined {
 // permitted `as` patterns alongside `loadBearingCast` in `InkerProvider.ts`.
 const inker: InkerRenderer = new Proxy({} as InkerRenderer, {
 	get(_target, prop) {
+		// A module loader inspects what it imports before anyone uses it: it reads
+		// `then` to decide whether the namespace is thenable, and various symbols
+		// for interop and formatting. Throwing on those turns a plain
+		// `import { setX } from ".../services/main"` into a crash at import time,
+		// far from any real use. They are not members of what this stands in for,
+		// so answer undefined and let a genuine access be the one that reports.
+		if (typeof prop === "symbol" || prop === "then") {
+			return undefined;
+		}
 		// Short-circuit the thenable probe: an accidental `await mod.default`
 		// (or `Promise.resolve(mod.default)`) would otherwise trigger our
 		// pre-boot throw inside the await machinery and surface a confusing
