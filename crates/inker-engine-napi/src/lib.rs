@@ -170,6 +170,13 @@ fn collect_slots(nodes: &[InkerNode], out: &mut Vec<SlotRefNapi>) {
 
 /// `bodyHasContent` parity: any non-whitespace Text, OR any non-Text node, is
 /// content. (An empty If/Each at top level still counts — matches TS.)
+/// Does the child have BODY content — the part a layout renders at
+/// `{{> body }}`?
+///
+/// A top-level `@section` is NOT body content: it fills one of the layout's
+/// named yields. Counting it made a layout built only of `@section` yields (the
+/// canonical shape) reject a child built only of `@section` fills, reporting a
+/// missing `{{> body }}` for a body that was empty all along.
 fn nodes_have_content(nodes: &[InkerNode]) -> bool {
 	for n in nodes {
 		match n {
@@ -178,6 +185,7 @@ fn nodes_have_content(nodes: &[InkerNode]) -> bool {
 					return true;
 				}
 			}
+			InkerNode::Section { .. } => {}
 			_ => return true,
 		}
 	}
@@ -316,17 +324,42 @@ fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 /// `custom_tags_set` lists the runtime-registered custom-tag names (Edge
 /// `registerTag`); the lexer/parser recognise `@<name>(args)` for each and emit
 /// a `CustomTag` node the Node renderer resolves against its handler registry.
+/// `custom_block_tags_set` is the subset registered with `block: true`: those
+/// open a body closed by `@end<name>` (or self-close as `@!<name>`).
 #[napi]
 pub fn parse_template(
 	source: String,
 	helpers_set: Vec<String>,
 	custom_tags_set: Vec<String>,
+	custom_block_tags_set: Vec<String>,
+	component_tags_json: String,
 ) -> Result<InkerAst> {
 	wrap(move || {
-		let custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let component_tags: std::collections::HashMap<String, String> =
+			if component_tags_json.is_empty() {
+				std::collections::HashMap::new()
+			} else {
+				serde_json::from_str(&component_tags_json).map_err(|e| {
+					inker_engine::error::InkerError::new(
+						inker_engine::error::ErrorCode::ParseError,
+						format!("invalid component_tags JSON: {e}"),
+					)
+				})?
+			};
+		let mut custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let mut custom_block_tags: HashSet<String> =
+			custom_block_tags_set.into_iter().collect();
+		// A component tag lexes exactly like a registered block tag — `@button`,
+		// `@endbutton`, `@!button`. Only the PARSER distinguishes them, turning
+		// them into component invocations instead of custom-tag nodes.
+		for name in component_tags.keys() {
+			custom_tags.insert(name.clone());
+			custom_block_tags.insert(name.clone());
+		}
 		let lex_opts = inker_engine::lex::LexOptions {
 			template_path: None,
 			custom_tags: custom_tags.clone(),
+			custom_block_tags: custom_block_tags.clone(),
 		};
 		let toks = inker_engine::lex::lex(&source, &lex_opts)?;
 		let mut helpers: HashSet<String> = HashSet::new();
@@ -337,6 +370,8 @@ pub fn parse_template(
 			template_path: None,
 			helpers,
 			custom_tags,
+			custom_block_tags,
+			component_tags,
 		};
 		let ast = engine_parse(&toks, &opts)?;
 		Ok(InkerAst {
@@ -355,12 +390,35 @@ pub fn parse_template_json(
 	source: String,
 	helpers_set: Vec<String>,
 	custom_tags_set: Vec<String>,
+	custom_block_tags_set: Vec<String>,
+	component_tags_json: String,
 ) -> Result<String> {
 	wrap(move || {
-		let custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let component_tags: std::collections::HashMap<String, String> =
+			if component_tags_json.is_empty() {
+				std::collections::HashMap::new()
+			} else {
+				serde_json::from_str(&component_tags_json).map_err(|e| {
+					inker_engine::error::InkerError::new(
+						inker_engine::error::ErrorCode::ParseError,
+						format!("invalid component_tags JSON: {e}"),
+					)
+				})?
+			};
+		let mut custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
+		let mut custom_block_tags: HashSet<String> =
+			custom_block_tags_set.into_iter().collect();
+		// A component tag lexes exactly like a registered block tag — `@button`,
+		// `@endbutton`, `@!button`. Only the PARSER distinguishes them, turning
+		// them into component invocations instead of custom-tag nodes.
+		for name in component_tags.keys() {
+			custom_tags.insert(name.clone());
+			custom_block_tags.insert(name.clone());
+		}
 		let lex_opts = inker_engine::lex::LexOptions {
 			template_path: None,
 			custom_tags: custom_tags.clone(),
+			custom_block_tags: custom_block_tags.clone(),
 		};
 		let toks = inker_engine::lex::lex(&source, &lex_opts)?;
 		let mut helpers: HashSet<String> = HashSet::new();
@@ -371,6 +429,8 @@ pub fn parse_template_json(
 			template_path: None,
 			helpers,
 			custom_tags,
+			custom_block_tags,
+			component_tags,
 		};
 		let ast = engine_parse(&toks, &opts)?;
 		let json = serde_json::json!({ "nodes": ast.nodes, "layout": ast.layout });

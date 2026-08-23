@@ -7,7 +7,8 @@
  *   - Different export shape:
  *       `.`                         — `browser` + `import` + `types`
  *       `./provider`                — `import` + `types`
- *       `./provider/services/main`  — `import` + `types`
+ *       `./services/main`           — `import` + `types`
+ *       `./testing`                 — `import` + `types`
  *   - No `dist/` build precondition — inker is source-first per ADR-003;
  *     the tarball ships `src/*.ts` and the consumer's loader compiles
  *     them at import time (verified by the standalone smoke). The
@@ -100,7 +101,7 @@ describe("@c9up/inker published shape (AC5)", () => {
 		if (tmpDir !== "") rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("ships the 3 advertised export sub-paths + README + LICENSE inside the tarball", () => {
+	it("ships every advertised export sub-path + README + LICENSE inside the tarball", () => {
 		const pkgJsonRaw = execFileSync(
 			"tar",
 			["-xzOf", tarballPath, "package/package.json"],
@@ -111,11 +112,12 @@ describe("@c9up/inker published shape (AC5)", () => {
 			throw new Error("tarball package.json shape unexpected");
 		}
 
-		// AC5a — three sub-paths declared
+		// AC5a — every sub-path declared
 		expect(Object.keys(parsed.exports).sort()).toEqual([
 			".",
 			"./provider",
-			"./provider/services/main",
+			"./services/main",
+			"./testing",
 		]);
 
 		const tarList = execFileSync("tar", ["-tzf", tarballPath], {

@@ -12,7 +12,17 @@ import type { SafeString } from "./SafeString.js";
  * `NaN` / `±Infinity` as `null`. Pass pre-stringified values for any type that
  * does not survive JSON if the helper needs the original form.
  */
-export type HelperFn = (...args: readonly unknown[]) => string | SafeString;
+/**
+ * A helper callable from a template expression.
+ *
+ * The return type is open because a helper feeds more than output: `@if(can(u))`
+ * reads a boolean, `@each(r in rows())` an iterable, and `{{ await who() }}` a
+ * promise (reachable on the `render()` path — a synchronous render raises
+ * rather than emitting a pending promise, the line Adonis draws between
+ * `render` and `renderSync`). What may actually be INTERPOLATED is enforced at
+ * render time, where a non-scalar raises a typed error naming the expression.
+ */
+export type HelperFn = (...args: readonly unknown[]) => unknown;
 
 /**
  * Signature for the canonical `t(key, params?)` helper.

@@ -78,17 +78,71 @@ pub enum InkerNode {
 		line: u32,
 		column: u32,
 	},
-	/// `@dump(expr)` — pretty-print `source`'s value for debugging.
+	/// `@dump(expr)` — pretty-print `source`'s value for debugging. `@dd(expr)`
+	/// is the same node with `die` set: it prints, then aborts the render
+	/// (Adonis's dumper plugin registers both on Edge).
 	Dump {
 		source: String,
+		die: bool,
+		line: u32,
+		column: u32,
+	},
+	/// `@assign(x = expr)` — re-assign an EXISTING binding, as opposed to `@let`
+	/// which introduces a new one. `target` is the assignment's left-hand side
+	/// (a bare identifier or a member path), `source` the whole assignment.
+	Assign {
+		target: String,
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@inject(obj)` — merge `obj` into the enclosing component's `$context`,
+	/// which nested components read. Errors outside a component scope.
+	Inject {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@debugger` — a breakpoint for `node --inspect`. Takes no arguments.
+	Debugger {
+		line: u32,
+		column: u32,
+	},
+	/// `@newError(message, filename?, line?, col?)` — raise from a template,
+	/// pointing at a chosen position (typically `$caller`'s, so a component's
+	/// misuse blames the call site rather than the component).
+	NewError {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@stack('name')` — a named placeholder that `@pushTo` fills. `source` is
+	/// an expression (Edge allows any non-sequence expression, not just a
+	/// literal), evaluated to the stack name at render time.
+	Stack {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@pushTo('name')…@endpushTo` — render the body and append it to a stack.
+	/// With `once`, a given call site contributes only its first render
+	/// (`@pushOnceTo`), which is how a component ships its script tag once no
+	/// matter how many times it is used.
+	PushTo {
+		source: String,
+		body_nodes: Vec<InkerNode>,
+		once: bool,
 		line: u32,
 		column: u32,
 	},
 	/// `@<name>(args)` — a runtime-registered custom tag (Edge `registerTag`).
 	/// The Node renderer evaluates `args_source` and calls the handler for `name`.
+	/// `body_nodes` is the block body for a tag registered with `block: true`
+	/// (empty for an inline tag, and for the self-closed `@!<name>` form).
 	CustomTag {
 		name: String,
 		args_source: String,
+		body_nodes: Vec<InkerNode>,
 		line: u32,
 		column: u32,
 	},

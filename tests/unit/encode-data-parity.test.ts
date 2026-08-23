@@ -9,7 +9,10 @@ import { asTyped } from "../__helpers__/bypass-type-check.js";
 // engine receives a `serde_json::Value`, so `encodeData` must reconcile them.
 
 function render(template: string, data: unknown): string {
-	return new Templates({ root: os.tmpdir() }).renderString(template, asTyped(data));
+	return new Templates({ root: os.tmpdir() }).renderString(
+		template,
+		asTyped(data),
+	);
 }
 
 function expectThrow(template: string, data: unknown, code: string): void {
@@ -70,8 +73,6 @@ describe("encodeData — undefined own-property", () => {
 	});
 
 	it("treats an undefined own-property as falsy in a condition", () => {
-		expect(render("@if(x)Y@else\nN@endif", { x: undefined })).toBe(
-			"N",
-		);
+		expect(render("@if(x)Y@else\nN@endif", { x: undefined })).toBe("N");
 	});
 });

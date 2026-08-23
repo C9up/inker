@@ -15,7 +15,9 @@ describe("Templates — end-to-end FS round-trip", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-")));
+		root = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-e2e-")),
+		);
 	});
 
 	afterEach(() => {
@@ -68,7 +70,9 @@ describe("Templates — layouts and partials", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-")));
+		root = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-layout-")),
+		);
 		fs.mkdirSync(path.join(root, "layouts"));
 		fs.mkdirSync(path.join(root, "partials"));
 	});
@@ -150,10 +154,7 @@ describe("Templates — layouts and partials", () => {
 			path.join(root, "partials/b.inker"),
 			"B:@include('partials/a')",
 		);
-		fs.writeFileSync(
-			path.join(root, "page.inker"),
-			"@include('partials/a')",
-		);
+		fs.writeFileSync(path.join(root, "page.inker"), "@include('partials/a')");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -201,10 +202,7 @@ describe("Templates — layouts and partials", () => {
 			path.join(root, "partials/bad.inker"),
 			"@layout('layouts/main')sneaky",
 		);
-		fs.writeFileSync(
-			path.join(root, "page.inker"),
-			"@include('partials/bad')",
-		);
+		fs.writeFileSync(path.join(root, "page.inker"), "@include('partials/bad')");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("page", {});
@@ -241,10 +239,7 @@ describe("Templates — layouts and partials", () => {
 			path.join(root, "layouts/main.inker"),
 			"<html><body>{{> body }}</body></html>",
 		);
-		fs.writeFileSync(
-			path.join(root, "page.inker"),
-			"@layout('layouts/main')",
-		);
+		fs.writeFileSync(path.join(root, "page.inker"), "@layout('layouts/main')");
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		expect(await templates.render("page", {})).toBe(
 			"<html><body></body></html>",
@@ -327,10 +322,7 @@ describe("Templates — layouts and partials", () => {
 		// Behaviour-pinned, see Spec Deviations / D3 — 'never' = never invalidate.
 		const layout = path.join(root, "layouts/main.inker");
 		const partial = path.join(root, "partials/footer.inker");
-		fs.writeFileSync(
-			layout,
-			"<L1>{{> body }}@include('partials/footer')</L1>",
-		);
+		fs.writeFileSync(layout, "<L1>{{> body }}@include('partials/footer')</L1>");
 		fs.writeFileSync(partial, "<f1>");
 		fs.writeFileSync(
 			path.join(root, "page.inker"),
@@ -340,10 +332,7 @@ describe("Templates — layouts and partials", () => {
 
 		expect(await templates.render("page", {})).toBe("<L1><p>x</p><f1></L1>");
 
-		fs.writeFileSync(
-			layout,
-			"<L2>{{> body }}@include('partials/footer')</L2>",
-		);
+		fs.writeFileSync(layout, "<L2>{{> body }}@include('partials/footer')</L2>");
 		fs.writeFileSync(partial, "<f2>");
 		bumpMtime(layout, 10);
 		bumpMtime(partial, 10);
@@ -479,10 +468,9 @@ describe("Templates — layouts and partials", () => {
 		it("rejects @if(x) in renderString (recursive disk-walk catches Component inside If)", () => {
 			const templates = new Templates({ root, cacheMode: "mtime" });
 			expect(() =>
-				templates.renderString(
-					"@if(x)@component('card', {})@endif",
-					{ x: true },
-				),
+				templates.renderString("@if(x)@component('card', {})@endif", {
+					x: true,
+				}),
 			).toThrowError(/E_INKER_DISK_REQUIRED|component/);
 		});
 

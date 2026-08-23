@@ -49,8 +49,75 @@ function dashCase(value: unknown): string {
 		.join("-");
 }
 
-function titleCase(value: unknown): string {
+function capitalCase(value: unknown): string {
 	return words(str(value)).map(cap).join(" ");
+}
+
+/** Words that stay lower-case inside a title (the `title-case` package's list,
+ * which is what Edge's `titleCase` runs on). */
+const SMALL_WORDS =
+	/^(a|an|and|as|at|but|by|en|for|if|in|nor|of|on|or|per|the|to|v\.?|vs\.?|via)$/i;
+
+/**
+ * Title case: every word capitalised EXCEPT the small words, which stay
+ * lower-case unless they open or close the title — "a tale of two cities"
+ * becomes "A Tale of Two Cities", not "A Tale Of Two Cities". `capitalCase`
+ * is the capitalise-everything variant.
+ */
+function titleCase(value: unknown): string {
+	const list = words(str(value));
+	return list
+		.map((w, i) =>
+			SMALL_WORDS.test(w) && i !== 0 && i !== list.length - 1
+				? w.toLowerCase()
+				: cap(w),
+		)
+		.join(" ");
+}
+
+function sentenceCase(value: unknown): string {
+	return words(str(value))
+		.map((w, i) =>
+			i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w.toLowerCase(),
+		)
+		.join(" ");
+}
+
+function noCase(value: unknown): string {
+	return words(str(value))
+		.map((w) => w.toLowerCase())
+		.join(" ");
+}
+
+// INKER DEVIATION (named): lower-cased, like `snakeCase` and `dashCase` here.
+// Edge's `dotCase` takes a `lowerCase` option; a single consistent casing
+// across the delimiter-joining helpers is worth more than that knob.
+function dotCase(value: unknown): string {
+	return words(str(value))
+		.map((w) => w.toLowerCase())
+		.join(".");
+}
+
+interface SentenceOptions {
+	readonly separator?: string;
+	readonly pairSeparator?: string;
+	readonly lastSeparator?: string;
+}
+
+/** Join a list the way a sentence would: `['a', 'b', 'c']` → `a, b, and c`. */
+function sentence(
+	values: readonly unknown[],
+	options: SentenceOptions = {},
+): string {
+	if (!Array.isArray(values)) return str(values);
+	const list = values.map(str);
+	if (list.length === 0) return "";
+	if (list.length === 1) return list[0] ?? "";
+	// Two items read better without a comma at all.
+	if (list.length === 2)
+		return `${list[0]}${options.pairSeparator ?? " and "}${list[1]}`;
+	const head = list.slice(0, -1).join(options.separator ?? ", ");
+	return `${head}${options.lastSeparator ?? ", and "}${list[list.length - 1]}`;
 }
 
 // ---- string manipulation ----
@@ -151,6 +218,80 @@ function trimNum(n: number): string {
 	return n.toFixed(2).replace(/\.?0+$/, "");
 }
 
+/** Multipliers for `toBytes`, matched case-insensitively. Both the decimal
+ * (`kB` = 1000) and binary (`KiB` = 1024) prefixes are accepted. */
+const BYTE_MULTIPLIERS: Readonly<Record<string, number>> = {
+	b: 1,
+	kb: 1000,
+	mb: 1000 ** 2,
+	gb: 1000 ** 3,
+	tb: 1000 ** 4,
+	pb: 1000 ** 5,
+	kib: 1024,
+	mib: 1024 ** 2,
+	gib: 1024 ** 3,
+	tib: 1024 ** 4,
+	pib: 1024 ** 5,
+};
+
+/** Parse a human byte size (`"1kb"`, `"2.5 MB"`) back to a number. */
+function toBytes(value: unknown): number | null {
+	if (typeof value === "number") return value;
+	const match = /^\s*(-?[\d.]+)\s*([a-z]*)\s*$/i.exec(str(value));
+	if (match === null) return null;
+	const amount = Number(match[1]);
+	if (!Number.isFinite(amount)) return null;
+	const unit = (match[2] ?? "").toLowerCase();
+	const multiplier = unit === "" ? 1 : BYTE_MULTIPLIERS[unit];
+	return multiplier === undefined ? null : amount * multiplier;
+}
+
+const MS_MULTIPLIERS: Readonly<Record<string, number>> = {
+	ms: 1,
+	msec: 1,
+	msecs: 1,
+	millisecond: 1,
+	milliseconds: 1,
+	s: 1000,
+	sec: 1000,
+	secs: 1000,
+	second: 1000,
+	seconds: 1000,
+	m: 60_000,
+	min: 60_000,
+	mins: 60_000,
+	minute: 60_000,
+	minutes: 60_000,
+	h: 3_600_000,
+	hr: 3_600_000,
+	hrs: 3_600_000,
+	hour: 3_600_000,
+	hours: 3_600_000,
+	d: 86_400_000,
+	day: 86_400_000,
+	days: 86_400_000,
+	w: 604_800_000,
+	week: 604_800_000,
+	weeks: 604_800_000,
+	y: 31_557_600_000,
+	yr: 31_557_600_000,
+	yrs: 31_557_600_000,
+	year: 31_557_600_000,
+	years: 31_557_600_000,
+};
+
+/** Parse a human duration (`"1h"`, `"2.5 days"`) back to milliseconds. */
+function toMs(value: unknown): number | null {
+	if (typeof value === "number") return value;
+	const match = /^\s*(-?[\d.]+)\s*([a-z]*)\s*$/i.exec(str(value));
+	if (match === null) return null;
+	const amount = Number(match[1]);
+	if (!Number.isFinite(amount)) return null;
+	const unit = (match[2] ?? "").toLowerCase();
+	const multiplier = unit === "" ? 1 : MS_MULTIPLIERS[unit];
+	return multiplier === undefined ? null : amount * multiplier;
+}
+
 function ordinal(value: unknown): string {
 	const n = Number(value);
 	if (!Number.isInteger(n)) return str(value);
@@ -222,6 +363,15 @@ function htmlSafe(value: unknown): SafeString {
 	return new SafeString(str(value));
 }
 
+/**
+ * Render a value for debugging.
+ *
+ * The result is a SafeString, so its contents are ESCAPED first. Edge does the
+ * same (`htmlSafe(inspect.string.html(value))`) and the reason is not cosmetic:
+ * `inspect` is pointed at real records, and a record field holding
+ * `<img onerror=…>` would otherwise execute — a stored XSS reachable from any
+ * debug view left in a template.
+ */
 function inspect(value: unknown): SafeString {
 	let json: string;
 	try {
@@ -229,31 +379,84 @@ function inspect(value: unknown): SafeString {
 	} catch {
 		json = String(value);
 	}
-	return new SafeString(json ?? "undefined");
+	return new SafeString(htmlEscape(json ?? "undefined"));
 }
 
-/** The Edge-core globals, keyed for injection into every expression scope. */
-export const EDGE_GLOBALS: Readonly<Record<string, unknown>> = Object.freeze({
+// The 8 characters inker escapes in `{{ }}` — `html.escape` uses the SAME set
+// so an explicit escape can never be weaker than the implicit one. Edge escapes
+// five; the three extra (backtick, U+2028, U+2029) only ever close more holes.
+const ESCAPE_RE = /[&<>"'`\u2028\u2029]/g;
+const ESCAPE_MAP: Readonly<Record<string, string>> = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+	'"': "&quot;",
+	"'": "&#39;",
+	"`": "&#96;",
+	"\u2028": "&#x2028;",
+	"\u2029": "&#x2029;",
+};
+
+/** Escape a value for HTML. A `SafeString` passes through untouched, which is
+ * what makes it safe to call on a value that may already have been marked. */
+function htmlEscape(value: unknown): string {
+	if (value instanceof SafeString) return value.value;
+	return str(value).replace(ESCAPE_RE, (ch) => ESCAPE_MAP[ch] ?? ch);
+}
+
+/**
+ * Serialize a value for embedding inside a `<script>` block. Plain
+ * `JSON.stringify` is not enough there: a `</script>` inside a string would
+ * close the tag, and U+2028/U+2029 are literal line terminators to a JS parser
+ * even though JSON allows them raw.
+ */
+function jsStringify(value: unknown): SafeString {
+	const json = JSON.stringify(value) ?? "undefined";
+	return new SafeString(
+		json
+			.replace(/</g, "\\u003C")
+			.replace(/>/g, "\\u003E")
+			.replace(/&/g, "\\u0026")
+			.replace(/\u2028/g, "\\u2028")
+			.replace(/\u2029/g, "\\u2029"),
+	);
+}
+
+/** Inker's built-in globals, keyed for injection into every expression scope. */
+export const INKER_GLOBALS: Readonly<Record<string, unknown>> = Object.freeze({
 	camelCase,
 	pascalCase,
 	snakeCase,
 	dashCase,
+	capitalCase,
+	sentenceCase,
+	dotCase,
+	noCase,
 	titleCase,
 	truncate,
 	excerpt,
 	nl2br,
 	pluralize,
+	sentence,
 	prettyBytes,
+	toBytes,
 	prettyMs,
+	toMs,
 	ordinal,
 	inspect,
-	html: Object.freeze({ attrs: htmlAttrs, classNames, safe: htmlSafe }),
+	html: Object.freeze({
+		attrs: htmlAttrs,
+		classNames,
+		safe: htmlSafe,
+		escape: htmlEscape,
+	}),
+	js: Object.freeze({ stringify: jsStringify }),
 });
 
 /** Bare-callable global names (everything except the `html` namespace object),
  * declared to the parser so `{{ camelCase(x) }}` is recognized as a call rather
  * than an unknown-helper parse error. `html.attrs(...)` is a method call → `Raw`,
  * so `html` needs no registration. */
-export const EDGE_GLOBAL_NAMES: readonly string[] = Object.keys(
-	EDGE_GLOBALS,
-).filter((k) => k !== "html");
+export const INKER_GLOBAL_NAMES: readonly string[] = Object.keys(
+	INKER_GLOBALS,
+).filter((k) => k !== "html" && k !== "js");

@@ -76,6 +76,18 @@ interface ReamRouter {
 		params?: Record<string, string>,
 		options?: Record<string, unknown>,
 	): string;
+	/** Named routes as a serialisable map — Adonis exposes this to templates as
+	 * `routes()` / `routesJSON()`. Optional: a router without it degrades to an
+	 * empty map rather than failing the render. */
+	namedManifest?(): Record<string, unknown>;
+	/** Look a route up by name — `formAttributes()` needs its methods. */
+	findOrFail?(name: string): { methods?: readonly string[] } | undefined;
+}
+
+/** Read-only view of the app config, as Adonis exposes it to templates. */
+interface ConfigReader {
+	get(key: string, defaultValue?: unknown): unknown;
+	has?(key: string): boolean;
 }
 
 interface RosettaTranslator {
@@ -176,6 +188,7 @@ export default class InkerProvider {
 			rosetta,
 			router,
 			assetManifest,
+			await this.#resolveOptionalConfig(),
 		);
 
 		// Phase 4 — merge additional helpers (override-warn-once per instance).
@@ -191,6 +204,16 @@ export default class InkerProvider {
 			cacheMode,
 			helpers: merged,
 		});
+		// Object globals (Adonis shares these as values, not callables).
+		for (const [name, value] of buildCanonicalGlobals(this.app)) {
+			templates.global(name, value);
+		}
+		// `ctx.view` — a renderer per request, seeded with the request, exactly as
+		// AdonisJS's edge provider installs it. Without it every migrated
+		// controller's `ctx.view.render(...)` breaks. Resolved through the
+		// container rather than imported, so inker keeps no runtime dependency
+		// on the host framework.
+		await this.#installContextView(templates);
 		const renderer = new InkerRenderer(templates, als);
 		this.#renderer = renderer;
 		setInker(renderer);
@@ -243,6 +266,66 @@ export default class InkerProvider {
 			);
 		}
 		return process.cwd();
+	}
+
+	/**
+	 * The config service, behind the `config()` template global (Adonis
+	 * parity). Optional in the same way Rosetta is: a host without one renders
+	 * fine, `config()` just yields the caller's default.
+	 */
+	/**
+	 * Attach `view` to the host's HTTP context class (AdonisJS
+	 * `HttpContext.getter('view', …)`). A singleton getter, so the renderer —
+	 * and anything `share()`d onto it — lives for the whole request.
+	 *
+	 * Silently skipped when the host binds no such class: inker renders fine
+	 * outside an HTTP server, and a console app has no context to extend.
+	 */
+	async #installContextView(templates: Templates): Promise<void> {
+		let ctxClass: unknown;
+		try {
+			ctxClass = await this.app.container.resolve<unknown>("HttpContext");
+		} catch (err) {
+			if (isContainerNotFound(err)) return;
+			throw err;
+		}
+		const getter = Reflect.get(Object(ctxClass), "getter");
+		if (typeof getter !== "function") return;
+		getter.call(
+			ctxClass,
+			"view",
+			function (this: { request?: unknown }): unknown {
+				return templates.createRenderer().share({ request: this.request });
+			},
+			true,
+		);
+	}
+
+	async #resolveOptionalConfig(): Promise<ConfigReader | undefined> {
+		for (const token of ["config", "Config"]) {
+			try {
+				const candidate = await this.app.container.resolve<unknown>(token);
+				if (
+					typeof candidate === "object" &&
+					candidate !== null &&
+					typeof Reflect.get(candidate, "get") === "function"
+				) {
+					const reader: ConfigReader = {
+						get: (key, def) =>
+							Reflect.get(candidate, "get").call(candidate, key, def),
+					};
+					const has = Reflect.get(candidate, "has");
+					if (typeof has === "function") {
+						reader.has = (key) => Boolean(has.call(candidate, key));
+					}
+					return reader;
+				}
+			} catch (err) {
+				if (isContainerNotFound(err)) continue;
+				throw err;
+			}
+		}
+		return undefined;
 	}
 
 	async #resolveRosetta(): Promise<RosettaTranslator | undefined> {
@@ -464,6 +547,34 @@ export function escapeAttr(value: string): string {
 }
 
 /**
+ * The values Adonis shares as OBJECT globals rather than callables — a template
+ * writes `{{ app.env }}` and `{{ qs.stringify(o) }}`, so wrapping them in a
+ * function would break a migrated template.
+ */
+export function buildCanonicalGlobals(app?: unknown): Map<string, unknown> {
+	const globals = new Map<string, unknown>();
+	if (app !== undefined) globals.set("app", app);
+	// Flat pairs, which is what a template composes. Built on URLSearchParams
+	// so there is no dependency to carry.
+	globals.set("qs", {
+		parse: (input: unknown): Record<string, string> =>
+			Object.fromEntries(
+				new URLSearchParams(String(input ?? "").replace(/^\?/, "")),
+			),
+		stringify: (input: unknown): string =>
+			isPlainRecord(input)
+				? new URLSearchParams(
+						Object.entries(input).map(([k, v]): [string, string] => [
+							k,
+							String(v ?? ""),
+						]),
+					).toString()
+				: "",
+	});
+	return globals;
+}
+
+/**
  * Build the four canonical helper bodies. Each closes over `als` + its
  * resolved peer + the (frozen) asset manifest. Helpers are SYNC — crossing
  * an async boundary would drop the ALS frame (53.4 D2).
@@ -473,6 +584,9 @@ export function buildCanonicalHelpers(
 	rosetta: RosettaTranslator,
 	router: ReamRouter,
 	assetManifest: Readonly<Record<string, string>> | undefined,
+	/** The config service behind the `config()` global. `app` is not here: it is
+	 * an OBJECT global (see `buildCanonicalGlobals`), not a callable helper. */
+	appConfig?: ConfigReader,
 ): Map<string, HelperFn> {
 	const requireCtx = (helperName: string): InkerHttpContext => {
 		const ctx = als.getStore();
@@ -562,6 +676,58 @@ export function buildCanonicalHelpers(
 		}
 		const opts = isPlainRecord(options) ? options : undefined;
 		return router.makeSignedUrl(name, coerceUrlParams(params), opts);
+	});
+
+	// ---- the globals Adonis's edge provider shares, so a migrated template
+	// keeps working unchanged (`{{ config('app.name') }}`, `@each(r in routes())`).
+
+	const configReader: HelperFn & { has?: (key: string) => boolean } = (
+		...args: readonly unknown[]
+	): unknown => {
+		const [key, defaultValue] = args;
+		if (typeof key !== "string") {
+			throw new Error(
+				`[inker] config() requires a string key; got ${typeof key}.`,
+			);
+		}
+		return appConfig === undefined
+			? defaultValue
+			: appConfig.get(key, defaultValue);
+	};
+	// Adonis hangs `has` off the same callable, so `config.has('x')` works.
+	configReader.has = (key: string): boolean =>
+		appConfig?.has?.(key) ?? appConfig?.get(key) !== undefined;
+	helpers.set("config", configReader);
+
+	const namedRoutes = (): Record<string, unknown> =>
+		router.namedManifest?.() ?? {};
+	helpers.set("routes", (): unknown => namedRoutes());
+	helpers.set("routesJSON", (): string => JSON.stringify(namedRoutes()));
+
+	/**
+	 * `{ action, method }` for a form (Adonis `formAttributes`). A verb HTML
+	 * cannot submit is sent as POST carrying `_method`, which is the spoofing
+	 * ream's router already reads.
+	 */
+	helpers.set("formAttributes", (...args: readonly unknown[]): unknown => {
+		const [name, params, options] = args;
+		if (typeof name !== "string") {
+			throw new Error(
+				`[inker] formAttributes() requires a string route name; got ${typeof name}.`,
+			);
+		}
+		const found = router.findOrFail?.(name);
+		let method = (found?.methods?.[0] ?? "GET").toUpperCase();
+		const original = method;
+		// A form cannot issue HEAD; GET is the equivalent request.
+		if (method === "HEAD") method = "GET";
+		const opts = isPlainRecord(options) ? { ...options } : {};
+		if (method !== "GET" && method !== "POST") {
+			method = "POST";
+			const qs = isPlainRecord(opts.qs) ? opts.qs : {};
+			opts.qs = { _method: original, ...qs };
+		}
+		return { action: buildUrl("formAttributes", [name, params, opts]), method };
 	});
 
 	helpers.set("asset", (...args: readonly unknown[]): string => {

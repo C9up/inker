@@ -18,7 +18,7 @@ use crate::parse_block_tag::{
 use crate::parse_expression::{
 	parse_expression_with_helper_count, Expression, ParseExpressionOptions,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InkerAst {
@@ -48,6 +48,10 @@ pub struct ParseOptions {
 	pub helpers: HashSet<String>,
 	/// Runtime-registered custom tag names (Edge `registerTag`).
 	pub custom_tags: HashSet<String>,
+	/// The subset of `custom_tags` registered with `block: true`.
+	pub custom_block_tags: HashSet<String>,
+	/// Components exposed as tags (Edge `supercharged`): tag → component name.
+	pub component_tags: HashMap<String, String>,
 }
 
 fn is_whitespace_only(value: &str) -> bool {
@@ -108,6 +112,20 @@ enum BlockFrame {
 		name: String,
 		body_nodes: Vec<InkerNode>,
 	},
+	PushTo {
+		line: u32,
+		column: u32,
+		source: String,
+		once: bool,
+		body_nodes: Vec<InkerNode>,
+	},
+	CustomTag {
+		line: u32,
+		column: u32,
+		name: String,
+		args_source: String,
+		body_nodes: Vec<InkerNode>,
+	},
 }
 
 impl BlockFrame {
@@ -148,17 +166,23 @@ impl BlockFrame {
 				Some(slot) => &mut slot.nodes,
 				None => body_nodes,
 			},
-			BlockFrame::Section { body_nodes, .. } => body_nodes,
+			BlockFrame::Section { body_nodes, .. }
+			| BlockFrame::PushTo { body_nodes, .. }
+			| BlockFrame::CustomTag { body_nodes, .. } => body_nodes,
 		}
 	}
 
-	/// Lower-case opening directive keyword, for `@...` error messages.
-	fn open_keyword(&self) -> &'static str {
+	/// Opening directive keyword, for `@...` error messages. Borrowed rather
+	/// than `&'static str`: a custom block tag's keyword is its registered name.
+	fn open_keyword(&self) -> &str {
 		match self {
 			BlockFrame::If { .. } => "if",
 			BlockFrame::Each { .. } => "each",
 			BlockFrame::Component { .. } => "component",
 			BlockFrame::Section { .. } => "section",
+			BlockFrame::PushTo { once: false, .. } => "pushTo",
+			BlockFrame::PushTo { once: true, .. } => "pushOnceTo",
+			BlockFrame::CustomTag { name, .. } => name,
 		}
 	}
 
@@ -167,7 +191,9 @@ impl BlockFrame {
 			BlockFrame::If { line, .. }
 			| BlockFrame::Each { line, .. }
 			| BlockFrame::Component { line, .. }
-			| BlockFrame::Section { line, .. } => *line,
+			| BlockFrame::Section { line, .. }
+			| BlockFrame::PushTo { line, .. }
+			| BlockFrame::CustomTag { line, .. } => *line,
 		}
 	}
 
@@ -176,7 +202,9 @@ impl BlockFrame {
 			BlockFrame::If { column, .. }
 			| BlockFrame::Each { column, .. }
 			| BlockFrame::Component { column, .. }
-			| BlockFrame::Section { column, .. } => *column,
+			| BlockFrame::Section { column, .. }
+			| BlockFrame::PushTo { column, .. }
+			| BlockFrame::CustomTag { column, .. } => *column,
 		}
 	}
 }
@@ -220,6 +248,16 @@ fn block_tag_keyword(raw: &str) -> &str {
 /// `endcomponent` closes this component. No matching end ⇒ self-closing, so
 /// legacy inline `@component()` (no endcomponent) stays backward compatible.
 fn component_opens_block(tokens: &[Token], start: usize) -> bool {
+	// `@!component(...)` is Edge's EXPLICIT self-closing form, so it never opens
+	// a block — and must not, or a `@!component` nested inside a
+	// `@component`…`@endcomponent` would claim the enclosing `@endcomponent` and
+	// leave the outer block unclosed. The `!` is stripped before the tag is
+	// parsed, so the raw token is the only place left that still knows.
+	if let Some(Token::BlockTag { raw, .. }) = tokens.get(start) {
+		if raw.trim_start().starts_with('!') {
+			return false;
+		}
+	}
 	let mut depth: i32 = 0;
 	let mut i = start + 1;
 	while i < tokens.len() {
@@ -360,11 +398,15 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
 		InkerNode::Let { expression, .. } => {
 			collect_helpers_in_expr(expression, out);
 		}
-		InkerNode::Section { body_nodes, .. } => {
+		InkerNode::Section { body_nodes, .. }
+		| InkerNode::PushTo { body_nodes, .. } => {
 			for n in body_nodes {
 				collect_helpers_in_node(n, out);
 			}
 		}
+		// The remaining nodes carry a verbatim `source` the Node renderer
+		// evaluates in V8 (helpers already in lexical scope), so they have no
+		// parsed `Expression` to walk for call sites.
 		InkerNode::Text { .. }
 		| InkerNode::Layout(_)
 		| InkerNode::Partial(_)
@@ -372,7 +414,16 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
 		| InkerNode::Super { .. }
 		| InkerNode::Eval { .. }
 		| InkerNode::Dump { .. }
-		| InkerNode::CustomTag { .. } => {}
+		| InkerNode::Assign { .. }
+		| InkerNode::Inject { .. }
+		| InkerNode::Debugger { .. }
+		| InkerNode::NewError { .. }
+		| InkerNode::Stack { .. } => {}
+		InkerNode::CustomTag { body_nodes, .. } => {
+			for n in body_nodes {
+				collect_helpers_in_node(n, out);
+			}
+		}
 	}
 }
 
@@ -454,6 +505,8 @@ pub fn parse(
 					template_path: template_path.map(|s| s.to_string()),
 					helpers: options.helpers.clone(),
 					custom_tags: options.custom_tags.clone(),
+				custom_block_tags: options.custom_block_tags.clone(),
+				component_tags: options.component_tags.clone(),
 				};
 				let (parsed, next_id) =
 					parse_block_tag(raw, *line, *column, &bt_opts, helper_id_counter)?;
@@ -903,11 +956,33 @@ pub fn parse(
 					}
 					ParsedBlockTag::Dump {
 						source,
+						die,
 						line: pl,
 						column: pc,
 					} => {
 						push_node(
 							InkerNode::Dump {
+								source,
+								die,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Assign {
+						target,
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Assign {
+								target,
 								source,
 								line: pl,
 								column: pc,
@@ -915,6 +990,133 @@ pub fn parse(
 							&mut root_nodes,
 							&mut open_blocks,
 						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Inject {
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Inject {
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Debugger {
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Debugger { line: pl, column: pc },
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::NewError {
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::NewError {
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::Stack {
+						source,
+						line: pl,
+						column: pc,
+					} => {
+						push_node(
+							InkerNode::Stack {
+								source,
+								line: pl,
+								column: pc,
+							},
+							&mut root_nodes,
+							&mut open_blocks,
+						);
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::OpenPushTo {
+						source,
+						once,
+						line: pl,
+						column: pc,
+					} => {
+						open_blocks.push(BlockFrame::PushTo {
+							line: pl,
+							column: pc,
+							source,
+							once,
+							body_nodes: Vec::new(),
+						});
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					// A component tag ALWAYS opens a block (Edge's supercharged
+					// claims `block: true`), so there is no `@endcomponent`
+					// lookahead here — `@!<tag>` is the self-closing form.
+					ParsedBlockTag::ComponentTag { node, self_closed } => {
+						if self_closed {
+							push_node(
+								InkerNode::Component(node),
+								&mut root_nodes,
+								&mut open_blocks,
+							);
+						} else {
+							open_blocks.push(BlockFrame::Component {
+								line: node.line,
+								column: node.column,
+								name: node.name,
+								args: node.args,
+								raw: node.raw,
+								body_nodes: Vec::new(),
+								named_slots: Vec::new(),
+								active_slot: None,
+							});
+						}
+						if open_blocks.len() == 1 {
+							seen_non_whitespace_content = true;
+						}
+					}
+					ParsedBlockTag::OpenCustomTag {
+						name,
+						args_source,
+						line: pl,
+						column: pc,
+					} => {
+						open_blocks.push(BlockFrame::CustomTag {
+							line: pl,
+							column: pc,
+							name,
+							args_source,
+							body_nodes: Vec::new(),
+						});
 						if open_blocks.len() == 1 {
 							seen_non_whitespace_content = true;
 						}
@@ -929,6 +1131,7 @@ pub fn parse(
 							InkerNode::CustomTag {
 								name,
 								args_source,
+								body_nodes: Vec::new(),
 								line: pl,
 								column: pc,
 							},
@@ -960,7 +1163,10 @@ pub fn parse(
 						let already = match top {
 							BlockFrame::If { in_else, .. } => *in_else,
 							BlockFrame::Each { in_else, .. } => *in_else,
-							BlockFrame::Component { .. } | BlockFrame::Section { .. } => {
+							BlockFrame::Component { .. }
+							| BlockFrame::Section { .. }
+							| BlockFrame::PushTo { .. }
+							| BlockFrame::CustomTag { .. } => {
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
 									format!(
@@ -974,12 +1180,7 @@ pub fn parse(
 							}
 						};
 						if already {
-							let kw = match top {
-								BlockFrame::If { .. } => "if",
-								BlockFrame::Each { .. } => "each",
-								BlockFrame::Component { .. } => "component",
-								BlockFrame::Section { .. } => "section",
-							};
+							let kw = top.open_keyword();
 							let frame_line = top.line();
 							return Err(make_err(
 								ErrorCode::InvalidExpression,
@@ -1008,7 +1209,10 @@ pub fn parse(
 								*in_else = true;
 								*else_nodes = Some(Vec::new());
 							}
-							BlockFrame::Component { .. } | BlockFrame::Section { .. } => {}
+							BlockFrame::Component { .. }
+							| BlockFrame::Section { .. }
+							| BlockFrame::PushTo { .. }
+							| BlockFrame::CustomTag { .. } => {}
 						}
 					}
 					ParsedBlockTag::Close {
@@ -1023,6 +1227,9 @@ pub fn parse(
 									BlockClosesKind::If => "endif",
 									BlockClosesKind::Each => "endeach",
 									BlockClosesKind::Section => "endsection",
+									BlockClosesKind::PushTo => "endpushTo",
+									BlockClosesKind::PushOnceTo => "endpushOnceTo",
+									BlockClosesKind::CustomTag(n) => &format!("end{n}"),
 								};
 								return Err(make_err(
 									ErrorCode::UnmatchedBlockEnd,
@@ -1039,6 +1246,22 @@ pub fn parse(
 							BlockFrame::If { .. } => closes == BlockClosesKind::If,
 							BlockFrame::Each { .. } => closes == BlockClosesKind::Each,
 							BlockFrame::Section { .. } => closes == BlockClosesKind::Section,
+							// `once` distinguishes the two frames, so `@endpushTo` can
+							// never close a `@pushOnceTo` (and the mismatch is reported
+							// against the right opening keyword).
+							BlockFrame::PushTo { once, .. } => {
+								closes
+									== if *once {
+										BlockClosesKind::PushOnceTo
+									} else {
+										BlockClosesKind::PushTo
+									}
+							}
+							// `@end<name>` only closes the tag it names, so two nested
+							// block tags cannot be crossed.
+							BlockFrame::CustomTag { name, .. } => {
+								closes == BlockClosesKind::CustomTag(name.clone())
+							}
 							BlockFrame::Component { .. } => false,
 						};
 						if !matches_close {
@@ -1047,6 +1270,9 @@ pub fn parse(
 								BlockClosesKind::If => "endif",
 								BlockClosesKind::Each => "endeach",
 								BlockClosesKind::Section => "endsection",
+								BlockClosesKind::PushTo => "endpushTo",
+								BlockClosesKind::PushOnceTo => "endpushOnceTo",
+								BlockClosesKind::CustomTag(n) => &format!("end{n}"),
 							};
 							let top_line = top.line();
 							let top_col = top.column();
@@ -1095,6 +1321,32 @@ pub fn parse(
 								column,
 							} => InkerNode::Section {
 								name,
+								body_nodes,
+								line,
+								column,
+							},
+							BlockFrame::PushTo {
+								source,
+								once,
+								body_nodes,
+								line,
+								column,
+							} => InkerNode::PushTo {
+								source,
+								once,
+								body_nodes,
+								line,
+								column,
+							},
+							BlockFrame::CustomTag {
+								name,
+								args_source,
+								body_nodes,
+								line,
+								column,
+							} => InkerNode::CustomTag {
+								name,
+								args_source,
 								body_nodes,
 								line,
 								column,
@@ -1283,6 +1535,8 @@ mod tests {
 				s
 			},
 			custom_tags: HashSet::new(),
+			custom_block_tags: HashSet::new(),
+			component_tags: HashMap::new(),
 		};
 		let ast = parse(&tokens, &opts).unwrap();
 		assert_eq!(ast.helper_call_sites.len(), 1);
@@ -1301,6 +1555,8 @@ mod tests {
 			template_path: None,
 			helpers,
 			custom_tags: HashSet::new(),
+			custom_block_tags: HashSet::new(),
+			component_tags: HashMap::new(),
 		};
 		let ast = parse(&tokens, &opts).unwrap();
 		assert_eq!(ast.helper_call_sites.len(), 2);
@@ -1327,12 +1583,15 @@ mod tests {
 		let lex_opts = LexOptions {
 			template_path: None,
 			custom_tags: custom_tags.clone(),
+			custom_block_tags: HashSet::new(),
 		};
 		let tokens = lex("@svg('user', { class: size })", &lex_opts).unwrap();
 		let opts = ParseOptions {
 			template_path: None,
 			helpers: HashSet::new(),
 			custom_tags,
+			custom_block_tags: HashSet::new(),
+			component_tags: HashMap::new(),
 		};
 		let ast = parse(&tokens, &opts).unwrap();
 		assert_eq!(ast.nodes.len(), 1);
@@ -1344,5 +1603,48 @@ mod tests {
 			}
 			other => panic!("expected CustomTag node, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn bang_component_never_opens_a_block() {
+		// `@!component` is Edge's EXPLICIT self-closing form. Nested inside a
+		// `@component`…`@endcomponent`, it used to claim the enclosing
+		// `@endcomponent` and leave the outer block unclosed.
+		let ast = parse_str("@component('box')@!component('icon')@endcomponent").unwrap();
+		assert_eq!(ast.nodes.len(), 1);
+		match &ast.nodes[0] {
+			InkerNode::Component(outer) => {
+				assert_eq!(outer.name, "box");
+				assert_eq!(outer.body_nodes.len(), 1);
+				assert!(matches!(outer.body_nodes[0], InkerNode::Component(_)));
+			}
+			other => panic!("expected the outer Component, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn push_to_block_collects_its_body() {
+		let ast = parse_str("@pushTo('s')x@endpushTo").unwrap();
+		match &ast.nodes[0] {
+			InkerNode::PushTo { source, once, body_nodes, .. } => {
+				assert_eq!(source, "'s'");
+				assert!(!once);
+				assert_eq!(body_nodes.len(), 1);
+			}
+			other => panic!("expected PushTo, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn end_push_to_cannot_close_a_push_once_to() {
+		let e = parse_str("@pushOnceTo('s')x@endpushTo").unwrap_err();
+		assert_eq!(e.code, ErrorCode::MismatchedBlockEnd);
+	}
+
+	#[test]
+	fn an_unclosed_push_to_is_reported_against_its_own_keyword() {
+		let e = parse_str("@pushOnceTo('s')x").unwrap_err();
+		assert_eq!(e.code, ErrorCode::UnclosedBlock);
+		assert!(e.message.contains("@pushOnceTo"), "got: {}", e.message);
 	}
 }

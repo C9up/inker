@@ -368,7 +368,8 @@ describe("buildCanonicalHelpers", () => {
 		const router: StubRouter = {
 			makeUrl,
 			urlFor: makeUrl, // v7 name delegates to the same stub
-			makeSignedUrl: (name, params, _options) => `${makeUrl(name, params)}?signature=stub`,
+			makeSignedUrl: (name, params, _options) =>
+				`${makeUrl(name, params)}?signature=stub`,
 		};
 		const helpers = buildCanonicalHelpers(
 			als,
@@ -525,7 +526,9 @@ describe("buildCanonicalHelpers", () => {
 	it("urlFor() is the AdonisJS v7 name (delegates to router.urlFor)", () => {
 		const { als, helpers } = setup();
 		const urlFor = helpers.get("urlFor");
-		expect(runInCtx(als, ctx(), () => urlFor?.("users.show", { id: 7 }))).toBe("/users.show/7");
+		expect(runInCtx(als, ctx(), () => urlFor?.("users.show", { id: 7 }))).toBe(
+			"/users.show/7",
+		);
 	});
 
 	it("signedUrlFor() delegates to router.makeSignedUrl (v7 signed URL)", () => {

@@ -15,7 +15,7 @@ use crate::parse_expression::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const UNKNOWN_DIRECTIVE_HINT: &str = "Inker supports `@layout`, `@include`/`@includeIf`, `@if`/`@elseif`/`@else`/`@endif`, `@unless`, `@each`/`@endeach`, `@let`, and `@component`/`@slot`.";
 
@@ -64,6 +64,16 @@ static KNOWN_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 		"super",
 		"eval",
 		"dump",
+		"dd",
+		"assign",
+		"inject",
+		"debugger",
+		"newError",
+		"stack",
+		"pushTo",
+		"endpushTo",
+		"pushOnceTo",
+		"endpushOnceTo",
 	] {
 		s.insert(n);
 	}
@@ -928,6 +938,88 @@ fn slice_balanced_pattern(
 /// After skipping the token that starts at `i`, the "significant char" to carry
 /// forward for regex-vs-division disambiguation: a comment leaves it unchanged;
 /// a string / template / regex is a value, so it terminates a regex context.
+/// Read a directive's argument as a verbatim expression source, erroring when
+/// it is empty. Shared by the tags whose whole argument IS one expression
+/// evaluated by the Node renderer (`@eval`, `@dump`, `@dd`, `@inject`,
+/// `@newError`, `@stack`, `@pushTo`, `@pushOnceTo`).
+fn read_required_expression(
+	chars: &[char],
+	after_keyword: usize,
+	keyword: &str,
+	line: u32,
+	column: u32,
+	template_path: Option<&str>,
+) -> Result<String, InkerError> {
+	let i = skip_whitespace(chars, after_keyword);
+	let source: String = chars[i..].iter().collect::<String>().trim().to_string();
+	if source.is_empty() {
+		return Err(fail_invalid_expression(
+			format!("{keyword} directive requires an expression"),
+			line,
+			column,
+			template_path,
+		));
+	}
+	Ok(source)
+}
+
+/// Operators that CONTAIN `=` but are not assignments — checked first at every
+/// candidate position so `@assign(x = a === b)` splits at the first `=`, and a
+/// stray `a === b` (no assignment at all) is reported as such.
+const NON_ASSIGN_OPS: [&str; 7] = ["===", "!==", "==", "!=", "<=", ">=", "=>"];
+
+/// Assignment operators, longest-first so `**=` wins over `*=`, and `=` last.
+const ASSIGN_OPS: [&str; 10] =
+	["**=", "??=", "||=", "&&=", "+=", "-=", "*=", "/=", "%=", "="];
+
+fn matches_at(chars: &[char], i: usize, op: &str) -> bool {
+	let op_chars: Vec<char> = op.chars().collect();
+	if i + op_chars.len() > chars.len() {
+		return false;
+	}
+	chars[i..i + op_chars.len()] == op_chars[..]
+}
+
+/// Locate the top-level assignment operator in `@assign(...)`'s argument.
+/// Returns `(start, end)` of the operator. JS-aware (strings, template
+/// literals, regexes, comments) and bracket-depth aware, so `=` inside a
+/// default value, an object literal, or a string never mis-splits.
+fn find_assignment_operator(chars: &[char]) -> Option<(usize, usize)> {
+	let mut depth: i32 = 0;
+	let mut prev_sig = '\0';
+	let mut i = 0;
+	while i < chars.len() {
+		let sig = token_prev_sig(chars, i, prev_sig);
+		if let Some(next) = skip_js_token(chars, i, sig) {
+			prev_sig = 'x';
+			i = next;
+			continue;
+		}
+		let c = chars[i];
+		if c == '(' || c == '[' || c == '{' {
+			depth += 1;
+		} else if c == ')' || c == ']' || c == '}' {
+			depth -= 1;
+		} else if depth == 0 {
+			if let Some(op) = NON_ASSIGN_OPS.iter().find(|op| matches_at(chars, i, op)) {
+				// Not an assignment — step over the whole comparison operator so
+				// its trailing `=` is not mistaken for one on the next pass.
+				i += op.chars().count();
+				prev_sig = 'x';
+				continue;
+			}
+			if let Some(op) = ASSIGN_OPS.iter().find(|op| matches_at(chars, i, op)) {
+				return Some((i, i + op.chars().count()));
+			}
+		}
+		if !is_whitespace(c) {
+			prev_sig = c;
+		}
+		i += 1;
+	}
+	None
+}
+
 fn token_prev_sig(chars: &[char], i: usize, prev: char) -> char {
 	let is_comment =
 		chars[i] == '/' && matches!(chars.get(i + 1).copied(), Some('/') | Some('*'));
@@ -1771,6 +1863,10 @@ pub enum BlockClosesKind {
 	If,
 	Each,
 	Section,
+	PushTo,
+	PushOnceTo,
+	/// `@end<name>` for a custom tag registered with `block: true`.
+	CustomTag(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1798,15 +1894,69 @@ pub enum ParsedBlockTag {
 		line: u32,
 		column: u32,
 	},
-	/// `@dump(expr)` — pretty-print `expr` for debugging. Self-closing.
+	/// `@dump(expr)` / `@dd(expr)` — pretty-print `expr` for debugging;
+	/// `die` aborts the render afterwards. Self-closing.
 	Dump {
 		source: String,
+		die: bool,
+		line: u32,
+		column: u32,
+	},
+	/// `@assign(x = expr)` — re-assign an existing binding. Self-closing.
+	Assign {
+		target: String,
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@inject(obj)` — merge into the component `$context`. Self-closing.
+	Inject {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@debugger` — breakpoint. Self-closing, no arguments.
+	Debugger {
+		line: u32,
+		column: u32,
+	},
+	/// `@newError(message, filename?, line?, col?)`. Self-closing.
+	NewError {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@stack('name')` — a stack placeholder. Self-closing.
+	Stack {
+		source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@<tag>(args)` for a component exposed as a tag. Already resolved to a
+	/// `ComponentNode`; `self_closed` is the `@!<tag>` form.
+	ComponentTag {
+		node: ComponentNode,
+		self_closed: bool,
+	},
+	/// `@pushTo('name')` / `@pushOnceTo('name')` — opens a block whose body is
+	/// appended to the named stack. Closed by `@endpushTo` / `@endpushOnceTo`.
+	OpenPushTo {
+		source: String,
+		once: bool,
 		line: u32,
 		column: u32,
 	},
 	/// `@<name>(args)` — a runtime-registered custom tag (Edge `registerTag`).
 	/// Self-closing; `args_source` is the raw expression list inside the parens.
 	CustomTag {
+		name: String,
+		args_source: String,
+		line: u32,
+		column: u32,
+	},
+	/// `@<name>(args)` for a tag registered with `block: true` — opens a frame
+	/// whose body is closed by `@end<name>`.
+	OpenCustomTag {
 		name: String,
 		args_source: String,
 		line: u32,
@@ -1874,6 +2024,14 @@ pub struct ParseBlockTagOptions {
 	pub helpers: HashSet<String>,
 	/// Runtime-registered custom tag names (Edge `registerTag`).
 	pub custom_tags: HashSet<String>,
+	/// The subset of `custom_tags` registered with `block: true` — these open a
+	/// frame closed by `@end<name>` (or are self-closed with `@!<name>`).
+	pub custom_block_tags: HashSet<String>,
+	/// Components exposed as tags (Edge's `supercharged` plugin): tag name →
+	/// component template name, e.g. `button` → `components/button`. `@button(…)`
+	/// parses as `@component('components/button', …)`, so slots, `$props`,
+	/// `$caller` and `$context` all behave identically.
+	pub component_tags: HashMap<String, String>,
 }
 
 /// Returns the parsed block tag AND the updated helper-id counter (the parser
@@ -1894,10 +2052,18 @@ pub fn parse_block_tag(
 	// Edge self-closing `@!component` reaches here as keyword `!component`. Strip
 	// the `!` → a normal `component`; parse.rs's lookahead treats a component with
 	// no matching `@endcomponent` as self-closing, which `@!component` always is.
-	let keyword = if raw_keyword == "!component" {
-		"component".to_string()
-	} else {
-		raw_keyword
+	// Edge's explicit self-closing `@!name` reaches here as keyword `!name`.
+	// Valid for `component` and for any block custom tag (which otherwise
+	// demands an `@end<name>`); anything else keeps the `!` and fails below.
+	let (keyword, explicit_self_close) = match raw_keyword.strip_prefix('!') {
+		Some(rest)
+			if rest == "component"
+				|| options.custom_block_tags.contains(rest)
+				|| options.component_tags.contains_key(rest) =>
+		{
+			(rest.to_string(), true)
+		}
+		_ => (raw_keyword, false),
 	};
 
 	if keyword.is_empty() {
@@ -1915,22 +2081,122 @@ pub fn parse_block_tag(
 	// A runtime-registered custom tag (Edge `registerTag`): `@<name>(args)` →
 	// a `CustomTag` node; the Node renderer evaluates the args and invokes the
 	// registered handler. Built-in keywords take precedence.
-	if !KNOWN_KEYWORDS.contains(keyword.as_str())
-		&& options.custom_tags.contains(keyword.as_str())
-	{
-		let i = skip_whitespace(&chars, after_keyword);
-		let args_source: String = chars[i..].iter().collect::<String>().trim().to_string();
-		return Ok((
-			ParsedBlockTag::CustomTag {
-				name: keyword,
-				args_source,
+	// A component exposed as a tag (Edge `supercharged`). Rewritten into the
+	// component form and parsed by the normal component path, so there is one
+	// implementation of props/slots rather than a parallel one.
+	if !KNOWN_KEYWORDS.contains(keyword.as_str()) {
+		if let Some(component_name) = options.component_tags.get(keyword.as_str()) {
+			let i = skip_whitespace(&chars, after_keyword);
+			let args: String = chars[i..].iter().collect::<String>().trim().to_string();
+			// The name comes from OUR registry, not the template, and is
+			// validated on registration — but a quote here would still break out
+			// of the synthesized literal, so refuse rather than trust.
+			if component_name.contains('\'') || component_name.contains('\\') {
+				return Err(fail_parse(
+					format!("component tag '{keyword}' maps to an unquotable name"),
+					line,
+					column,
+					template_path,
+				));
+			}
+			let synthetic = if args.is_empty() {
+				format!("component '{component_name}'")
+			} else {
+				format!("component '{component_name}', {args}")
+			};
+			let synth_chars: Vec<char> = synthetic.chars().collect();
+			let (mut node, next_id) = parse_component_tag(
+				raw,
+				&synth_chars,
 				line,
 				column,
-			},
-			helper_id_start,
-		));
-	}
-	if !KNOWN_KEYWORDS.contains(keyword.as_str()) {
+				template_path,
+				"component".len(),
+				helpers,
+				helper_id_start,
+			)?;
+			// Keep the ORIGINAL source on the node so diagnostics quote what the
+			// author wrote (`@button(...)`), not the rewrite.
+			node.raw = raw.to_string();
+			return Ok((
+				ParsedBlockTag::ComponentTag {
+					node,
+					self_closed: explicit_self_close,
+				},
+				next_id,
+			));
+		}
+		if let Some(closes_name) = keyword.strip_prefix("end") {
+			if options.component_tags.contains_key(closes_name) {
+				let trailing: String =
+					chars[after_keyword..].iter().collect::<String>().trim().to_string();
+				if !trailing.is_empty() {
+					return Err(fail_parse(
+						format!("Unexpected tokens after {keyword}: '{trailing}'"),
+						line,
+						column,
+						template_path,
+					));
+				}
+				return Ok((
+					ParsedBlockTag::CloseComponent { line, column },
+					helper_id_start,
+				));
+			}
+		}
+		// `@end<name>` closes a custom tag registered with `block: true`. Checked
+		// BEFORE the open case, so a tag literally named `endfoo` cannot shadow
+		// the closer of a block tag named `foo`.
+		if let Some(closes_name) = keyword.strip_prefix("end") {
+			if options.custom_block_tags.contains(closes_name) {
+				let trailing: String =
+					chars[after_keyword..].iter().collect::<String>().trim().to_string();
+				if !trailing.is_empty() {
+					return Err(fail_parse(
+						format!("Unexpected tokens after {keyword}: '{trailing}'"),
+						line,
+						column,
+						template_path,
+					));
+				}
+				return Ok((
+					ParsedBlockTag::Close {
+						closes: BlockClosesKind::CustomTag(closes_name.to_string()),
+						line,
+						column,
+					},
+					helper_id_start,
+				));
+			}
+		}
+		if options.custom_tags.contains(keyword.as_str()) {
+			let i = skip_whitespace(&chars, after_keyword);
+			let args_source: String =
+				chars[i..].iter().collect::<String>().trim().to_string();
+			// A `block: true` tag opens a frame unless `@!name` closed it inline.
+			if options.custom_block_tags.contains(keyword.as_str())
+				&& !explicit_self_close
+			{
+				return Ok((
+					ParsedBlockTag::OpenCustomTag {
+						name: keyword,
+						args_source,
+						line,
+						column,
+					},
+					helper_id_start,
+				));
+			}
+			return Ok((
+				ParsedBlockTag::CustomTag {
+					name: keyword,
+					args_source,
+					line,
+					column,
+				},
+				helper_id_start,
+			));
+		}
 		return Err(fail_unknown_directive(&keyword, line, column, template_path));
 	}
 
@@ -2332,18 +2598,200 @@ pub fn parse_block_tag(
 		return Ok((ParsedBlockTag::Eval { source, line, column }, helper_id_start));
 	}
 
-	if keyword == "dump" {
-		let i = skip_whitespace(&chars, after_keyword);
-		let source: String = chars[i..].iter().collect::<String>().trim().to_string();
-		if source.is_empty() {
+	// `@dump(expr)` prints; `@dd(expr)` prints and stops the render. Adonis
+	// registers both on Edge through its dumper plugin.
+	if keyword == "dump" || keyword == "dd" {
+		let source = read_required_expression(
+			&chars,
+			after_keyword,
+			&keyword,
+			line,
+			column,
+			template_path,
+		)?;
+		return Ok((
+			ParsedBlockTag::Dump {
+				source,
+				die: keyword == "dd",
+				line,
+				column,
+			},
+			helper_id_start,
+		));
+	}
+
+	if keyword == "assign" {
+		let start = skip_whitespace(&chars, after_keyword);
+		let arg: Vec<char> = chars[start..].to_vec();
+		let arg_trimmed: String = arg.iter().collect::<String>().trim().to_string();
+		if arg_trimmed.is_empty() {
 			return Err(fail_invalid_expression(
-				"dump directive requires an expression",
+				"assign directive requires an assignment expression",
 				line,
 				column,
 				template_path,
 			));
 		}
-		return Ok((ParsedBlockTag::Dump { source, line, column }, helper_id_start));
+		let (op_start, op_end) = find_assignment_operator(&arg).ok_or_else(|| {
+			fail_invalid_expression(
+				format!(
+					"assign directive requires an assignment, got '{arg_trimmed}' — use `@assign(x = value)`"
+				),
+				line,
+				column,
+				template_path,
+			)
+		})?;
+		let target: String = arg[..op_start].iter().collect::<String>().trim().to_string();
+		if target.is_empty() {
+			return Err(fail_invalid_expression(
+				"assign directive requires a target before the assignment operator",
+				line,
+				column,
+				template_path,
+			));
+		}
+		// The target is an identifier or a member path; either way it must START
+		// as an identifier, so `@assign('a' = 1)` is rejected here rather than
+		// producing an un-assignable expression at render time.
+		if !target
+			.chars()
+			.next()
+			.is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+		{
+			return Err(fail_invalid_expression(
+				format!("assign target '{target}' is not an identifier or member path"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		if is_prototype_pollution_key(&target) {
+			return Err(fail_invalid_expression(
+				format!("assign target '{target}' is forbidden (prototype-pollution surface)"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		let operator: String = arg[op_start..op_end].iter().collect();
+		let value: String = arg[op_end..].iter().collect::<String>().trim().to_string();
+		if value.is_empty() {
+			return Err(fail_invalid_expression(
+				format!("assign directive requires an expression after '{operator}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		// `source` carries the value expression; `target` and the operator are
+		// rejoined by the renderer, which needs them apart to write a bare
+		// identifier back into the frame that OWNS it (a member path mutates in
+		// place and needs no write-back).
+		return Ok((
+			ParsedBlockTag::Assign {
+				target: format!("{target} {operator}"),
+				source: value,
+				line,
+				column,
+			},
+			helper_id_start,
+		));
+	}
+
+	if keyword == "inject" {
+		let source = read_required_expression(
+			&chars,
+			after_keyword,
+			"inject",
+			line,
+			column,
+			template_path,
+		)?;
+		return Ok((ParsedBlockTag::Inject { source, line, column }, helper_id_start));
+	}
+
+	if keyword == "debugger" {
+		let trailing: String =
+			chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after debugger: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((ParsedBlockTag::Debugger { line, column }, helper_id_start));
+	}
+
+	if keyword == "newError" {
+		let source = read_required_expression(
+			&chars,
+			after_keyword,
+			"newError",
+			line,
+			column,
+			template_path,
+		)?;
+		return Ok((ParsedBlockTag::NewError { source, line, column }, helper_id_start));
+	}
+
+	if keyword == "stack" {
+		let source = read_required_expression(
+			&chars,
+			after_keyword,
+			"stack",
+			line,
+			column,
+			template_path,
+		)?;
+		return Ok((ParsedBlockTag::Stack { source, line, column }, helper_id_start));
+	}
+
+	if keyword == "pushTo" || keyword == "pushOnceTo" {
+		let source = read_required_expression(
+			&chars,
+			after_keyword,
+			&keyword,
+			line,
+			column,
+			template_path,
+		)?;
+		return Ok((
+			ParsedBlockTag::OpenPushTo {
+				source,
+				once: keyword == "pushOnceTo",
+				line,
+				column,
+			},
+			helper_id_start,
+		));
+	}
+
+	if keyword == "endpushTo" || keyword == "endpushOnceTo" {
+		let trailing: String =
+			chars[after_keyword..].iter().collect::<String>().trim().to_string();
+		if !trailing.is_empty() {
+			return Err(fail_parse(
+				format!("Unexpected tokens after {keyword}: '{trailing}'"),
+				line,
+				column,
+				template_path,
+			));
+		}
+		return Ok((
+			ParsedBlockTag::Close {
+				closes: if keyword == "endpushTo" {
+					BlockClosesKind::PushTo
+				} else {
+					BlockClosesKind::PushOnceTo
+				},
+				line,
+				column,
+			},
+			helper_id_start,
+		));
 	}
 
 	if keyword == "endcomponent" {
@@ -2683,5 +3131,149 @@ mod tests {
 	fn let_destructure_empty_pattern_binds_nothing_rejected() {
 		let e = parse_block_tag("let {} = obj", 1, 1, &opts(), 0).unwrap_err();
 		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	// ---- the Edge built-in tags added after auditing edge.js 6.5.1's tag
+	// barrel (the earlier pass worked from memory and missed four of these) ----
+
+	fn assign_parts(raw: &str) -> (String, String) {
+		match parse_block_tag(raw, 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Assign { target, source, .. } => (target, source),
+			other => panic!("expected Assign, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn assign_splits_target_and_value() {
+		assert_eq!(assign_parts("assign x = 1"), ("x =".into(), "1".into()));
+		assert_eq!(
+			assign_parts("assign user.name = 'Ada'"),
+			("user.name =".into(), "'Ada'".into())
+		);
+	}
+
+	#[test]
+	fn assign_keeps_compound_operators() {
+		assert_eq!(assign_parts("assign n += 5"), ("n +=".into(), "5".into()));
+		assert_eq!(assign_parts("assign n ??= 0"), ("n ??=".into(), "0".into()));
+		assert_eq!(assign_parts("assign n **= 2"), ("n **=".into(), "2".into()));
+	}
+
+	#[test]
+	fn assign_does_not_split_on_a_comparison() {
+		// The first `=` here belongs to the assignment, the rest to `===`.
+		assert_eq!(assign_parts("assign f = a === b"), ("f =".into(), "a === b".into()));
+	}
+
+	#[test]
+	fn assign_ignores_equals_inside_strings_and_brackets() {
+		assert_eq!(
+			assign_parts("assign m = { a: 'x=y' }"),
+			("m =".into(), "{ a: 'x=y' }".into())
+		);
+		assert_eq!(
+			assign_parts("assign rows[i].qty = 1"),
+			("rows[i].qty =".into(), "1".into())
+		);
+	}
+
+	#[test]
+	fn assign_rejects_a_non_assignment() {
+		let e = parse_block_tag("assign a === b", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn assign_rejects_a_non_identifier_target() {
+		let e = parse_block_tag("assign 'a' = 1", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn assign_rejects_an_empty_value() {
+		let e = parse_block_tag("assign x =", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::InvalidExpression);
+	}
+
+	#[test]
+	fn dump_and_dd_differ_only_by_die() {
+		match parse_block_tag("dump user", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Dump { die, source, .. } => {
+				assert!(!die);
+				assert_eq!(source, "user");
+			}
+			other => panic!("expected Dump, got {other:?}"),
+		}
+		match parse_block_tag("dd user", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Dump { die, .. } => assert!(die),
+			other => panic!("expected Dump, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn debugger_takes_no_arguments() {
+		assert!(matches!(
+			parse_block_tag("debugger", 1, 1, &opts(), 0).unwrap().0,
+			ParsedBlockTag::Debugger { .. }
+		));
+		let e = parse_block_tag("debugger x", 1, 1, &opts(), 0).unwrap_err();
+		assert_eq!(e.code, ErrorCode::ParseError);
+	}
+
+	#[test]
+	fn inject_new_error_and_stack_capture_their_expression() {
+		match parse_block_tag("inject { a: 1 }", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Inject { source, .. } => assert_eq!(source, "{ a: 1 }"),
+			other => panic!("expected Inject, got {other:?}"),
+		}
+		match parse_block_tag("newError 'boom', f, 1, 2", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::NewError { source, .. } => {
+				assert_eq!(source, "'boom', f, 1, 2");
+			}
+			other => panic!("expected NewError, got {other:?}"),
+		}
+		match parse_block_tag("stack 'scripts'", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Stack { source, .. } => assert_eq!(source, "'scripts'"),
+			other => panic!("expected Stack, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn push_tags_carry_the_once_flag() {
+		match parse_block_tag("pushTo 'scripts'", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::OpenPushTo { once, source, .. } => {
+				assert!(!once);
+				assert_eq!(source, "'scripts'");
+			}
+			other => panic!("expected OpenPushTo, got {other:?}"),
+		}
+		match parse_block_tag("pushOnceTo 'scripts'", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::OpenPushTo { once, .. } => assert!(once),
+			other => panic!("expected OpenPushTo, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn push_close_tags_are_not_interchangeable() {
+		match parse_block_tag("endpushTo", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Close { closes, .. } => {
+				assert_eq!(closes, BlockClosesKind::PushTo);
+			}
+			other => panic!("expected Close, got {other:?}"),
+		}
+		match parse_block_tag("endpushOnceTo", 1, 1, &opts(), 0).unwrap().0 {
+			ParsedBlockTag::Close { closes, .. } => {
+				assert_eq!(closes, BlockClosesKind::PushOnceTo);
+			}
+			other => panic!("expected Close, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn the_new_tags_all_require_an_expression() {
+		for kw in ["inject", "newError", "stack", "pushTo", "pushOnceTo", "dd"] {
+			let e = parse_block_tag(kw, 1, 1, &opts(), 0).unwrap_err();
+			assert_eq!(e.code, ErrorCode::InvalidExpression, "{kw} should require an argument");
+		}
 	}
 }

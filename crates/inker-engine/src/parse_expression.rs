@@ -7,7 +7,7 @@
 //!   - Call: `name(arg, …)` with helper-name set check.
 //!   - Object: `{ key: value, shorthand, … }` (no prototype-pollution keys,
 //!     no `{true}` reserved-shadow shorthand).
-//!   - Unary: leading `!` only.
+//!   - Unary: leading `!` and `await`.
 //!   - Binary: `==`, `!=`, `===`, `!==`, `<`, `<=`, `>`, `>=`, `&&`, `||`.
 //!   - Group: `(expr)`.
 //!
@@ -59,6 +59,10 @@ impl BinaryOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UnaryOp {
 	Not,
+	/// `await expr`. The Node renderer evaluates the expression's verbatim
+	/// source in V8, so parsing it here is about validating the operand and
+	/// collecting its helper call-sites — the suspension is the walker's job.
+	Await,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -938,10 +942,54 @@ fn parse_object_literal(
 	}
 }
 
+/// Does `word` sit at the cursor as a whole keyword — followed by something
+/// that cannot continue an identifier?
+fn matches_keyword(cursor: &Cursor, word: &str) -> bool {
+	let chars: Vec<char> = word.chars().collect();
+	if cursor.pos + chars.len() > cursor.chars.len() {
+		return false;
+	}
+	if cursor.chars[cursor.pos..cursor.pos + chars.len()] != chars[..] {
+		return false;
+	}
+	match cursor.chars.get(cursor.pos + chars.len()) {
+		None => false,
+		Some(c) => !(c.is_alphanumeric() || *c == '_' || *c == '$'),
+	}
+}
+
 fn parse_unary(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 	skip_whitespace(cursor);
 	let start = cursor.pos;
 	let (start_line, start_column) = position_at(cursor, start);
+	// `await expr` — a keyword, so it must be followed by a boundary; `awaited`
+	// and `await_at` are ordinary identifiers.
+	if matches_keyword(cursor, "await") {
+		cursor.depth += 1;
+		if cursor.depth > MAX_EXPRESSION_DEPTH {
+			let pos = cursor.pos;
+			let e = fail_parse(
+				cursor,
+				format!(
+					"expression nests beyond the maximum depth of {MAX_EXPRESSION_DEPTH} — flatten the expression or move logic to a helper"
+				),
+				pos,
+			);
+			cursor.depth -= 1;
+			return Err(e);
+		}
+		cursor.pos += "await".len();
+		let operand = parse_unary(cursor)?;
+		cursor.depth -= 1;
+		let src: String = cursor.chars[start..cursor.pos].iter().collect();
+		return Ok(Expression::Unary {
+			op: UnaryOp::Await,
+			operand: Box::new(operand),
+			source: src,
+			line: start_line,
+			column: start_column,
+		});
+	}
 	if cursor.chars.get(cursor.pos) == Some(&'!')
 		&& cursor.chars.get(cursor.pos + 1) != Some(&'=')
 	{

@@ -11,7 +11,9 @@ import { Templates } from "../../src/Templates.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-helpers-")));
+	return fs.realpathSync.native(
+		fs.mkdtempSync(path.join(os.tmpdir(), "inker-helpers-")),
+	);
 }
 
 describe("Templates — helpers option (constructor)", () => {
@@ -99,7 +101,9 @@ describe("Templates — helpers option (constructor)", () => {
 			expect.fail("should have thrown");
 		} catch (e) {
 			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_UNKNOWN_HELPER");
-			expect(asTyped<InkerRenderError>(e).message).toContain("Unknown helper 'foo'");
+			expect(asTyped<InkerRenderError>(e).message).toContain(
+				"Unknown helper 'foo'",
+			);
 		}
 	});
 

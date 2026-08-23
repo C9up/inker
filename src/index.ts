@@ -19,4 +19,17 @@ export type {
 	InkerTagToken,
 } from "./renderNode.js";
 export { SafeString } from "./SafeString.js";
-export { Templates, type TemplatesOptions } from "./Templates.js";
+// The stack store backing `@stack` / `@pushTo` / `@pushOnceTo`. Exported so a
+// host can pre-seed a stack (or read one back) around a render, the way Edge
+// exposes `template.stacks`.
+export { Stacks } from "./stacks.js";
+export {
+	type InkerPluginFn,
+	type InkerPluginOptions,
+	type OutputProcessorValue,
+	Processor,
+	type RawProcessorValue,
+	TemplateRenderer,
+	Templates,
+	type TemplatesOptions,
+} from "./Templates.js";

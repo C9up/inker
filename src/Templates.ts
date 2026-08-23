@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
-import { EDGE_GLOBAL_NAMES } from "./globals.js";
+import { fileURLToPath } from "node:url";
+import { INKER_GLOBAL_NAMES } from "./globals.js";
 import type { HelperFn } from "./helpers.js";
 import { InkerRenderError } from "./InkerRenderError.js";
 import {
@@ -18,10 +19,30 @@ import {
 	collectSections,
 	type InkerNodeJson,
 	type InkerTag,
+	type NodeRenderContext,
 	renderNodeTree,
+	renderNodeTreeAsync,
 } from "./renderNode.js";
+import { Stacks } from "./stacks.js";
 
 export type CacheMode = "auto" | "mtime" | "never";
+
+/** Options a plugin is registered with. `recurring` re-runs it on every
+ * render rather than only the first (Edge parity). */
+export interface InkerPluginOptions {
+	readonly recurring?: boolean;
+}
+
+/**
+ * A plugin (Edge `PluginFn`). Receives the engine, whether this is its first
+ * run, and the options it was registered with. A one-argument plugin — the
+ * common shape, and what rosetta's i18n plugin is — stays valid.
+ */
+export type InkerPluginFn<T extends InkerPluginOptions = InkerPluginOptions> = (
+	templates: Templates,
+	firstRun: boolean,
+	options: T | undefined,
+) => void;
 
 export interface TemplatesOptions {
 	root: string;
@@ -73,11 +94,45 @@ interface ComposedTemplate {
 	componentAsts: Map<string, NapiInkerAst>;
 }
 
+/** The template file extension, shared by resolution and the component scan. */
+const TEMPLATE_EXT = ".inker";
+
+/** A component tag name: dot-separated camelCase segments (`form.input`). */
+const COMPONENT_TAG_RE = /^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$/;
+
+/** camelCase one path segment for a component tag (`my-button` → `myButton`). */
+function camelCaseSegment(segment: string): string {
+	return segment
+		.split(/[-_\s]+/)
+		.filter((w) => w.length > 0)
+		.map((w, i) =>
+			i === 0
+				? w.charAt(0).toLowerCase() + w.slice(1)
+				: w.charAt(0).toUpperCase() + w.slice(1),
+		)
+		.join("");
+}
+
 const VALID_CACHE_MODES: ReadonlySet<string> = new Set([
 	"auto",
 	"mtime",
 	"never",
 ]);
+
+/** Validate a requested cache mode and resolve `auto` against the environment.
+ * Shared by the constructor and `configure()` so both apply the same rules. */
+function resolveCacheMode(requested: CacheMode): "mtime" | "never" {
+	if (!VALID_CACHE_MODES.has(requested)) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`Templates cacheMode must be one of 'auto' | 'mtime' | 'never'; got ${JSON.stringify(requested)}`,
+		);
+	}
+	if (requested === "auto") {
+		return process.env.NODE_ENV === "production" ? "never" : "mtime";
+	}
+	return requested;
+}
 
 // Built-in block/directive keywords a custom tag may not shadow (registerTag).
 // The parser already ignores these as custom tags; rejecting them here makes the
@@ -590,7 +645,7 @@ function validateHelpers(
 			`Templates.helpers must be a Map; got ${Object.prototype.toString.call(helpers).slice(8, -1)}`,
 		);
 	}
-	const helperNames = new Set<string>(EDGE_GLOBAL_NAMES);
+	const helperNames = new Set<string>(INKER_GLOBAL_NAMES);
 	for (const [key, value] of helpers) {
 		// T3: validate the key is a string BEFORE handing it to
 		// HELPER_NAME_RE.test(), which ToString-coerces and throws a raw
@@ -639,9 +694,226 @@ function validateHelpers(
 	return { helpers, helperNames };
 }
 
+/** The value handed to a `raw` processor: a template's source before parsing. */
+export interface RawProcessorValue {
+	readonly raw: string;
+	/** Absolute path, when the source came from disk. */
+	readonly path?: string;
+}
+
+/** The value handed to an `output` processor: rendered HTML. */
+export interface OutputProcessorValue {
+	readonly output: string;
+	/** Template name, when the render started from one. */
+	readonly template?: string;
+}
+
+/**
+ * Source and output transforms (Edge `edge.processor`).
+ *
+ * INKER DEVIATION (named): Edge also exposes a `compiled` stage that rewrites
+ * the JavaScript its compiler emits. Inker has no such stage — templates parse
+ * to an AST in Rust and render by walking it, so there is no intermediate code
+ * to rewrite. Registering `compiled` throws rather than sitting silently inert.
+ */
+export class Processor {
+	readonly #raw: Array<(value: RawProcessorValue) => string | undefined> = [];
+	readonly #output: Array<(value: OutputProcessorValue) => string | undefined> =
+		[];
+	readonly #onRawRegistered: () => void;
+
+	constructor(onRawRegistered: () => void) {
+		this.#onRawRegistered = onRawRegistered;
+	}
+
+	process(
+		stage: "raw",
+		fn: (value: RawProcessorValue) => string | undefined,
+	): void;
+	process(
+		stage: "output",
+		fn: (value: OutputProcessorValue) => string | undefined,
+	): void;
+	// The overloads above are what callers see, and they give the callback its
+	// parameter type. The implementation signature takes the INTERSECTION of the
+	// two handler types: a value of that type is assignable to either registry,
+	// so the dispatch below needs no cast.
+	process(
+		stage: "raw" | "output",
+		fn: ((value: RawProcessorValue) => string | undefined) &
+			((value: OutputProcessorValue) => string | undefined),
+	): void {
+		if (typeof fn !== "function") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`processor.process('${String(stage)}') — handler must be a function; got ${typeof fn}`,
+			);
+		}
+		if (stage === "raw") {
+			this.#raw.push(fn);
+			this.#onRawRegistered();
+			return;
+		}
+		if (stage === "output") {
+			this.#output.push(fn);
+			return;
+		}
+		// Unreachable from TypeScript; reachable from plain JS, and a stage that
+		// never fires would be a silent no-op — so it is loud instead.
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`processor.process — unknown stage '${String(stage)}'. Inker supports 'raw' and 'output'. Edge's 'compiled' stage has no equivalent: no JavaScript is emitted, templates parse to an AST. Its 'tag' stage has none either: parsing happens in Rust, so a JS handler cannot mutate a token mid-parse — and its canonical use, exposing components as tags, is built in (see listComponents).`,
+		);
+	}
+
+	/** Apply every `raw` transform in registration order. */
+	applyRaw(raw: string, path?: string): string {
+		let out = raw;
+		// A processor returning undefined leaves the value untouched, so a
+		// transform can bail out without reconstructing its input.
+		for (const fn of this.#raw) {
+			const next = fn({ raw: out, path });
+			if (typeof next === "string") out = next;
+		}
+		return out;
+	}
+
+	/** Apply every `output` transform in registration order. */
+	applyOutput(output: string, template?: string): string {
+		let out = output;
+		for (const fn of this.#output) {
+			const next = fn({ output: out, template });
+			if (typeof next === "string") out = next;
+		}
+		return out;
+	}
+}
+
+/**
+ * After the handle is open, confirm the file the OS actually resolved is still
+ * inside `root`. `O_NOFOLLOW` already refused a symlinked final segment; this
+ * catches an intermediate directory that is one.
+ *
+ * Extracted so the synchronous loader runs the SAME check — a second copy of a
+ * containment rule is how the two paths drift apart.
+ */
+function assertRealpathContained(
+	absPath: string,
+	root: string,
+	validatedName: string,
+): void {
+	let realPath: string;
+	try {
+		// `.native` to match validateRoot's canonical form (same OS realpath)
+		// so 8.3-short-name / casing differences don't trip containment.
+		realPath = fs.realpathSync.native(absPath);
+	} catch (cause) {
+		throw wrapFsError(cause, absPath, validatedName);
+	}
+	if (realPath === absPath) return;
+	const rel = path.relative(root, realPath);
+	if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`Resolved template path escapes the templates root via symlink: ${realPath} is outside ${root}`,
+			{ templatePath: realPath, templateName: validatedName },
+		);
+	}
+}
+
+/** One template the composition needs before it can continue. */
+interface LoadRequest {
+	readonly absPath: string;
+	readonly validatedName: string;
+	readonly root: string;
+}
+
+/**
+ * A walk over the composition that ASKS for each template it needs instead of
+ * loading it. Two drivers serve those requests — one with promise I/O, one with
+ * the synchronous calls — so `render` and `renderSync` share ONE copy of the
+ * 379 lines that decide WHAT to load. Only the loader leaves differ.
+ */
+// The composition only ever asks for loads, but it is delegated to from the
+// render stream, so it must accept that stream's answer type; `askedForAst`
+// narrows at each site.
+type ComposeStep<T> = Generator<LoadRequest, T, NapiInkerAst | string>;
+
+/** One sub-render the composition needs: a node list plus its scope. */
+interface RenderRequest {
+	readonly nodes: readonly InkerNodeJson[];
+	readonly state: Readonly<Record<string, unknown>>;
+	readonly ctx: NodeRenderContext;
+}
+
+/**
+ * A whole render as a sequence of requests — templates to load and node lists
+ * to render. `render` and `renderSync` differ only in how they answer them.
+ */
+type RenderSteps = Generator<
+	LoadRequest | RenderRequest,
+	string,
+	// A generator carries ONE `next` type, and this stream alternates two: a
+	// load is answered with an AST, a sub-render with HTML. The union is
+	// narrowed at each `yield` site by `askedForAst` / `askedForHtml`, which
+	// also assert the driver answered the request it was given.
+	NapiInkerAst | string
+>;
+
+function askedForAst(answer: NapiInkerAst | string): NapiInkerAst {
+	if (typeof answer === "string") {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			"render driver answered a template load with rendered HTML",
+		);
+	}
+	return answer;
+}
+
+function askedForHtml(answer: NapiInkerAst | string): string {
+	if (typeof answer !== "string") {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			"render driver answered a sub-render with a template AST",
+		);
+	}
+	return answer;
+}
+
+/** Shorthand so a request reads like the call it replaced. */
+function loadRequest(
+	absPath: string,
+	validatedName: string,
+	root: string,
+): LoadRequest {
+	return { absPath, validatedName, root };
+}
+
+/** A callable global doubles as a helper, so the parser accepts `{{ name(x) }}`
+ * as a call rather than an unknown-helper error. `typeof` narrows to `Function`,
+ * which carries no signature — this guard is what states the contract. */
+function isHelperFn(value: unknown): value is HelperFn {
+	return typeof value === "function";
+}
+
 export class Templates {
 	readonly #root: string;
-	readonly #cacheMode: "mtime" | "never";
+	// Not readonly: `configure()` can swap it on a live engine (Edge parity).
+	#cacheMode: "mtime" | "never";
+	/** Callbacks registered through `onRender`, run on every `createRenderer`. */
+	readonly #renderCallbacks: ((renderer: TemplateRenderer) => void)[] = [];
+	/** Components exposed as tags, refreshed before each render. `undefined`
+	 * until the first scan. */
+	#componentTags: Map<string, string> | undefined;
+	/** Plugins registered through `use`, run lazily at the first render. */
+	// Each entry stores an already-bound CALL rather than the raw function: the
+	// plugin's option type is generic per registration, and a list of raw
+	// `InkerPluginFn<T>` cannot be typed without widening `T` unsoundly.
+	readonly #plugins: {
+		run: (firstRun: boolean) => void;
+		options: InkerPluginOptions | undefined;
+		executed: boolean;
+	}[] = [];
 	readonly #cache: Map<string, CacheEntry> = new Map();
 	readonly #inflight: Map<string, Promise<NapiInkerAst>> = new Map();
 	// T7: monotonic counter bumped by clearCache(). #loadAstUncached snapshots
@@ -650,6 +922,36 @@ export class Templates {
 	// from silently re-populating the cache after clearCache() ran.
 	#cacheGeneration = 0;
 	readonly #helpers: ReadonlyMap<string, HelperFn>;
+	// Values shared with EVERY template (Edge `edge.global`). Kept apart from
+	// `#helpers`: a helper name is handed to the Rust lexer at parse time so
+	// `@name()` resolves as a call, whereas a global is plain render state and
+	// must NOT change how a template parses.
+	readonly #globals: Map<string, unknown> = new Map();
+	// Globals whose value is callable. The Rust parser validates `{{ name(…) }}`
+	// against the helper-name list handed to `parseTemplate`, so a callable global
+	// must ALSO be published as a helper or the template fails to parse with
+	// E_INKER_UNKNOWN_HELPER. Kept separate from `#helpers` (constructor-supplied,
+	// frozen) so the composed view can be memoised and invalidated on its own.
+	readonly #globalFns: Map<string, HelperFn> = new Map();
+	#composedHelpers: ReadonlyMap<string, HelperFn> | undefined;
+	// Source/output transforms (Edge `edge.processor.process`). INKER DEVIATION
+	// (named): Edge also exposes a `compiled` stage that rewrites the JavaScript
+	// its compiler emits. Inker has no such stage — templates parse to an AST in
+	// Rust and render by walking it, so there is no intermediate code to rewrite.
+	// Registering `compiled` therefore throws rather than silently never firing.
+	// Templates registered from memory (Edge `registerTemplate`). Keyed by the
+	// SAME validated name a disk lookup would produce, so `@include('x')` and
+	// `@component('components/x')` resolve here before any filesystem access —
+	// an in-memory template has no path, so the containment and symlink guards
+	// simply never come into play for it.
+	readonly #inMemory: Map<string, string> = new Map();
+	/**
+	 * Source and output transforms (Edge `edge.processor`). A `raw` transform
+	 * changes what gets parsed, so registering one clears the AST cache.
+	 */
+	readonly processor: Processor = new Processor(() => {
+		this.clearCache();
+	});
 	readonly #helperNames: ReadonlySet<string>;
 	// Runtime-registered custom tags (Edge `registerTag`). Names here make the
 	// parser recognise `@<tagName>(jsArg)` as a `CustomTag` node; the tag's
@@ -664,22 +966,15 @@ export class Templates {
 	// shared one, so mounting a package's templates cannot widen traversal.
 	readonly #disks: Map<string, string> = new Map();
 
+	/** Construct an engine (Edge `Edge.create`). Mirrors `new Templates(...)`. */
+	static create(options: TemplatesOptions): Templates {
+		return new Templates(options);
+	}
+
 	constructor(options: TemplatesOptions) {
 		this.#root = canonicalizeTemplatesRoot(options.root);
 
-		const requested = options.cacheMode ?? "auto";
-		if (!VALID_CACHE_MODES.has(requested)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
-				`Templates cacheMode must be one of 'auto' | 'mtime' | 'never'; got ${JSON.stringify(requested)}`,
-			);
-		}
-		if (requested === "auto") {
-			this.#cacheMode =
-				process.env.NODE_ENV === "production" ? "never" : "mtime";
-		} else {
-			this.#cacheMode = requested;
-		}
+		this.#cacheMode = resolveCacheMode(options.cacheMode ?? "auto");
 
 		// P14 reverted: `Templates#helpers` is intentionally a LIVE reference,
 		// documented by the `resolves helper implementation LIVE per call (D4)`
@@ -708,9 +1003,19 @@ export class Templates {
 	 * clash must fail loud rather than silently clobber another package's
 	 * containment boundary.
 	 */
-	mount(diskName: string, dir: string): void {
+	mount(dir: string | URL): void;
+	mount(diskName: string, dir: string | URL): void;
+	mount(diskNameOrDir: string | URL, maybeDir?: string | URL): void {
+		// Edge's one-argument form mounts the default disk, which is what
+		// `edge.mount(new URL('./views', import.meta.url))` relies on.
+		const diskName = maybeDir === undefined ? "default" : String(diskNameOrDir);
+		const dir = maybeDir ?? diskNameOrDir;
 		assertDiskName(diskName);
-		const root = canonicalizeTemplatesRoot(dir);
+		// Edge mounts with `new URL('./views', import.meta.url)`; accept that form
+		// so a directory computed from a module's own location ports unchanged.
+		const root = canonicalizeTemplatesRoot(
+			dir instanceof URL ? fileURLToPath(dir) : dir,
+		);
 		const existing = this.#disks.get(diskName);
 		if (existing !== undefined && existing !== root) {
 			throw new InkerRenderError(
@@ -741,9 +1046,15 @@ export class Templates {
 	 * evaluate a template expression) and whose `token.properties.jsArg` is the
 	 * verbatim argument source, e.g. an `@svg('icon')` or `@time()` tag.
 	 *
+	 * A tag declared `block: true` takes a body closed by `@end<tagName>` (or is
+	 * self-closed as `@!<tagName>`); its `compile` reads the body through
+	 * `token.renderBody()`.
+	 *
 	 * INKER DEVIATION (named): Edge runs `compile` once at compilation (it emits
 	 * JS); inker parses in Rust and renders by walking the JSON AST, so `compile`
-	 * runs at RENDER time. Only inline tags (`block: false`) are supported for now.
+	 * runs at RENDER time — and a block tag therefore receives its body already
+	 * rendered (`token.renderBody()`) rather than Edge's raw `token.children`
+	 * lexer tokens, which have no counterpart here.
 	 *
 	 * Because tag names change how a template PARSES, registering (or overwriting)
 	 * a tag clears the AST cache — call `registerTag` during boot, before rendering.
@@ -768,15 +1079,160 @@ export class Templates {
 				`registerTag({ tagName: '${name}' }) — compile must be a function`,
 			);
 		}
-		if (tag.block === true) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
-				`registerTag({ tagName: '${name}' }) — block custom tags (@${name}…@end${name}) are not supported yet; register an inline tag (block: false)`,
-			);
-		}
 		this.#tags.set(name, tag);
 		// A new tag name changes parse output; drop any AST parsed without it.
 		this.clearCache();
+	}
+
+	/**
+	 * Absolute path a template name resolves to (Edge `loader.makePath`), disk
+	 * prefix and containment checks included. Does not touch the filesystem —
+	 * use it to report WHERE a template was looked for.
+	 */
+	makePath(name: string): string {
+		return this.#resolveTemplateFile(name).absPath;
+	}
+
+	/**
+	 * A template's source (Edge `loader.resolve`). An in-memory template
+	 * registered through `registerTemplate` wins over the disk, exactly as it
+	 * does during a render.
+	 *
+	 * INKER DEVIATION (named): Edge hangs this on `edge.loader`; inker has no
+	 * separate loader object, so the disk surface lives on the engine itself.
+	 */
+	resolve(name: string): { template: string } {
+		const inMemory = this.#inMemory.get(
+			validateName(this.#splitDisk(name).bare),
+		);
+		if (inMemory !== undefined) return { template: inMemory };
+		const { absPath } = this.#resolveTemplateFile(name);
+		try {
+			return { template: fs.readFileSync(absPath, "utf8") };
+		} catch {
+			throw new InkerRenderError(
+				"E_INKER_TEMPLATE_NOT_FOUND",
+				`Template not found: ${absPath}`,
+				{ templateName: name, templatePath: absPath },
+			);
+		}
+	}
+
+	/** The mounted disks, name → canonicalised root (Edge `loader.mounted`).
+	 * `default` is the root the engine was constructed with. */
+	get mounted(): Readonly<Record<string, string>> {
+		const out: Record<string, string> = { default: this.#root };
+		for (const [name, root] of this.#disks) out[name] = root;
+		return Object.freeze(out);
+	}
+
+	/** Templates registered in memory (Edge `loader.templates`). */
+	get templates(): Readonly<Record<string, { template: string }>> {
+		const out: Record<string, { template: string }> = Object.create(null);
+		for (const [name, template] of this.#inMemory) out[name] = { template };
+		return Object.freeze(out);
+	}
+
+	/**
+	 * Every component reachable as a tag, per mounted disk (Edge
+	 * `loader.listComponents`). A `components/button.inker` becomes `@button`,
+	 * `components/form/input.inker` becomes `@form.input`, and an `index`
+	 * segment drops out so `components/form/index.inker` is `@form`. Names are
+	 * camel-cased, and a non-default disk prefixes its own name.
+	 */
+	listComponents(): {
+		diskName: string;
+		components: { componentName: string; tagName: string }[];
+	}[] {
+		const disks: [string, string][] = [["default", this.#root]];
+		for (const [name, root] of this.#disks) disks.push([name, root]);
+		return disks.map(([diskName, root]) => ({
+			diskName,
+			components: this.#scanComponents(diskName, root),
+		}));
+	}
+
+	#scanComponents(
+		diskName: string,
+		root: string,
+	): { componentName: string; tagName: string }[] {
+		const dir = path.join(root, "components");
+		let files: string[];
+		try {
+			files = fs
+				.readdirSync(dir, { recursive: true, encoding: "utf8" })
+				.filter((f) => f.endsWith(TEMPLATE_EXT));
+		} catch {
+			// No components directory on this disk — not an error.
+			return [];
+		}
+		const out: { componentName: string; tagName: string }[] = [];
+		for (const file of files) {
+			const rel = file.slice(0, -TEMPLATE_EXT.length).split(path.sep).join("/");
+			const segments = rel.split("/");
+			const tag = segments
+				// A trailing `index` names its directory: `form/index` → `form`.
+				.filter((seg, i) => i === 0 || seg !== "index")
+				.map((seg) => camelCaseSegment(seg))
+				.join(".");
+			if (tag === "" || !COMPONENT_TAG_RE.test(tag)) continue;
+			// INKER DEVIATION (named): Edge's `componentName` is the full
+			// `components/<path>`; inker's `@component()` already resolves under
+			// `components/`, so the name a caller can actually pass is the bare
+			// relative path.
+			const componentName = rel;
+			out.push(
+				diskName === "default"
+					? { componentName, tagName: tag }
+					: {
+							componentName: `${diskName}::${componentName}`,
+							tagName: `${diskName}.${tag}`,
+						},
+			);
+		}
+		return out;
+	}
+
+	/**
+	 * Refresh the component-tag map. Called before every render (like Edge's
+	 * bundled `supercharged` plugin), but the directory is only re-scanned when
+	 * AST caching is off — with caching on, a new component file needs a
+	 * `clearCache()` anyway.
+	 */
+	#refreshComponentTags(): void {
+		if (this.#componentTags !== undefined && this.#cacheMode !== "mtime")
+			return;
+		const next = new Map<string, string>();
+		for (const { components } of this.listComponents()) {
+			for (const { componentName, tagName } of components) {
+				next.set(tagName, componentName);
+			}
+		}
+		const changed =
+			this.#componentTags === undefined ||
+			this.#componentTags.size !== next.size ||
+			[...next].some(([k, v]) => this.#componentTags?.get(k) !== v);
+		this.#componentTags = next;
+		// The map changes how templates PARSE, so a stale AST must not survive it.
+		if (changed && this.#componentTags !== undefined) this.clearCache();
+	}
+
+	/** The component-tag map as the JSON the Rust parser expects. */
+	#componentTagsJson(): string {
+		if (this.#componentTags === undefined || this.#componentTags.size === 0) {
+			return "";
+		}
+		return JSON.stringify(Object.fromEntries(this.#componentTags));
+	}
+
+	/** Names of the registered tags declared `block: true` — the parser needs
+	 * them separately, to know which `@end<name>` closers exist. */
+	#blockTagNames(): string[] {
+		const names: string[] = [];
+		for (const [name, tag] of this.#tags) {
+			if (tag.block === true) names.push(name);
+		}
+		return names;
 	}
 
 	/**
@@ -812,25 +1268,88 @@ export class Templates {
 	): { root: string; validated: string; absPath: string } {
 		const { root, bare } = this.#splitDisk(name);
 		const validated = validateName(`${prefix}${bare}`);
-		const absPath = path.join(root, `${validated}.inker`);
+		const absPath = path.join(root, `${validated}${TEMPLATE_EXT}`);
 		assertContained(root, absPath, validated);
 		return { root, validated, absPath };
 	}
 
+	/**
+	 * Render a template from disk.
+	 *
+	 * The whole body — resolution, composition, layout/section assembly — is a
+	 * generator that ASKS for each load and each sub-render. `render` serves
+	 * those requests with promise I/O, `renderSync` with the synchronous calls,
+	 * and neither owns a second copy of the logic. That is what makes a
+	 * `renderSync` safe to offer at all: the containment rules and the
+	 * composition run from ONE place.
+	 */
 	async render(
 		name: string,
-		data: Readonly<Record<string, unknown>>,
+		data: Readonly<Record<string, unknown>> = {},
 	): Promise<string> {
+		const step = this.#renderSteps(name, data);
+		let next = step.next();
+		while (!next.done) {
+			const req = next.value;
+			const html =
+				"nodes" in req
+					? await renderNodeTreeAsync(
+							req.nodes,
+							req.state,
+							this.#renderHelpers(),
+							req.ctx,
+						)
+					: await this.#loadAst(req.absPath, req.validatedName, req.root);
+			next = step.next(html);
+		}
+		return next.value;
+	}
+
+	/**
+	 * Render a template from disk, synchronously (AdonisJS `renderSync`).
+	 *
+	 * An expression using `await` raises here, exactly as it does upstream —
+	 * `render` is the awaiting counterpart.
+	 */
+	renderSync(
+		name: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): string {
+		const step = this.#renderSteps(name, data);
+		let next = step.next();
+		while (!next.done) {
+			const req = next.value;
+			const html =
+				"nodes" in req
+					? renderNodeTree(req.nodes, req.state, this.#renderHelpers(), req.ctx)
+					: this.#loadAstSync(req.absPath, req.validatedName, req.root);
+			next = step.next(html);
+		}
+		return next.value;
+	}
+
+	*#renderSteps(
+		name: string,
+		data: Readonly<Record<string, unknown>>,
+	): RenderSteps {
+		// Plugins run before anything is resolved — one may register a global or
+		// a tag this very render depends on.
+		this.#executePlugins();
 		const { root, validated, absPath } = this.#resolveTemplateFile(name);
+
+		// Registered globals sit UNDER the caller's data; validation then runs on
+		// the merged tree, so a bad global is rejected here rather than surfacing
+		// as a render-time fault in an unrelated template.
+		const state = this.#withGlobals(data);
 
 		// Validate the data tree (rejects NaN / ±Infinity / out-of-range bigint /
 		// sparse holes / circular refs) — the Node renderer evaluates the ORIGINAL
 		// data in V8 (Maps/Sets intact), so `encodeData`'s result is discarded and
 		// only its guard side-effects are kept.
-		encodeData(data);
+		encodeData(state);
 
-		const entryAst = await this.#loadAst(absPath, validated, root);
-		const composed = await this.#compose(
+		const entryAst = askedForAst(yield loadRequest(absPath, validated, root));
+		const composed = yield* this.#compose(
 			entryAst,
 			validated,
 			absPath,
@@ -850,11 +1369,26 @@ export class Templates {
 		}
 
 		const childNodes = this.#astNodes(composed.bodyAst);
-		const baseCtx = { partials, components, tags: this.#tags };
+		// ONE stack store for the whole composition: `@pushTo` in the body (or in
+		// a partial, or a component) must reach a `@stack` the layout renders
+		// last. Placeholders are substituted once everything has rendered.
+		const stacks = new Stacks();
+		const baseCtx = {
+			partials,
+			components,
+			tags: this.#tags,
+			templateName: name,
+			stacks,
+		};
 
 		// No layout → render the child directly (`@section`s render inline).
 		if (composed.layoutAst === undefined) {
-			return renderNodeTree(childNodes, data, this.#helpers, baseCtx);
+			return this.#applyOutput(
+				stacks.fillPlaceholders(
+					askedForHtml(yield { nodes: childNodes, state, ctx: baseCtx }),
+				),
+				name,
+			);
 		}
 
 		// With a layout: separate the child's `@section` fills from the default
@@ -862,7 +1396,9 @@ export class Templates {
 		// and inject them at the layout's matching yields (62-3).
 		const { sections: childSections, body: childBody } =
 			collectSections(childNodes);
-		const bodyHtml = renderNodeTree(childBody, data, this.#helpers, baseCtx);
+		const bodyHtml = askedForHtml(
+			yield { nodes: childBody, state, ctx: baseCtx },
+		);
 
 		const layoutNodes = this.#astNodes(composed.layoutAst);
 		const { sections: layoutDefaults } = collectSections(layoutNodes);
@@ -871,22 +1407,32 @@ export class Templates {
 			const layoutDefault = layoutDefaults.get(name);
 			const superHtml =
 				layoutDefault !== undefined
-					? renderNodeTree(layoutDefault, data, this.#helpers, baseCtx)
+					? askedForHtml(yield { nodes: layoutDefault, state, ctx: baseCtx })
 					: "";
 			sections.set(
 				name,
-				renderNodeTree(sectionNodes, data, this.#helpers, {
-					...baseCtx,
-					superHtml,
-				}),
+				askedForHtml(
+					yield {
+						nodes: sectionNodes,
+						state,
+						ctx: { ...baseCtx, superHtml },
+					},
+				),
 			);
 		}
 
-		return renderNodeTree(layoutNodes, data, this.#helpers, {
-			...baseCtx,
-			bodyHtml,
-			sections,
-		});
+		return this.#applyOutput(
+			stacks.fillPlaceholders(
+				askedForHtml(
+					yield {
+						nodes: layoutNodes,
+						state,
+						ctx: { ...baseCtx, bodyHtml, sections },
+					},
+				),
+			),
+			name,
+		);
 	}
 
 	/** Convert a parsed AST handle to its JSON node list (62-2 Node renderer). */
@@ -899,8 +1445,9 @@ export class Templates {
 
 	renderString(
 		source: string,
-		data: Readonly<Record<string, unknown>>,
+		data: Readonly<Record<string, unknown>> = {},
 	): string {
+		this.#executePlugins();
 		// T4 + P15: strip ALL U+FEFF (BOM) characters, not just a leading one.
 		// `validateName` already refuses BOM in any position of a template
 		// name; source built by concatenating multiple BOM-prefixed fragments
@@ -911,11 +1458,16 @@ export class Templates {
 			? source.replace(/﻿/g, "")
 			: source;
 		const native = getNative();
+		// `raw` processors also apply to inline sources — the stage is about the
+		// source text, not about where it came from.
+		const processedSource = this.#applyRaw(normalisedSource);
 		const ast = callNative(() =>
 			native.parseTemplate(
-				normalisedSource,
-				[...this.#helperNames],
+				processedSource,
+				this.#parseNames(),
 				[...this.#tags.keys()],
+				this.#blockTagNames(),
+				this.#componentTagsJson(),
 			),
 		);
 
@@ -957,11 +1509,265 @@ export class Templates {
 
 		// No disk directives here (rejected above), so a bare node list renders
 		// through the Node renderer (62-2 pivot) with the helpers in scope.
+		// Globals apply to inline sources too, on the same precedence as render().
+		const state = this.#withGlobals(data);
 		// Validate the data tree (guard side-effects only; render the original).
-		encodeData(data);
-		return renderNodeTree(this.#astNodes(ast), data, this.#helpers, {
-			tags: this.#tags,
+		encodeData(state);
+		const stacks = new Stacks();
+		return this.#applyOutput(
+			stacks.fillPlaceholders(
+				renderNodeTree(this.#astNodes(ast), state, this.#renderHelpers(), {
+					tags: this.#tags,
+					stacks,
+				}),
+			),
+		);
+	}
+
+	/**
+	 * Share a value with every template rendered by this engine (Edge
+	 * `edge.global`). Later registrations overwrite earlier ones, and per-render
+	 * data always wins over a global of the same name.
+	 */
+	global(name: string, value: unknown): void {
+		if (typeof name !== "string") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`Global name must be a string; got ${typeof name}`,
+			);
+		}
+		if (!HELPER_NAME_RE.test(name)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`Global name '${name}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)`,
+				{ templateName: name },
+			);
+		}
+		// Same denylist as object-literal keys and each-bindings: a global named
+		// `__proto__` / `constructor` / `prototype` would be assigned onto the
+		// merged state object and shadow Object.prototype for every template.
+		if (PROTOTYPE_POLLUTION_KEYS.has(name)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`Global name '${name}' is not allowed (prototype-pollution key)`,
+				{ templateName: name },
+			);
+		}
+		this.#globals.set(name, value);
+		if (isHelperFn(value)) {
+			this.#globalFns.set(name, value);
+			this.#composedHelpers = undefined;
+			// A callable global changes how templates PARSE — `{{ t('k') }}` only
+			// compiles once the parser knows `t`. Same contract as registerTag:
+			// register during boot, before the first render.
+			this.clearCache();
+		} else if (this.#globalFns.delete(name)) {
+			// Overwriting a callable global with a plain value withdraws the helper.
+			this.#composedHelpers = undefined;
+			this.clearCache();
+		}
+	}
+
+	/** Helper names known to the parser: constructor helpers + callable globals. */
+	#parseNames(): string[] {
+		return this.#globalFns.size === 0
+			? [...this.#helperNames]
+			: [...this.#helperNames, ...this.#globalFns.keys()];
+	}
+
+	/** Render-time helper map: constructor helpers overlaid with callable globals. */
+	#renderHelpers(): ReadonlyMap<string, HelperFn> {
+		if (this.#globalFns.size === 0) return this.#helpers;
+		if (this.#composedHelpers === undefined) {
+			const merged = new Map(this.#helpers);
+			for (const [name, fn] of this.#globalFns) merged.set(name, fn);
+			this.#composedHelpers = merged;
+		}
+		return this.#composedHelpers;
+	}
+
+	/**
+	 * Run a plugin against this engine (Edge `edge.use`). The plugin receives the
+	 * engine and registers whatever it needs — globals, tags. Returns the engine
+	 * so calls chain.
+	 */
+	use<T extends InkerPluginOptions>(
+		plugin: InkerPluginFn<T>,
+		options?: T,
+	): this {
+		if (typeof plugin !== "function") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`Plugin must be a function; got ${typeof plugin}`,
+			);
+		}
+		// Registration only. Edge defers plugins to the first render so one
+		// registered before `mount()` or `configure()` still observes the engine
+		// as it ends up, not as it was mid-boot.
+		this.#plugins.push({
+			run: (firstRun) => plugin(this, firstRun, options),
+			options,
+			executed: false,
 		});
+		return this;
+	}
+
+	/**
+	 * Run the plugins that are due: each one once, plus every `recurring` plugin
+	 * again. `firstRun` lets a plugin split one-time registration from the
+	 * per-render work.
+	 */
+	#executePlugins(): void {
+		for (const plugin of this.#plugins) {
+			if (plugin.executed && plugin.options?.recurring !== true) continue;
+			const firstRun = !plugin.executed;
+			// Set BEFORE calling: a plugin that renders would otherwise re-enter
+			// here, see itself as pending, and recurse.
+			plugin.executed = true;
+			plugin.run(firstRun);
+		}
+		// Bundled last, exactly like Edge runs its own plugins after user-land
+		// ones — a plugin may have mounted the disk we are about to scan.
+		this.#refreshComponentTags();
+	}
+
+	/** The registered globals, as a read-only view (Edge `edge.globals`). */
+	get globals(): ReadonlyMap<string, unknown> {
+		return this.#globals;
+	}
+
+	/** The registered custom tags, as a read-only view (Edge `edge.tags`). */
+	get tags(): ReadonlyMap<string, InkerTag> {
+		return this.#tags;
+	}
+
+	createRenderer(): TemplateRenderer {
+		this.#executePlugins();
+		const renderer = new TemplateRenderer(this);
+		for (const callback of this.#renderCallbacks) callback(renderer);
+		return renderer;
+	}
+
+	/**
+	 * Run `callback` against every renderer this engine creates (Edge
+	 * `onRender`). This is how a plugin seeds per-render state it cannot know at
+	 * registration time — the request, the signed-in user — without reaching
+	 * into the call site of every `createRenderer()`.
+	 */
+	onRender(callback: (renderer: TemplateRenderer) => void): this {
+		if (typeof callback !== "function") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`onRender() expects a function; got ${typeof callback}`,
+			);
+		}
+		this.#renderCallbacks.push(callback);
+		return this;
+	}
+
+	/**
+	 * Shorthand for `createRenderer().share(data)` (Edge `share`). The engine
+	 * itself holds no per-render state, so this hands back a renderer rather
+	 * than mutating the engine — sharing on the engine would leak one request's
+	 * data into the next.
+	 */
+	share(data: Readonly<Record<string, unknown>>): TemplateRenderer {
+		return this.createRenderer().share(data);
+	}
+
+	/**
+	 * Re-apply engine options after construction (Edge `configure`). Only the
+	 * options that can meaningfully change on a live engine are accepted: the
+	 * root is a containment boundary fixed at construction, and moving it would
+	 * invalidate every mounted disk's guarantees.
+	 *
+	 * Changing the cache mode drops the AST cache, since entries carry the
+	 * validation strategy they were stored under.
+	 */
+	configure(options: Readonly<{ cacheMode?: CacheMode }>): void {
+		if (options.cacheMode === undefined) return;
+		this.#cacheMode = resolveCacheMode(options.cacheMode);
+		this.clearCache();
+	}
+
+	/**
+	 * Merge the registered globals UNDER the caller's data — per-render state
+	 * wins on a name collision, matching Edge's precedence. Returns `data`
+	 * untouched when nothing is registered, so the common path allocates nothing.
+	 */
+	#withGlobals(
+		data: Readonly<Record<string, unknown>>,
+	): Readonly<Record<string, unknown>> {
+		if (this.#globals.size === 0) return data;
+		const merged: Record<string, unknown> = Object.create(null);
+		for (const [name, value] of this.#globals) merged[name] = value;
+		if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+			Object.assign(merged, data);
+		}
+		return merged;
+	}
+
+	/** Run the registered `raw` transforms over a template source. */
+	#applyRaw(raw: string, path?: string): string {
+		return this.processor.applyRaw(raw, path);
+	}
+
+	/** Run the registered `output` transforms over rendered HTML. */
+	#applyOutput(output: string, template?: string): string {
+		return this.processor.applyOutput(output, template);
+	}
+
+	/**
+	 * Render a template string (Edge `renderRawSync`). `renderString` is the
+	 * historical inker name and stays; this is the Edge-shaped alias.
+	 */
+	renderRawSync(
+		source: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): string {
+		return this.renderString(source, data);
+	}
+
+	/**
+	 * Render a template string, asynchronously (Edge `renderRaw`). Inker parses
+	 * and renders synchronously, so this resolves immediately — it exists so code
+	 * written against Edge's async signature ports without a rewrite.
+	 */
+	async renderRaw(
+		source: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): Promise<string> {
+		return this.renderString(source, data);
+	}
+
+	/**
+	 * Register a template from memory (Edge `registerTemplate`). It resolves
+	 * under the name given — including a `components/…` or layout name — and
+	 * takes precedence over a file of the same name.
+	 */
+	registerTemplate(name: string, contents: { template: string }): void {
+		if (typeof name !== "string" || name.length === 0) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTemplate — name must be a non-empty string; got ${typeof name}`,
+			);
+		}
+		if (typeof contents?.template !== "string") {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`registerTemplate('${name}') — contents.template must be a string`,
+			);
+		}
+		// Validate the name on the same rules as a disk lookup: an in-memory
+		// template must not be reachable under a name a file could never carry,
+		// or the two namespaces drift apart.
+		this.#inMemory.set(validateName(name), contents.template);
+		this.clearCache();
+	}
+
+	/** Drop a template registered from memory (Edge `removeTemplate`). */
+	removeTemplate(name: string): void {
+		if (this.#inMemory.delete(validateName(name))) this.clearCache();
 	}
 
 	clearCache(): void {
@@ -986,6 +1792,23 @@ export class Templates {
 		// entry (which passed containment against A's root) be served to disk B
 		// on a cache hit — bypassing B's symlink-containment check, which only
 		// runs on a cache MISS. The compound key isolates each disk's cache.
+		// An in-memory template short-circuits the whole disk path: no stat, no
+		// open, no mtime cache. It is parsed on each load — there is no file to
+		// watch for staleness, and registerTemplate() already clears the cache.
+		const inMemory = this.#inMemory.get(validatedName);
+		if (inMemory !== undefined) {
+			const source = this.#applyRaw(inMemory);
+			return callNative(() =>
+				getNative().parseTemplate(
+					source,
+					this.#parseNames(),
+					[...this.#tags.keys()],
+					this.#blockTagNames(),
+					this.#componentTagsJson(),
+				),
+			);
+		}
+
 		const cacheKey = `${root}\u0000${absPath}`;
 		const inflight = this.#inflight.get(cacheKey);
 		if (inflight !== undefined) return inflight;
@@ -1063,24 +1886,7 @@ export class Templates {
 		}
 		let source: string;
 		try {
-			let realPath: string;
-			try {
-				// `.native` to match validateRoot's canonical form (same OS realpath)
-				// so 8.3-short-name / casing differences don't trip containment.
-				realPath = fs.realpathSync.native(absPath);
-			} catch (cause) {
-				throw wrapFsError(cause, absPath, validatedName);
-			}
-			if (realPath !== absPath) {
-				const rel = path.relative(root, realPath);
-				if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
-					throw new InkerRenderError(
-						"E_INKER_INVALID_PATH",
-						`Resolved template path escapes the templates root via symlink: ${realPath} is outside ${root}`,
-						{ templatePath: realPath, templateName: validatedName },
-					);
-				}
-			}
+			assertRealpathContained(absPath, root, validatedName);
 			try {
 				source = await handle.readFile("utf8");
 			} catch (cause) {
@@ -1090,19 +1896,43 @@ export class Templates {
 			await handle.close();
 		}
 
+		return this.#parseAndCache(
+			source,
+			absPath,
+			cacheKey,
+			currentMtime,
+			loadGeneration,
+		);
+	}
+
+	/**
+	 * Everything after the bytes are in hand: strip the BOM, run the `raw`
+	 * processors, parse, and cache. Shared by both loaders — only the four I/O
+	 * calls differ between them, and none of this should.
+	 */
+	#parseAndCache(
+		rawSource: string,
+		absPath: string,
+		cacheKey: string,
+		currentMtime: number,
+		loadGeneration: number,
+	): NapiInkerAst {
 		// T4: strip leading UTF-8 BOM if present. Windows editors (Notepad)
 		// commonly insert it; lex sees it as a Text token, defeating the
 		// "first non-stripped node must be Layout" composition rule and
 		// silently treating `@layout()` as body content.
-		if (source.charCodeAt(0) === 0xfeff) {
-			source = source.slice(1);
-		}
+		let source =
+			rawSource.charCodeAt(0) === 0xfeff ? rawSource.slice(1) : rawSource;
+		// `raw` processors see the file's source before it is parsed.
+		source = this.#applyRaw(source, absPath);
 
 		const ast = callNative(() =>
 			getNative().parseTemplate(
 				source,
-				[...this.#helperNames],
+				this.#parseNames(),
 				[...this.#tags.keys()],
+				this.#blockTagNames(),
+				this.#componentTagsJson(),
 			),
 		);
 
@@ -1115,12 +1945,109 @@ export class Templates {
 		return ast;
 	}
 
-	async #compose(
+	/**
+	 * The synchronous twin of `#loadAstUncached`.
+	 *
+	 * Only the four I/O calls differ — `statSync`/`openSync`/`readFileSync`/
+	 * `closeSync` against their promise forms. The containment rule
+	 * (`assertRealpathContained`) and everything after the read
+	 * (`#parseAndCache`) are the SAME functions, so the two paths cannot drift
+	 * on the parts that matter.
+	 */
+	#loadAstUncachedSync(
+		absPath: string,
+		validatedName: string,
+		root: string,
+	): NapiInkerAst {
+		const loadGeneration = this.#cacheGeneration;
+		const cacheKey = `${root}\u0000${absPath}`;
+		const cached = this.#cache.get(cacheKey);
+
+		if (this.#cacheMode === "never" && cached !== undefined) {
+			return cached.ast;
+		}
+
+		let currentMtime = 0;
+		if (this.#cacheMode === "mtime") {
+			try {
+				currentMtime = fs.statSync(absPath).mtimeMs;
+			} catch (cause) {
+				throw wrapFsError(cause, absPath, validatedName);
+			}
+			// D1: mtimeMs 0 is a "no timestamp" sentinel on some filesystems —
+			// caching on it would freeze the template forever. See the async twin.
+			if (
+				currentMtime !== 0 &&
+				cached !== undefined &&
+				cached.mtimeMs === currentMtime
+			) {
+				return cached.ast;
+			}
+		}
+
+		// T6 + P1: open with `O_NOFOLLOW` first so a later path swap cannot
+		// redirect the read, then validate what the OS resolved.
+		let fd: number;
+		try {
+			fd = fs.openSync(
+				absPath,
+				fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+			);
+		} catch (cause) {
+			throw wrapFsError(cause, absPath, validatedName);
+		}
+		let source: string;
+		try {
+			assertRealpathContained(absPath, root, validatedName);
+			try {
+				source = fs.readFileSync(fd, "utf8");
+			} catch (cause) {
+				throw wrapFsError(cause, absPath, validatedName);
+			}
+		} finally {
+			fs.closeSync(fd);
+		}
+
+		return this.#parseAndCache(
+			source,
+			absPath,
+			cacheKey,
+			currentMtime,
+			loadGeneration,
+		);
+	}
+
+	/**
+	 * Synchronous `#loadAst`: the in-memory short-circuit, then the loader.
+	 * No in-flight map — a synchronous load cannot overlap another.
+	 */
+	#loadAstSync(
+		absPath: string,
+		validatedName: string,
+		root: string,
+	): NapiInkerAst {
+		const inMemory = this.#inMemory.get(validatedName);
+		if (inMemory !== undefined) {
+			const source = this.#applyRaw(inMemory);
+			return callNative(() =>
+				getNative().parseTemplate(
+					source,
+					this.#parseNames(),
+					[...this.#tags.keys()],
+					this.#blockTagNames(),
+					this.#componentTagsJson(),
+				),
+			);
+		}
+		return this.#loadAstUncachedSync(absPath, validatedName, root);
+	}
+
+	*#compose(
 		entryAst: NapiInkerAst,
 		entryName: string,
 		entryAbsPath: string,
 		includeStack: Set<string>,
-	): Promise<ComposedTemplate> {
+	): ComposeStep<ComposedTemplate> {
 		const partialAsts = new Map<string, NapiInkerAst>();
 		const componentAsts = new Map<string, NapiInkerAst>();
 
@@ -1153,14 +2080,14 @@ export class Templates {
 		// Resolve partials + components reachable from the body AST. Both
 		// resolvers recurse mutually, so the full transitive closure (partials
 		// inside components and vice versa) is pre-loaded here.
-		await this.#resolvePartialsIn(
+		yield* this.#resolvePartialsIn(
 			entryInfo.partials,
 			partialAsts,
 			componentAsts,
 			includeStack,
 			entryAbsPath,
 		);
-		await this.#resolveComponentsIn(
+		yield* this.#resolveComponentsIn(
 			entryInfo.components,
 			partialAsts,
 			componentAsts,
@@ -1206,10 +2133,8 @@ export class Templates {
 		includeStack.add(layoutAbsPath);
 		let layoutAst: NapiInkerAst;
 		try {
-			layoutAst = await this.#loadAst(
-				layoutAbsPath,
-				layoutValidated,
-				layoutRoot,
+			layoutAst = askedForAst(
+				yield loadRequest(layoutAbsPath, layoutValidated, layoutRoot),
 			);
 		} catch (e) {
 			includeStack.delete(layoutAbsPath);
@@ -1263,14 +2188,14 @@ export class Templates {
 
 			// Resolve partials + components reachable from the layout AST (mutual
 			// recursion covers the full transitive closure).
-			await this.#resolvePartialsIn(
+			yield* this.#resolvePartialsIn(
 				layoutInfo.partials,
 				partialAsts,
 				componentAsts,
 				includeStack,
 				layoutAbsPath,
 			);
-			await this.#resolveComponentsIn(
+			yield* this.#resolveComponentsIn(
 				layoutInfo.components,
 				partialAsts,
 				componentAsts,
@@ -1291,13 +2216,13 @@ export class Templates {
 		};
 	}
 
-	async #resolvePartialsIn(
+	*#resolvePartialsIn(
 		refs: readonly NapiNodeRef[],
 		partialAsts: Map<string, NapiInkerAst>,
 		componentAsts: Map<string, NapiInkerAst>,
 		includeStack: Set<string>,
 		hostAbsPath: string,
-	): Promise<void> {
+	): ComposeStep<void> {
 		for (const node of refs) {
 			const {
 				root: partialRoot,
@@ -1327,10 +2252,8 @@ export class Templates {
 			includeStack.add(partialAbsPath);
 			let partialAst: NapiInkerAst;
 			try {
-				partialAst = await this.#loadAst(
-					partialAbsPath,
-					partialValidated,
-					partialRoot,
+				partialAst = askedForAst(
+					yield loadRequest(partialAbsPath, partialValidated, partialRoot),
 				);
 			} catch (e) {
 				includeStack.delete(partialAbsPath);
@@ -1371,14 +2294,14 @@ export class Templates {
 
 				// Recurse into nested partials AND components reachable from this
 				// partial (mutual recursion → full transitive closure).
-				await this.#resolvePartialsIn(
+				yield* this.#resolvePartialsIn(
 					info.partials,
 					partialAsts,
 					componentAsts,
 					includeStack,
 					partialAbsPath,
 				);
-				await this.#resolveComponentsIn(
+				yield* this.#resolveComponentsIn(
 					info.components,
 					partialAsts,
 					componentAsts,
@@ -1391,13 +2314,13 @@ export class Templates {
 		}
 	}
 
-	async #resolveComponentsIn(
+	*#resolveComponentsIn(
 		refs: readonly NapiNodeRef[],
 		partialAsts: Map<string, NapiInkerAst>,
 		componentAsts: Map<string, NapiInkerAst>,
 		includeStack: Set<string>,
 		hostAbsPath: string,
-	): Promise<void> {
+	): ComposeStep<void> {
 		for (const node of refs) {
 			// Split the optional `disk::` prefix off FIRST, then prepend the
 			// `components/` directory to the bare name so `disk::button` resolves
@@ -1429,10 +2352,12 @@ export class Templates {
 			includeStack.add(componentAbsPath);
 			let componentAst: NapiInkerAst;
 			try {
-				componentAst = await this.#loadAst(
-					componentAbsPath,
-					componentValidated,
-					componentRoot,
+				componentAst = askedForAst(
+					yield loadRequest(
+						componentAbsPath,
+						componentValidated,
+						componentRoot,
+					),
 				);
 			} catch (e) {
 				includeStack.delete(componentAbsPath);
@@ -1466,14 +2391,14 @@ export class Templates {
 				// Recurse into nested components AND partials included inside this
 				// component (mutual recursion → a @include() in a component is
 				// pre-loaded, fixing E_INKER_DISK_REQUIRED at render time).
-				await this.#resolveComponentsIn(
+				yield* this.#resolveComponentsIn(
 					info.components,
 					partialAsts,
 					componentAsts,
 					includeStack,
 					componentAbsPath,
 				);
-				await this.#resolvePartialsIn(
+				yield* this.#resolvePartialsIn(
 					info.partials,
 					partialAsts,
 					componentAsts,
@@ -1498,3 +2423,97 @@ export class Templates {
 }
 
 export default Templates;
+
+/**
+ * A renderer with its own shared state (Edge `edge.createRenderer`).
+ *
+ * Created per request so `share()` state — the current URL, the signed-in user,
+ * flash messages — reaches partials and components without touching the
+ * process-wide engine. Two renderers never see each other's state.
+ *
+ * Precedence, lowest to highest: engine globals, this renderer's shared state,
+ * then the data passed to the render call. The merge happens here, so the
+ * engine needs no notion of who is rendering.
+ */
+export class TemplateRenderer {
+	readonly #templates: Templates;
+	readonly #shared: Record<string, unknown> = Object.create(null);
+
+	constructor(templates: Templates) {
+		this.#templates = templates;
+	}
+
+	/** Merge `data` into this renderer's shared state (Edge `share`). Chainable. */
+	share(data: Readonly<Record<string, unknown>>): this {
+		if (typeof data !== "object" || data === null || Array.isArray(data)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`share() expects an object; got ${data === null ? "null" : typeof data}`,
+			);
+		}
+		// Object.assign copies own enumerable keys only, onto a null-prototype
+		// bag — a `__proto__` key lands as an own property instead of walking up
+		// the prototype chain.
+		Object.assign(this.#shared, data);
+		return this;
+	}
+
+	render(
+		name: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): Promise<string> {
+		return this.#templates.render(name, { ...this.#shared, ...data });
+	}
+
+	renderString(
+		source: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): string {
+		return this.#templates.renderString(source, { ...this.#shared, ...data });
+	}
+
+	/** Render a template from disk, synchronously (AdonisJS `renderSync`). */
+	renderSync(
+		name: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): string {
+		return this.#templates.renderSync(name, { ...this.#shared, ...data });
+	}
+
+	/** Render a template string (Edge `renderRawSync`). Alias of `renderString`. */
+	renderRawSync(
+		source: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): string {
+		return this.renderString(source, data);
+	}
+
+	/** Render a template string, asynchronously (Edge `renderRaw`). */
+	async renderRaw(
+		source: string,
+		data: Readonly<Record<string, unknown>> = {},
+	): Promise<string> {
+		return this.renderString(source, data);
+	}
+
+	/**
+	 * A second renderer carrying a COPY of this one's shared state (Edge
+	 * `clone`). Used to branch — a nested render that needs one extra value
+	 * without that value leaking back into the renderer it came from.
+	 */
+	clone(): TemplateRenderer {
+		return new TemplateRenderer(this.#templates).share(this.#shared);
+	}
+
+	/**
+	 * The state this renderer would render with: engine globals underneath, its
+	 * own shared values on top (Edge `getState`). Exists for assertions about
+	 * what a plugin or an `onRender` callback actually shared.
+	 */
+	getState(): Record<string, unknown> {
+		const state: Record<string, unknown> = Object.create(null);
+		for (const [name, value] of this.#templates.globals) state[name] = value;
+		Object.assign(state, this.#shared);
+		return state;
+	}
+}

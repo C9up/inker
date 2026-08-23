@@ -65,6 +65,9 @@ pub struct LexOptions {
 	/// Runtime-registered custom tag names (Edge `registerTag`). `@<name>` lexes
 	/// as a block tag when `name` is a built-in OR in this set.
 	pub custom_tags: std::collections::HashSet<String>,
+	/// The subset of `custom_tags` registered with `block: true`. Only these
+	/// have a matching `@end<name>` to recognise.
+	pub custom_block_tags: std::collections::HashSet<String>,
 }
 
 static SLOT_NAME_RE: Lazy<Regex> = Lazy::new(|| {
@@ -107,8 +110,55 @@ fn is_block_keyword(word: &str) -> bool {
 			| "endslot" | "layout"
 			| "section" | "endsection"
 			| "super" | "eval"
-			| "dump"
+			| "dump" | "dd"
+			| "assign" | "inject"
+			| "debugger" | "newError"
+			| "stack" | "pushTo"
+			| "endpushTo" | "pushOnceTo"
+			| "endpushOnceTo"
 	)
+}
+
+/// Is `word` a tag the caller registered — either a tag name, or the
+/// `@end<name>` of a block one?
+fn is_registered_tag(word: &str, options: &LexOptions) -> bool {
+	options.custom_tags.contains(word)
+		|| word
+			.strip_prefix("end")
+			.is_some_and(|n| options.custom_block_tags.contains(n))
+}
+
+/// Extend a just-read identifier across `.segment` parts while the longer name
+/// is still a registered tag. Components exposed as tags are dotted —
+/// `components/form/input` is `@form.input` — and a bare identifier read would
+/// stop at `form`, leaving `.input(...)` as text. Falls back to the plain
+/// identifier when no longer name matches, so `@media.print` in CSS stays text.
+fn extend_dotted_tag(
+	chars: &[char],
+	word: String,
+	after_word: usize,
+	options: &LexOptions,
+) -> (String, usize) {
+	let mut best = if is_registered_tag(&word, options) {
+		Some((word.clone(), after_word))
+	} else {
+		None
+	};
+	let mut candidate = word.clone();
+	let mut i = after_word;
+	while i < chars.len() && chars[i] == '.' {
+		let (segment, next) = read_ident(chars, i + 1);
+		if segment.is_empty() {
+			break;
+		}
+		candidate.push('.');
+		candidate.push_str(&segment);
+		i = next;
+		if is_registered_tag(&candidate, options) {
+			best = Some((candidate.clone(), i));
+		}
+	}
+	best.unwrap_or((word, after_word))
 }
 
 /// Read an ASCII identifier (`[A-Za-z][A-Za-z0-9]*`) starting at `i`. Returns the
@@ -210,10 +260,24 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
 			let self_closing = i + 1 < len && chars[i + 1] == '!';
 			let word_start = if self_closing { i + 2 } else { i + 1 };
 			let (word, after_word) = read_ident(&chars, word_start);
+			// A registered tag may be dotted (`@form.input`); a built-in keyword
+			// never is, so this only ever lengthens a custom/component tag.
+			let (word, after_word) =
+				extend_dotted_tag(&chars, word, after_word, options);
 			// `@!` is only valid for `component`; `@!other` is literal.
+			// `@end<name>` closes a custom tag registered with `block: true`.
+			let closes_custom_block = word
+				.strip_prefix("end")
+				.is_some_and(|n| options.custom_block_tags.contains(n));
+			// `@!name` is the explicit self-closing form: valid for `component`
+			// and for any block custom tag (which otherwise demands an `@end`).
+			let self_closable =
+				word == "component" || options.custom_block_tags.contains(word.as_str());
 			if !word.is_empty()
-				&& (is_block_keyword(&word) || options.custom_tags.contains(word.as_str()))
-				&& (!self_closing || word == "component")
+				&& (is_block_keyword(&word)
+					|| options.custom_tags.contains(word.as_str())
+					|| closes_custom_block)
+				&& (!self_closing || self_closable)
 			{
 				flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
 				let open_line = cursor.line;

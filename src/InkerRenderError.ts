@@ -23,6 +23,13 @@ export type InkerErrorCode =
 	| "E_INKER_UNKNOWN_HELPER"
 	| "E_INKER_HELPER_THROW"
 	| "E_INKER_UNKNOWN_TAG"
+	/** `@dd(expr)` — the render was deliberately stopped after dumping. */
+	| "E_INKER_DUMP_DIE"
+	/** `@newError(...)` — an error the template author raised on purpose. */
+	| "E_INKER_TEMPLATE_ERROR"
+	/** `await` reached a place that renders synchronously (a custom tag's body,
+	 * `renderString`). Use `render()`, whose walk can suspend. */
+	| "E_INKER_ASYNC_NOT_SUPPORTED"
 	| "E_INKER_NAPI_REQUIRED";
 
 export interface InkerErrorContext {

@@ -7,7 +7,9 @@ import { type HelperFn, Templates } from "../../src/index.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-chunk3-")));
+	return fs.realpathSync.native(
+		fs.mkdtempSync(path.join(os.tmpdir(), "inker-chunk3-")),
+	);
 }
 
 function write(root: string, rel: string, content: string): void {
@@ -103,11 +105,7 @@ describe("chunk3 review patches", () => {
 		it("throws E_INKER_DUPLICATE_LAYOUT for a second `@layout()`", async () => {
 			write(root, "layouts/a.inker", "<a>{{> body }}</a>");
 			write(root, "layouts/b.inker", "<b>{{> body }}</b>");
-			write(
-				root,
-				"page.inker",
-				"@layout('layouts/a')body@layout('layouts/b')",
-			);
+			write(root, "page.inker", "@layout('layouts/a')body@layout('layouts/b')");
 			const tpl = new Templates({ root });
 			try {
 				await tpl.render("page", {});
@@ -334,10 +332,9 @@ describe("chunk3 review patches", () => {
 		it("still detects a Component node under nested Each", () => {
 			const tpl = new Templates({ root });
 			try {
-				tpl.renderString(
-					"@each(x in xs)@component('card', { x: x })@endeach",
-					{ xs: [1] },
-				);
+				tpl.renderString("@each(x in xs)@component('card', { x: x })@endeach", {
+					xs: [1],
+				});
 				expect.fail("should have thrown");
 			} catch (e) {
 				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_REQUIRED");

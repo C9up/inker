@@ -37,11 +37,7 @@ describe("Templates — named disks (edge.mount parity)", () => {
 		write(defaultRoot, "home.inker", "<p>default home</p>");
 		write(pkgRoot, "hello.inker", "<p>pkg hello {{ name }}</p>");
 		write(pkgRoot, "layout.inker", "<html><body>{{> body }}</body></html>");
-		write(
-			pkgRoot,
-			"page.inker",
-			"@layout('pkg::layout')<main>pkg page</main>",
-		);
+		write(pkgRoot, "page.inker", "@layout('pkg::layout')<main>pkg page</main>");
 	});
 
 	afterEach(() => {
@@ -132,9 +128,13 @@ describe("Templates — named disks (edge.mount parity)", () => {
 			// Accidental clash to a different directory fails loud, not silent clobber.
 			try {
 				t.mount("pkg", other);
-				expect.unreachable("mounting a taken disk name to a new root must throw");
+				expect.unreachable(
+					"mounting a taken disk name to a new root must throw",
+				);
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_COLLISION");
+				expect(asTyped<InkerRenderError>(e).code).toBe(
+					"E_INKER_DISK_COLLISION",
+				);
 			}
 			// The rejected mount left the original disk untouched.
 			expect(await t.render("pkg::hello", { name: "x" })).toBe(

@@ -8,7 +8,9 @@ import { Templates } from "../../src/Templates.js";
 describe("Templates — component $props / $slots (62-4)", () => {
 	let root: string;
 	beforeEach(() => {
-		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-ps-")));
+		root = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-ps-")),
+		);
 		fs.mkdirSync(path.join(root, "components"));
 	});
 	afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -17,14 +19,23 @@ describe("Templates — component $props / $slots (62-4)", () => {
 	};
 
 	it("$props.except().merge().toAttrs() spreads the remaining props", async () => {
-		write("components/btn.inker", "<button {{ $props.except(['label']).merge({ class: 'btn' }).toAttrs() }}>{{ label }}</button>");
-		write("page.inker", "@component('btn', { label: 'Save', id: 'b', class: 'primary' })@endcomponent");
+		write(
+			"components/btn.inker",
+			"<button {{ $props.except(['label']).merge({ class: 'btn' }).toAttrs() }}>{{ label }}</button>",
+		);
+		write(
+			"page.inker",
+			"@component('btn', { label: 'Save', id: 'b', class: 'primary' })@endcomponent",
+		);
 		const out = await new Templates({ root }).render("page", {});
 		expect(out).toBe('<button id="b" class="btn primary">Save</button>');
 	});
 
 	it("$props.get with a default + $props.has", async () => {
-		write("components/x.inker", "{{ $props.get('size', 'md') }}/{{ $props.has('flag') }}");
+		write(
+			"components/x.inker",
+			"{{ $props.get('size', 'md') }}/{{ $props.has('flag') }}",
+		);
 		write("page.inker", "@component('x', {})@endcomponent");
 		const out = await new Templates({ root }).render("page", {});
 		expect(out).toBe("md/false");
@@ -35,7 +46,10 @@ describe("Templates — component $props / $slots (62-4)", () => {
 			"components/dbg.inker",
 			"[{{ Object.keys($props.all()).sort().join(',') }}]<i {{ $props.only(['a', 'c']).toAttrs() }}></i>",
 		);
-		write("page.inker", "@component('dbg', { a: '1', b: '2', c: '3' })@endcomponent");
+		write(
+			"page.inker",
+			"@component('dbg', { a: '1', b: '2', c: '3' })@endcomponent",
+		);
 		const out = await new Templates({ root }).render("page", {});
 		expect(out).toContain("[a,b,c]"); // all() carries every key
 		expect(out).toContain('a="1"');
@@ -51,8 +65,14 @@ describe("Templates — component $props / $slots (62-4)", () => {
 	});
 
 	it("$slots.<name>() renders a named slot; @if($slots.x) tests existence", async () => {
-		write("components/alert.inker", "@if($slots.header)<h>{{ $slots.header() }}</h>@endif|{{ $slots.main() }}");
-		write("with-header.inker", "@component('alert', {})body@slot('header')HEAD@endslot@endcomponent");
+		write(
+			"components/alert.inker",
+			"@if($slots.header)<h>{{ $slots.header() }}</h>@endif|{{ $slots.main() }}",
+		);
+		write(
+			"with-header.inker",
+			"@component('alert', {})body@slot('header')HEAD@endslot@endcomponent",
+		);
 		write("no-header.inker", "@component('alert', {})just body@endcomponent");
 		const tpl = new Templates({ root });
 		expect(await tpl.render("with-header", {})).toBe("<h>HEAD</h>|body");
@@ -61,11 +81,14 @@ describe("Templates — component $props / $slots (62-4)", () => {
 
 	it("a @slot('__proto__') does not pollute Object.prototype ($slots is null-proto)", async () => {
 		write("components/c.inker", "{{ $slots.main() }}");
-		write("page.inker", "@component('c', {})body@slot('__proto__')PWN@endslot@endcomponent");
+		write(
+			"page.inker",
+			"@component('c', {})body@slot('__proto__')PWN@endslot@endcomponent",
+		);
 		await new Templates({ root }).render("page", {});
 		// If the named-slot assignment had set the prototype, this key would leak.
 		const probe: Record<string, unknown> = {};
-		expect(Object.prototype.hasOwnProperty.call(probe, "__proto__")).toBe(false);
+		expect(Object.hasOwn(probe, "__proto__")).toBe(false);
 		expect(probe.polluted).toBeUndefined();
 	});
 });

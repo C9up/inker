@@ -15,9 +15,13 @@
       "types": "./src/InkerProvider.ts",
       "import": "./src/InkerProvider.ts"
     },
-    "./provider/services/main": {
+    "./services/main": {
       "types": "./src/services/main.ts",
       "import": "./src/services/main.ts"
+    },
+    "./testing": {
+      "types": "./src/testing/index.ts",
+      "import": "./src/testing/index.ts"
     }
   },
   "scripts": {
@@ -73,9 +77,13 @@
         "types": "./dist/InkerProvider.d.ts",
         "import": "./dist/InkerProvider.js"
       },
-      "./provider/services/main": {
+      "./services/main": {
         "types": "./dist/services/main.d.ts",
         "import": "./dist/services/main.js"
+      },
+      "./testing": {
+        "types": "./dist/testing/index.d.ts",
+        "import": "./dist/testing/index.js"
       }
     },
     "access": "public"

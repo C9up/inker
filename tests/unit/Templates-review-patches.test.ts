@@ -7,7 +7,9 @@ import { Templates } from "../../src/Templates.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
-	return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-review-")));
+	return fs.realpathSync.native(
+		fs.mkdtempSync(path.join(os.tmpdir(), "inker-review-")),
+	);
 }
 
 describe("Templates — name validation (P1+P3)", () => {

@@ -99,6 +99,10 @@ interface NativeExports {
 		source: string,
 		helpers: readonly string[],
 		customTags: readonly string[],
+		/** The subset of `customTags` registered with `block: true`. */
+		customBlockTags: readonly string[],
+		/** JSON object mapping a component tag name to its template name. */
+		componentTagsJson: string,
 	) => NapiInkerAst;
 	/** Serialize a parsed AST handle to a walkable JSON string (62-2 Node renderer). */
 	readonly astToJson: (ast: NapiInkerAst) => string;
@@ -107,6 +111,8 @@ interface NativeExports {
 		source: string,
 		helpers: readonly string[],
 		customTags: readonly string[],
+		customBlockTags: readonly string[],
+		componentTagsJson: string,
 	) => string;
 }
 

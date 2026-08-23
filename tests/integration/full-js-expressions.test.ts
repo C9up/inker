@@ -12,13 +12,18 @@ describe("Templates — full-JS expressions (62-2 Edge parity)", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "inker-fulljs-")));
+		root = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-fulljs-")),
+		);
 	});
 	afterEach(() => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
-	const render = (src: string, data: Record<string, unknown>): Promise<string> => {
+	const render = (
+		src: string,
+		data: Record<string, unknown>,
+	): Promise<string> => {
 		fs.writeFileSync(path.join(root, "t.inker"), src);
 		return new Templates({ root, cacheMode: "mtime" }).render("t", data);
 	};
@@ -36,16 +41,25 @@ describe("Templates — full-JS expressions (62-2 Edge parity)", () => {
 	});
 
 	it("arithmetic", async () => {
-		expect(await render("{{ items.length * price }}", { items: [1, 2, 3], price: 4 })).toBe("12");
+		expect(
+			await render("{{ items.length * price }}", {
+				items: [1, 2, 3],
+				price: 4,
+			}),
+		).toBe("12");
 	});
 
 	it("array literal + reduce", async () => {
-		expect(await render("{{ [1, 2, 3, 4].reduce((s, x) => s + x, 0) }}", {})).toBe("10");
+		expect(
+			await render("{{ [1, 2, 3, 4].reduce((s, x) => s + x, 0) }}", {}),
+		).toBe("10");
 	});
 
 	it("rich expression drives an @if condition", async () => {
 		const src = "@if(users.filter(u => u.active).length > 0)some@else@endif";
-		expect(await render(src, { users: [{ active: false }, { active: true }] })).toBe("some");
+		expect(
+			await render(src, { users: [{ active: false }, { active: true }] }),
+		).toBe("some");
 		expect(await render(src, { users: [{ active: false }] })).toBe("");
 	});
 
@@ -65,9 +79,12 @@ describe("Templates — full-JS expressions (62-2 Edge parity)", () => {
 	});
 
 	it("@let object destructuring binds through the real Templates path", async () => {
-		const out = await render("@let({ name, role } = user){{ name }}/{{ role }}", {
-			user: { name: "Ada", role: "admin" },
-		});
+		const out = await render(
+			"@let({ name, role } = user){{ name }}/{{ role }}",
+			{
+				user: { name: "Ada", role: "admin" },
+			},
+		);
 		expect(out).toBe("Ada/admin");
 	});
 
