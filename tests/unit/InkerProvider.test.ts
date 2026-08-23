@@ -353,6 +353,10 @@ describe("buildCanonicalHelpers", () => {
 			rosettaT?: StubRosetta["t"];
 			routerMakeUrl?: StubRouter["makeUrl"];
 			assetManifest?: Readonly<Record<string, string>>;
+			appConfig?: {
+				get(key: string, defaultValue?: unknown): unknown;
+				has?(key: string): boolean;
+			};
 		} = {},
 	) {
 		const als = new AsyncLocalStorage<InkerHttpContext>();
@@ -376,6 +380,7 @@ describe("buildCanonicalHelpers", () => {
 			rosetta,
 			router,
 			opts.assetManifest,
+			opts.appConfig,
 		);
 		return { als, helpers };
 	}
@@ -586,6 +591,69 @@ describe("buildCanonicalHelpers", () => {
 		expect(() => runInCtx(als, ctx(), () => asset?.(123))).toThrow(
 			/asset\(\) requires a string asset name/,
 		);
+	});
+
+	it("config() reads through to the app config service", () => {
+		const { helpers } = setup({
+			appConfig: { get: (key) => (key === "app.name" ? "ream" : undefined) },
+		});
+		const config = helpers.get("config");
+
+		expect(config?.("app.name")).toBe("ream");
+	});
+
+	it("config() hands the default through to the service", () => {
+		const seen: unknown[] = [];
+		const { helpers } = setup({
+			appConfig: {
+				get: (key, defaultValue) => {
+					seen.push([key, defaultValue]);
+					return defaultValue;
+				},
+			},
+		});
+
+		expect(helpers.get("config")?.("missing.key", "fallback")).toBe("fallback");
+		// The default is the service's business, not something inker substitutes
+		// after the fact — a service that treats `undefined` specially must see it.
+		expect(seen).toEqual([["missing.key", "fallback"]]);
+	});
+
+	it("config() returns the default when no config service is wired", () => {
+		const { helpers } = setup();
+
+		// An app that never bound a config service still renders; the template
+		// gets its default rather than a crash.
+		expect(helpers.get("config")?.("app.name", "unnamed")).toBe("unnamed");
+		expect(helpers.get("config")?.("app.name")).toBeUndefined();
+	});
+
+	it("config() rejects a non-string key", () => {
+		const { helpers } = setup({ appConfig: { get: () => "x" } });
+
+		expect(() => helpers.get("config")?.(42)).toThrow(/string key/);
+	});
+
+	it("config.has() answers through the service's own has()", () => {
+		const { helpers } = setup({
+			appConfig: { get: () => undefined, has: (key) => key === "app.name" },
+		});
+		const config = helpers.get("config");
+		const has = Reflect.get(Object(config), "has");
+
+		expect(has("app.name")).toBe(true);
+		expect(has("nope")).toBe(false);
+	});
+
+	it("config.has() falls back to a get() probe when the service has no has()", () => {
+		const { helpers } = setup({
+			appConfig: { get: (key) => (key === "app.name" ? "ream" : undefined) },
+		});
+		const has = Reflect.get(Object(helpers.get("config")), "has");
+
+		// No has() upstream: presence is inferred from a defined get().
+		expect(has("app.name")).toBe(true);
+		expect(has("nope")).toBe(false);
 	});
 });
 

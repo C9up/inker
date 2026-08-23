@@ -10,7 +10,7 @@
  *      `file:<tarball>` — no ream, no rosetta. devDeps add `tsx` so the
  *      consumer can `node --import tsx` runtime-TS sources (inker is
  *      source-first per ADR-003; its export-map points at `./src/*.ts`).
- *   3. `pnpm install --ignore-workspace --no-frozen-lockfile` inside the
+ *   3. `pnpm install --ignore-workspace --no-frozen-lockfile --ignore-scripts`
  *      consumer (the --ignore-workspace flag is belt-and-suspenders; /tmp has
  *      no parent workspace, but the flag locks behaviour against a future
  *      $TMPDIR move into a workspace-rooted dir).
@@ -205,7 +205,17 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 
 		// 5. install
 		runPnpm(
-			["install", "--ignore-workspace", "--no-frozen-lockfile"],
+			// --ignore-scripts: pnpm 10+ FAILS the whole install when a dependency
+			// ships build scripts nobody approved (ERR_PNPM_IGNORED_BUILDS — tsx
+			// pulls esbuild). This consumer only imports modules; it never needs
+			// anything compiled, so skipping scripts keeps the fixture installable
+			// whatever pnpm the runner happens to have.
+			[
+				"install",
+				"--ignore-workspace",
+				"--no-frozen-lockfile",
+				"--ignore-scripts",
+			],
 			consumerDir,
 		);
 
@@ -283,7 +293,7 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 	);
 
 	it(
-		"imports @c9up/inker/provider/services/main without ream/rosetta installed",
+		"imports @c9up/inker/services/main without ream/rosetta installed",
 		() => {
 			// Third advertised export — Adonis-style singleton accessor. Its
 			// default is a typed Proxy<InkerRenderer>, so typeof is "object".
@@ -295,7 +305,7 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 					"--import",
 					"tsx",
 					"-e",
-					"import('@c9up/inker/provider/services/main')" +
+					"import('@c9up/inker/services/main')" +
 						".then(m => process.stdout.write(typeof m.default + ':' + String(m.default !== null && m.default !== undefined)))" +
 						".catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });",
 				],

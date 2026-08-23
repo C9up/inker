@@ -14,7 +14,15 @@ import { Templates } from "../../src/Templates.js";
 let root: string;
 
 beforeAll(() => {
-	root = fs.mkdtempSync(path.join(os.tmpdir(), "inker-globals-"));
+	// `realpathSync.native`, the SAME call `Templates` canonicalises its root
+	// with — every makePath/mounted assertion below compares against this value.
+	// Plain `realpathSync` is not enough: it resolves macOS's /var -> /private/var
+	// but leaves Windows' 8.3 short name alone (RUNNER~1 vs runneradmin), so the
+	// two would still disagree there. Linux passes either way, tmp being
+	// canonical already.
+	root = fs.realpathSync.native(
+		fs.mkdtempSync(path.join(os.tmpdir(), "inker-globals-")),
+	);
 });
 afterAll(() => {
 	fs.rmSync(root, { recursive: true, force: true });
