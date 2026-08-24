@@ -1718,6 +1718,59 @@ export class Templates {
 	}
 
 	/**
+	 * Parse a template from disk WITHOUT rendering it (Edge `compile`) — the
+	 * syntax check a linter or an editor integration wants.
+	 *
+	 * Throws {@link InkerRenderError} carrying `code`, `line` and `column` when
+	 * the template does not parse; returns nothing when it does.
+	 *
+	 * Named deviation, NAPI: Edge compiles to a JavaScript function and hands
+	 * it back. Inker's compiler is in Rust and produces an opaque native AST
+	 * handle, which has no meaning on this side of the bridge — so the method
+	 * reports whether the template parses instead of returning the artifact.
+	 */
+	compile(name: string): void {
+		const { root, validated, absPath } = this.#resolveTemplateFile(name);
+		this.#loadAstSync(absPath, validated, root);
+	}
+
+	/**
+	 * Parse a template STRING without rendering it (Edge `compileRaw`). See
+	 * {@link compile} for what it throws and why it returns nothing.
+	 *
+	 * `templateName` only labels the error, as it does upstream.
+	 */
+	compileRaw(source: string, templateName?: string): void {
+		// The same normalisation `renderString` applies before parsing: a BOM
+		// would otherwise be reported as a syntax error the file does not have.
+		const normalised = source.includes("\ufeff")
+			? source.replace(/\ufeff/g, "")
+			: source;
+		try {
+			callNative(() =>
+				getNative().parseTemplate(
+					this.#applyRaw(normalised),
+					this.#parseNames(),
+					[...this.#tags.keys()],
+					this.#blockTagNames(),
+					this.#componentTagsJson(),
+				),
+			);
+		} catch (err) {
+			// A string has no path of its own, so the caller's label is the only
+			// thing that tells a reader WHICH template failed.
+			if (templateName === undefined || !(err instanceof InkerRenderError))
+				throw err;
+			throw new InkerRenderError(
+				err.code,
+				err.message,
+				{ ...err.context, templateName },
+				{ cause: err },
+			);
+		}
+	}
+
+	/**
 	 * Render a template string (Edge `renderRawSync`). `renderString` is the
 	 * historical inker name and stays; this is the Edge-shaped alias.
 	 */
