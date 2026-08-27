@@ -1,6 +1,6 @@
 {
   "name": "@c9up/inker",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Inker \u2014 server-side templating for the Ream framework. Hand-rolled lexer/parser/renderer with HTML-escape-by-default interpolation and .inker file convention.",
   "license": "MIT",
   "type": "module",
@@ -34,7 +34,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "peerDependencies": {
-    "@c9up/ream": "^0.1.0",
+    "@c9up/ream": "^0.2.0",
     "@c9up/rosetta": "^0.3.0"
   },
   "peerDependenciesMeta": {
