@@ -49,28 +49,6 @@ export type NapiDiskNodeRef = import("./native/generated.js").DiskNodeRefNapi;
 export type NapiComposeInfo = import("./native/generated.js").ComposeInfoNapi;
 export type NapiInkerAst = import("./native/generated.js").InkerAst;
 
-/** One in-scope-evaluated helper invocation request (collect pass). */
-export interface NapiInvocation {
-	readonly id: number;
-	readonly name: string;
-	/** JSON array of the evaluated argument values. */
-	readonly args: readonly unknown[];
-}
-
-/** One pre-resolved helper result (consumed in tape order by the renderer). */
-export interface NapiHelperResult {
-	readonly value: string;
-	readonly isSafe: boolean;
-}
-
-export interface NapiRenderContext {
-	readonly partials: Record<string, NapiInkerAst>;
-	readonly components: Record<string, NapiInkerAst>;
-	readonly bodyHtml: string | undefined;
-	readonly templateName: string | undefined;
-	readonly templatePath: string | undefined;
-}
-
 /**
  * The engine's surface, as the Rust declares it. The runtime guard below still
  * checks the four exports are actually there: a declaration says what the Rust
