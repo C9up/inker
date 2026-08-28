@@ -2154,7 +2154,11 @@ export class Templates {
 
 		// Resolve the layout file.
 		const layoutName = entryInfo.layoutName;
-		if (layoutName === null) {
+		// `undefined`, not `null`: napi-rs maps `Option<String>` on an
+		// `#[napi(object)]` to an absent field. The guard used to test `=== null`
+		// and so never fired — the impossible case would have reached
+		// `#resolveTemplateFile` as `undefined` instead of raising here.
+		if (layoutName === undefined) {
 			// hasLayout true but no name — should be impossible (parse invariant).
 			throw new InkerRenderError(
 				"E_INKER_INVALID_LAYOUT_POSITION",

@@ -33,43 +33,21 @@ function platformSuffix(): string {
 	return suffix;
 }
 
-/** A `@include()` / `@component()` reference with source position. */
-export interface NapiNodeRef {
-	readonly name: string;
-	readonly line: number;
-	readonly column: number;
-}
-
-/** A `{{> name }}` slot reference. */
-export interface NapiSlotRef {
-	readonly name: string;
-	readonly line: number;
-	readonly column: number;
-}
-
-/** First disk-requiring node (`renderString` E_INKER_DISK_REQUIRED guard). */
-export interface NapiDiskNodeRef {
-	readonly kind: string;
-	readonly name: string;
-}
-
-/** All composition metadata for one parsed AST (one NAPI call). */
-export interface NapiComposeInfo {
-	readonly hasLayout: boolean;
-	readonly layoutName: string | null;
-	readonly layoutLine: number | null;
-	readonly layoutColumn: number | null;
-	readonly slots: readonly NapiSlotRef[];
-	readonly partials: readonly NapiNodeRef[];
-	readonly components: readonly NapiNodeRef[];
-	readonly hasContent: boolean;
-	readonly firstDiskNode: NapiDiskNodeRef | null;
-}
-
-/** Opaque handle to a parsed Rust AST. */
-export interface NapiInkerAst {
-	readonly composeInfo: NapiComposeInfo;
-}
+/**
+ * The engine's types, as the Rust declares them.
+ *
+ * Derived from `./native/generated.js` — written by `pnpm build:napi-types`
+ * from napi-derive's own `type-def` output — rather than mirrored here by
+ * hand, where nothing notices the Rust changing a field. It already had:
+ * `layoutName` and `firstDiskNode` were declared `| null`, but napi-rs maps
+ * `Option<T>` on an `#[napi(object)]` to an ABSENT field, so the value is
+ * `undefined` and a `=== null` guard against it never fired.
+ */
+export type NapiNodeRef = import("./native/generated.js").NodeRefNapi;
+export type NapiSlotRef = import("./native/generated.js").SlotRefNapi;
+export type NapiDiskNodeRef = import("./native/generated.js").DiskNodeRefNapi;
+export type NapiComposeInfo = import("./native/generated.js").ComposeInfoNapi;
+export type NapiInkerAst = import("./native/generated.js").InkerAst;
 
 /** One in-scope-evaluated helper invocation request (collect pass). */
 export interface NapiInvocation {
@@ -93,28 +71,12 @@ export interface NapiRenderContext {
 	readonly templatePath: string | undefined;
 }
 
-interface NativeExports {
-	readonly engineVersion: () => string;
-	readonly parseTemplate: (
-		source: string,
-		helpers: readonly string[],
-		customTags: readonly string[],
-		/** The subset of `customTags` registered with `block: true`. */
-		customBlockTags: readonly string[],
-		/** JSON object mapping a component tag name to its template name. */
-		componentTagsJson: string,
-	) => NapiInkerAst;
-	/** Serialize a parsed AST handle to a walkable JSON string (62-2 Node renderer). */
-	readonly astToJson: (ast: NapiInkerAst) => string;
-	/** Parse a template directly to a walkable JSON AST string (62-2 Node renderer). */
-	readonly parseTemplateJson: (
-		source: string,
-		helpers: readonly string[],
-		customTags: readonly string[],
-		customBlockTags: readonly string[],
-		componentTagsJson: string,
-	) => string;
-}
+/**
+ * The engine's surface, as the Rust declares it. The runtime guard below still
+ * checks the four exports are actually there: a declaration says what the Rust
+ * promises, not what a stale binary shipped.
+ */
+type NativeExports = typeof import("./native/generated.js");
 
 function isNativeExports(value: unknown): value is NativeExports {
 	if (value === null || typeof value !== "object") return false;

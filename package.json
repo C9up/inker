@@ -1,6 +1,6 @@
 {
   "name": "@c9up/inker",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Inker \u2014 server-side templating for the Ream framework. Hand-rolled lexer/parser/renderer with HTML-escape-by-default interpolation and .inker file convention.",
   "license": "MIT",
   "type": "module",
@@ -26,7 +26,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "build:napi": "cargo build --release -p inker-engine-napi && node scripts/copy-napi.mjs",
+    "build:napi": "cargo build --release -p inker-engine-napi && pnpm build:napi-types && node scripts/copy-napi.mjs",
+    "build:napi-types": "node scripts/build-napi-types.mjs",
     "prepack": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
