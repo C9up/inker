@@ -320,9 +320,16 @@ function compileExpr(source: string): CompiledExpr {
 	if (cached !== undefined) return cached;
 	let fn: CompiledExpr;
 	try {
-		// `new Function` — the author-controlled template expression compiled to a
-		// V8 closure (Edge model); the source comes from `.inker` files, not user
-		// input, so this is the same trust level as the rest of the app's code.
+		// `new Function` — the template expression compiled to a V8 closure. This
+		// is arbitrary code execution BY DESIGN, at the same trust level as the
+		// application's own TypeScript: a template is a source file the author
+		// wrote, not input.
+		//
+		// The consequence, stated plainly: rendering a template whose TEXT came
+		// from a user is remote code execution. Nothing here sandboxes it, and
+		// nothing is meant to — see the README. User-supplied DATA is a
+		// different matter and is safe: values are HTML-escaped unless the
+		// template opts out.
 		// `$g` (the global shadow) is outermost, then helpers `$h`, then scope `$s`.
 		// An expression using `await` has to be compiled as an ASYNC function —
 		// `await` is a syntax error anywhere else — and then returns a promise
@@ -469,6 +476,9 @@ function evalLetDestructure(
 	let fn = destructureCache.get(key);
 	if (fn === undefined) {
 		try {
+			// Same trust boundary as `compileExpr` above: the pattern and the
+			// right-hand side are template source, which is code the author
+			// wrote. Never build one of these from anything a request carried.
 			const compiled = new Function(
 				"$g",
 				"$h",

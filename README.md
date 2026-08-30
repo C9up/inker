@@ -40,6 +40,26 @@ The lex / parse / render hot path runs in Rust via napi-rs (Story 55.1). The Typ
 - **No JS fallback.** If the binary is missing or fails to load, every render throws `E_INKER_NAPI_REQUIRED` with an actionable hint pointing at `pnpm --filter @c9up/inker build:napi`. Run that after a fresh checkout or a platform change.
 - **Helpers are plain TS functions in V8 scope.** Custom helpers registered via `TemplatesOptions.helpers` (or `InkerProvider`) — and the core globals — are in lexical scope when the Node renderer evaluates each expression in V8 (the Edge model; no Rust knowledge required to write one). They can be called **anywhere** an expression can: whole interpolations (`{{ helper(args) }}`), `@if()` conditions, `@each()` iterables, operator expressions, and nested-call / loop-scoped arguments (`{{ users.filter(u => can(u)) }}`). Arguments are the real JS values — a `Date` stays a `Date`, a `Map` a `Map`, `bigint`/`NaN`/`±Infinity` untouched — there is no NAPI/JSON coercion. A helper returning a `SafeString` is emitted raw.
 
+## Templates are code, not input
+
+A template is a **trusted source file**, on the same footing as the TypeScript
+around it. It is not a sandbox, and it is not meant to be one.
+
+Expressions are evaluated as JavaScript, in scope with the helpers and globals
+the app registered. That is what lets `{{ users.filter(u => can(u)) }}` work at
+all — and it is also why a template can reach anything JavaScript can reach.
+The usual escapes (`{}.constructor`, and everything they lead to) are not
+blocked, because blocking them would not make the rest safe.
+
+**Never render a template whose text came from a user.** Not from a form, not
+from a database row someone can edit, not from a file an upload can replace.
+Rendering user-supplied template TEXT is remote code execution, exactly as
+`eval` would be.
+
+User-supplied **data** is a different thing entirely, and it is safe: values
+interpolated into a template are HTML-escaped by default (`{{ value }}`), and
+only `{{{ value }}}` or a `SafeString` opts out.
+
 ## Standalone use
 
 `@c9up/inker` is a leaf package — it has zero runtime dependencies and works in any Node.js app without `@c9up/ream` or `@c9up/rosetta` installed. The `tests/integration/standalone-smoke.test.ts` test proves this by packing the workspace tarball, installing it into a synthetic consumer (no ream, no rosetta), and rendering a composite template.
