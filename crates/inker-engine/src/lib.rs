@@ -7,11 +7,11 @@
 //! Subsequent commits in the same story port `lex`, `parse_path`,
 //! `parse_expression`, `parse_block_tag`, `parse`, `resolve_path`, `render`.
 
+pub mod ast;
 pub mod error;
 pub mod escape;
 pub mod identifiers;
 pub mod lex;
-pub mod ast;
 pub mod parse;
 pub mod parse_block_tag;
 pub mod parse_expression;
