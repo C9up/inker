@@ -15,6 +15,7 @@ import {
 	type NapiNodeRef,
 	napiThrowToInker,
 } from "./loadNapi.js";
+import { inProduction } from "./nodeEnv.js";
 import {
 	collectSections,
 	type InkerNodeJson,
@@ -129,7 +130,7 @@ function resolveCacheMode(requested: CacheMode): "mtime" | "never" {
 		);
 	}
 	if (requested === "auto") {
-		return process.env.NODE_ENV === "production" ? "never" : "mtime";
+		return inProduction() ? "never" : "mtime";
 	}
 	return requested;
 }

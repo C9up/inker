@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import type { HelperFn } from "./helpers.js";
 import type { InkerHttpContext } from "./InkerRenderer.js";
 import { InkerRenderer } from "./InkerRenderer.js";
+import { inProduction } from "./nodeEnv.js";
 import { SafeString } from "./SafeString.js";
 import { setInker } from "./services/main.js";
 import { type CacheMode, Templates } from "./Templates.js";
@@ -388,7 +389,7 @@ export function resolveCacheMode(
 			`[inker] config.inker.cacheMode must be "mtime", "never", "auto", or undefined; got ${JSON.stringify(userMode)}.`,
 		);
 	}
-	return process.env.NODE_ENV === "production" ? "never" : "mtime";
+	return inProduction() ? "never" : "mtime";
 }
 
 /**
