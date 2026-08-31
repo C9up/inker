@@ -81,7 +81,7 @@ function mkAppContext(
 				// to distinguish "binding missing" (silent degradation) from
 				// "factory threw" (re-throw).
 				throw Object.assign(new Error(`[stub] no binding for ${key}`), {
-					code: "CONTAINER_NOT_FOUND",
+					code: "E_CONTAINER_NOT_FOUND",
 				});
 			},
 			has(token: unknown): boolean {
@@ -757,7 +757,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 				},
 				async resolve(): Promise<never> {
 					throw Object.assign(new Error("no binding"), {
-						code: "CONTAINER_NOT_FOUND",
+						code: "E_CONTAINER_NOT_FOUND",
 					});
 				},
 				has(): boolean {

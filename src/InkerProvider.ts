@@ -759,13 +759,13 @@ function isRosettaShape(value: unknown): value is RosettaTranslator {
 }
 
 /**
- * Ream's container throws a `ReamError` with `code === "CONTAINER_NOT_FOUND"`
+ * Ream's container throws a `ReamError` with `code === "E_CONTAINER_NOT_FOUND"`
  * when a token is unbound. Duck-typed here so `@c9up/ream` stays an optional
  * peer (no import-time dep on its error class).
  */
 function isContainerNotFound(err: unknown): boolean {
 	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	return err.code === "CONTAINER_NOT_FOUND";
+	return err.code === "E_CONTAINER_NOT_FOUND";
 }
 
 /**

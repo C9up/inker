@@ -137,7 +137,7 @@ pub enum Expression {
 	/// captured verbatim and evaluated by the Node renderer in V8, with the
 	/// registered helpers and the render scope in scope (62-2 Edge pivot — no
 	/// embedded JS VM). May reference helpers (`filter(u => can(u))`); an
-	/// UNKNOWN helper is still rejected at parse time (see `raw_fallback`).
+	/// E_UNKNOWN helper is still rejected at parse time (see `raw_fallback`).
 	Raw {
 		source: String,
 		line: u32,
