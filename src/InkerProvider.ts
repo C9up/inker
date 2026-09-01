@@ -119,7 +119,6 @@ export function resetInkerProviderFlags(): void {
 // ─── Provider class ──────────────────────────────────────────────
 
 export default class InkerProvider {
-	#als: AsyncLocalStorage<InkerHttpContext> | undefined;
 	#renderer: InkerRenderer | undefined;
 	#started = false;
 	// P17: per-instance override-warn dedup. Was a module-level Set shared
@@ -182,8 +181,10 @@ export default class InkerProvider {
 		const assetManifest = loadAssetManifest(config.assetManifest, appRoot);
 
 		// Phase 3 — build canonical helpers Map.
+		// Not kept on the provider: the only thing that enters a context into
+		// it is InkerRenderer, which is handed this same instance below. The
+		// field was a second reference nothing could read.
 		const als = new AsyncLocalStorage<InkerHttpContext>();
-		this.#als = als;
 		const canonical = buildCanonicalHelpers(
 			als,
 			rosetta,
