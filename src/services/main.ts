@@ -41,16 +41,15 @@ const inker: InkerRenderer = new Proxy({} as InkerRenderer, {
 		// `import { setX } from ".../services/main"` into a crash at import time,
 		// far from any real use. They are not members of what this stands in for,
 		// so answer undefined and let a genuine access be the one that reports.
+		//
+		// `then` in particular: an accidental `await mod.default` would otherwise
+		// run the pre-boot throw inside the await machinery and surface as a
+		// confusing rejected promise. Answering undefined makes the value plainly
+		// non-thenable, so the await resolves to the proxy and a real property
+		// access is still the thing that reports.
 		if (typeof prop === "symbol" || prop === "then") {
 			return undefined;
 		}
-		// Short-circuit the thenable probe: an accidental `await mod.default`
-		// (or `Promise.resolve(mod.default)`) would otherwise trigger our
-		// pre-boot throw inside the await machinery and surface a confusing
-		// rejected Promise. Returning `undefined` makes the value plainly
-		// non-thenable, so the caller's await resolves immediately to the
-		// Proxy itself — subsequent real property access still throws.
-		if (prop === "then") return undefined;
 		if (!instance) {
 			throw new Error(
 				"[inker] InkerRenderer singleton accessed before InkerProvider.start() ran " +
