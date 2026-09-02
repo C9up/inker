@@ -32,8 +32,32 @@ describe("Edge-core globals (62-7)", () => {
 		);
 	});
 
-	it("nl2br returns raw HTML (SafeString)", () => {
+	it("nl2br turns newlines into breaks", () => {
 		expect(render("{{ nl2br('a\\nb') }}")).toBe("a<br>b");
+	});
+
+	// nl2br exists to print the multi-line text a user typed, so its input is
+	// hostile by default. Marking the whole result safe made `{{ }}` — the form
+	// that reads as escaped — emit that input as live markup.
+	it("nl2br escapes the text it breaks", () => {
+		expect(
+			render("{{ nl2br(c) }}", { c: "hi\n<img src=x onerror=alert(1)>" }),
+		).toBe("hi<br>&lt;img src=x onerror=alert(1)&gt;");
+	});
+
+	it("nl2br still lets html.safe through, which is the opt-in", () => {
+		expect(render("{{ nl2br(html.safe(c)) }}", { c: "a\n<b>x</b>" })).toBe(
+			"a<br><b>x</b>",
+		);
+	});
+
+	// A class list built from a request used to close the attribute it sat in.
+	it("html.classNames cannot break out of the attribute", () => {
+		expect(
+			render('<i class="{{ html.classNames(c) }}"></i>', {
+				c: 'a" onmouseover="alert(1)',
+			}),
+		).toBe('<i class="a&quot; onmouseover=&quot;alert(1)"></i>');
 	});
 
 	it("pluralize", () => {

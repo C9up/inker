@@ -152,8 +152,25 @@ function excerpt(
 	return truncate(plain, length, options);
 }
 
+/**
+ * Turn newlines into `<br>`, escaping everything else.
+ *
+ * NAMED DEVIATION (hardening). Edge returns a plain string, so `{{ }}` escapes
+ * it and the `<br>` never renders; the form that works there is `{{{ }}}`,
+ * which hands the whole value through unescaped and makes escaping the
+ * caller's job — a deliberate choice the developer types out.
+ *
+ * Returning a SafeString reached that same unescaped output from a `{{ }}`
+ * that reads as safe, with no such choice made. And `nl2br` exists to print
+ * precisely the multi-line text a user typed, so the value is hostile by
+ * default: `salut\n<img src=x onerror=alert(1)>` rendered as live markup.
+ *
+ * Escaping first keeps the ergonomics and removes the trap — the breaks
+ * render, the content cannot. A caller who does mean to emit markup wraps it
+ * in `html.safe()` first, which `htmlEscape` passes through untouched.
+ */
 function nl2br(value: unknown): SafeString {
-	return new SafeString(str(value).replace(/\r\n|\r|\n/g, "<br>"));
+	return new SafeString(htmlEscape(value).replace(/\r\n|\r|\n/g, "<br>"));
 }
 
 // ---- pluralization ----
@@ -353,10 +370,22 @@ function pushClasses(out: string[], arg: unknown): void {
 	}
 }
 
-function classNames(...args: readonly unknown[]): SafeString {
+/**
+ * Join class names into one attribute value.
+ *
+ * A plain string, as Edge's is — it delegates to the `classnames` package, and
+ * `{{ }}` escapes what comes back. Marking the result safe let a class list
+ * built from a request break out of the attribute it sat in: a value of
+ * `a" onmouseover="alert(1)` closed `class="` and everything after it parsed
+ * as markup.
+ *
+ * Escaping changes nothing about a legitimate class name, which has no
+ * character that escapes.
+ */
+function classNames(...args: readonly unknown[]): string {
 	const out: string[] = [];
 	for (const a of args) pushClasses(out, a);
-	return new SafeString(out.join(" "));
+	return out.join(" ");
 }
 
 function htmlSafe(value: unknown): SafeString {
