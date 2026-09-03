@@ -22,6 +22,7 @@
  * single sanctioned cross-package narrowing site, `#started` idempotency.
  */
 
+import "./augmentations.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";

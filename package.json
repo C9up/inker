@@ -51,7 +51,8 @@
     "@types/node": "^22.19.15",
     "@vitest/coverage-v8": "^4.1.2",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "@c9up/ream": "^0.2.0"
   },
   "pnpm": {
     "//": "Pin the coverage toolchain to the version used in dev. Without a committed lockfile the standalone CI resolves fresh (@vitest/coverage-v8 4.1.9), whose v8 branch-counting drops inker under its 78% floor and reds the coverage gate. Overrides only apply when this package is the install root (CI), so the monorepo workspace is unaffected.",

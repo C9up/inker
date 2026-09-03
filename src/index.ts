@@ -1,3 +1,5 @@
+import "./augmentations.js";
+
 export type {
 	AssetHelper,
 	CspNonceHelper,
