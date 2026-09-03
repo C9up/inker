@@ -10,6 +10,13 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Templates } from "../../src/Templates.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 let root: string;
 
 beforeAll(() => {
@@ -114,7 +121,7 @@ describe("inker > components as tags", () => {
 			"components/form/input": "y",
 			other: "z",
 		});
-		const [{ diskName, components }] = t.listComponents();
+		const { diskName, components } = defined(t.listComponents()[0]);
 		expect(diskName).toBe("default");
 		expect(components.map((c) => c.tagName).sort()).toEqual([
 			"button",

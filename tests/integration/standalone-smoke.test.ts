@@ -115,8 +115,9 @@ function tarballFromPackOutput(stdout: string, tmpDir: string): string {
 	const tgzs = readdirSync(tmpDir)
 		.filter((f) => f.endsWith(".tgz"))
 		.sort();
-	if (tgzs.length > 0) {
-		const abs = path.join(tmpDir, tgzs[0]);
+	const [firstTgz] = tgzs;
+	if (firstTgz !== undefined) {
+		const abs = path.join(tmpDir, firstTgz);
 		if (existsSync(abs)) return abs;
 	}
 	throw new Error(
