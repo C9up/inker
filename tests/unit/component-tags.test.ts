@@ -16,7 +16,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 let root: string;
 
 beforeAll(() => {
