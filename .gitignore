@@ -12,3 +12,4 @@ test-results.json
 .DS_Store
 *.log
 .turbo/
+.augmentation-check-*
