@@ -1,5 +1,6 @@
 /** Minimal stand-in for the host's Macroable base — the shape inker's provider
  * duck-types when it installs `ctx.view`. */
+// biome-ignore lint/complexity/noStaticOnlyClass: the host's Macroable is a class with static members, and duck-typing it is the point
 export class Macroable {
 	static getter(name: string, fn: () => unknown, singleton = false): void {
 		if (!singleton) {
