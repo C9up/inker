@@ -31,7 +31,7 @@
     "prepack": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "biome check src/",
+    "lint": "biome check src/ tests/",
     "test:coverage": "vitest run --coverage"
   },
   "peerDependencies": {
