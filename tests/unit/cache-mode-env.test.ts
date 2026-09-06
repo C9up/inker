@@ -8,7 +8,7 @@
  * a live box is picked up — which is exactly what `never` exists to prevent.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { inProduction, normalizeNodeEnv } from "../../src/nodeEnv.js";
+import { inProduction, normalizeNodeEnv } from "../../src/vendor/nodeEnv.js";
 
 describe("inker > NODE_ENV aliases", () => {
 	let previous: string | undefined;

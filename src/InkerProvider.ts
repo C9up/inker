@@ -30,10 +30,10 @@ import { fileURLToPath } from "node:url";
 import type { HelperFn } from "./helpers.js";
 import type { InkerHttpContext } from "./InkerRenderer.js";
 import { InkerRenderer } from "./InkerRenderer.js";
-import { inProduction } from "./nodeEnv.js";
 import { SafeString } from "./SafeString.js";
 import { setInker } from "./services/main.js";
 import { type CacheMode, Templates } from "./Templates.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 
 // ─── Duck-typed host interfaces ──────────────────────────────────
 

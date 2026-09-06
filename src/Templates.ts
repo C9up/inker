@@ -15,7 +15,6 @@ import {
 	type NapiNodeRef,
 	napiThrowToInker,
 } from "./loadNapi.js";
-import { inProduction } from "./nodeEnv.js";
 import {
 	collectSections,
 	type InkerNodeJson,
@@ -25,6 +24,7 @@ import {
 	renderNodeTreeAsync,
 } from "./renderNode.js";
 import { Stacks } from "./stacks.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 
 export type CacheMode = "auto" | "mtime" | "never";
 
@@ -130,6 +130,10 @@ function resolveCacheMode(requested: CacheMode): "mtime" | "never" {
 		);
 	}
 	if (requested === "auto") {
+		// Through `inProduction()`: `NODE_ENV=prod` read verbatim answers "not
+		// production", and `auto` would then stat every template on every render
+		// — and re-read one an operator edited in place, which is what `never`
+		// exists to prevent.
 		return inProduction() ? "never" : "mtime";
 	}
 	return requested;
