@@ -95,7 +95,12 @@ describe("@c9up/inker published shape (AC5)", () => {
 				`pnpm pack did not produce a discoverable tarball; stdout was:\n${stdout}`,
 			);
 		}
-	});
+		// `pnpm pack` builds and archives the package: it is a minute's work on a
+		// loaded machine, and it inherits the suite's per-test timeout, which is
+		// sized for tests rather than for a build. The hook failed under load and
+		// passed when run alone — a timeout that says what it is waiting for is
+		// better than one that happens to be long enough.
+	}, 180_000);
 
 	afterAll(() => {
 		if (tmpDir !== "") rmSync(tmpDir, { recursive: true, force: true });
