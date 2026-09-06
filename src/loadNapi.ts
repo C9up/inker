@@ -9,25 +9,17 @@
 // load, consumers get a typed error. Zero `as` / `any` per cerebrum 2026-05-04.
 
 import { createRequire } from "node:module";
-import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { type InkerErrorCode, InkerRenderError } from "./InkerRenderError.js";
-
-const SUFFIX_MAP: Readonly<Record<string, string>> = {
-	"linux-x64": "linux-x64-gnu",
-	"linux-arm64": "linux-arm64-gnu",
-	"darwin-x64": "darwin-x64",
-	"darwin-arm64": "darwin-arm64",
-	"win32-x64": "win32-x64-msvc",
-};
+import { nativeBinarySuffix, supportedTargets } from "./vendor/nativeBinary.js";
 
 function platformSuffix(): string {
-	const key = `${platform}-${arch}`;
-	const suffix = SUFFIX_MAP[key];
-	if (typeof suffix !== "string") {
+	// The table is shared; the refusal below stays this package's own.
+	const suffix = nativeBinarySuffix();
+	if (suffix === undefined) {
 		throw new InkerRenderError(
 			"E_INKER_NAPI_REQUIRED",
-			`Unsupported platform/arch '${key}' for @c9up/inker native binary. Supported: ${Object.keys(SUFFIX_MAP).join(", ")}.`,
+			`No native binary for this platform for @c9up/inker native binary. Supported: ${supportedTargets().join(", ")}.`,
 		);
 	}
 	return suffix;
