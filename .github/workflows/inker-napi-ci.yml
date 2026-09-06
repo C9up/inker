@@ -123,7 +123,7 @@ jobs:
       # And clippy, as an error rather than a note. `cargo fmt --check` was
       # gating the formatting while nothing gated the lints that catch a real
       # defect — the one place the compiler stays silent and clippy does not.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -200,7 +200,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   # vitest on the host platform, on every push. The matrix above runs the
   # same suite across five targets, but only when the version moves — so
