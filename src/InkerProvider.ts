@@ -31,7 +31,7 @@ import type { HelperFn } from "./helpers.js";
 import type { InkerHttpContext } from "./InkerRenderer.js";
 import { InkerRenderer } from "./InkerRenderer.js";
 import { SafeString } from "./SafeString.js";
-import { setInker } from "./services/main.js";
+import { clearInker, getInker, setInker } from "./services/main.js";
 import { type CacheMode, Templates } from "./Templates.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
@@ -227,12 +227,29 @@ export default class InkerProvider {
 	async ready(): Promise<void> {}
 
 	async shutdown(): Promise<void> {
-		// Intentionally a no-op. `#started` guards `start()` from re-running,
-		// so once the provider has booted, subsequent lifecycle calls have
-		// nothing to undo here: `Templates` owns its own cache, AsyncLocalStorage
-		// has no destroy contract, and the `setInker` singleton intentionally
-		// outlives shutdown so late-arriving handlers don't see a torn-down
-		// proxy. `Templates.clearCache()` is the operator's tool, not ours.
+		// Release the singleton — while it is still OURS.
+		//
+		// It used to outlive shutdown deliberately, so a late-arriving handler
+		// would not meet a torn-down proxy mid-render. That reasoning does not
+		// survive contact with the cases it creates: the renderer left behind
+		// holds the OLD router, the old Rosetta, the old templates and the old
+		// ALS context, and `#started` then refused to build a new one. A hot
+		// reload or a second application in the same process kept rendering
+		// through a dead graph, with nothing to say so.
+		//
+		// The window it was protecting is also not real in a graceful shutdown:
+		// in-flight requests drain BEFORE providers are torn down. What is real
+		// is the two-applications case, which is why this only clears the
+		// instance it bound — the survivor's renderer must stay.
+		if (this.#renderer !== undefined && getInker() === this.#renderer) {
+			clearInker();
+		}
+		this.#renderer = undefined;
+		// So a genuine restart rebuilds instead of returning early.
+		this.#started = false;
+		// `Templates` owns its own cache and AsyncLocalStorage has no destroy
+		// contract, so neither is ours to tear down. `Templates.clearCache()`
+		// stays the operator's tool.
 	}
 
 	#getRendererOrThrow(): InkerRenderer {

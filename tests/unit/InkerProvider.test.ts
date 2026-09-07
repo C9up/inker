@@ -18,6 +18,7 @@ import InkerProvider, {
 import type { InkerHttpContext } from "../../src/InkerRenderer.js";
 import { InkerRenderer } from "../../src/InkerRenderer.js";
 import { SafeString } from "../../src/SafeString.js";
+import { getInker, setInker } from "../../src/services/main.js";
 
 interface StubRouter {
 	makeUrl(name: string, params?: Record<string, string>): string;
@@ -841,5 +842,85 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		await expect(renderer._templates.render("missing", {})).rejects.toThrow(
 			/missing\.inker/,
 		);
+	});
+});
+
+/**
+ * The renderer must not outlive the application that built it.
+ *
+ * `shutdown()` was a deliberate no-op: the singleton stayed so a late-arriving
+ * handler would not meet a torn-down proxy mid-render. What it left behind was
+ * a renderer holding the OLD router, Rosetta, templates and ALS context, while
+ * `#started` refused to build a new one — a hot reload or a second application
+ * in the same process kept rendering through a dead graph, saying nothing. In a
+ * graceful shutdown the window it protected does not exist either: in-flight
+ * requests drain before providers are torn down.
+ */
+describe("InkerProvider releases its singleton", () => {
+	let root: string;
+	beforeEach(() => {
+		resetInkerProviderFlags();
+		setInker(undefined);
+		root = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-shutdown-")),
+		);
+		fs.mkdirSync(path.join(root, "resources", "templates"), {
+			recursive: true,
+		});
+	});
+	afterEach(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	async function started() {
+		// A real appRoot, without which start() never reaches the singleton.
+		const rosetta = {
+			hasLocale: () => true,
+			t: (key: string) => key,
+		};
+		const { app } = mkAppContext({ rosetta, appRoot: root }, {});
+		const provider = new InkerProvider(app);
+		provider.register();
+		await provider.start();
+		return provider;
+	}
+
+	it("clears the accessor on shutdown", async () => {
+		const provider = await started();
+		expect(getInker()).toBeDefined();
+
+		await provider.shutdown();
+
+		expect(getInker()).toBeUndefined();
+	});
+
+	it("builds a fresh renderer on a restart", async () => {
+		const provider = await started();
+		const first = getInker();
+
+		await provider.shutdown();
+		await provider.start();
+
+		// `#started` guarded start() and was never reset, so the second start
+		// returned early and left the dead renderer in place.
+		expect(getInker()).toBeDefined();
+		expect(getInker()).not.toBe(first);
+	});
+
+	it("leaves the OTHER application's renderer alone", async () => {
+		// Two applications can share a process — parallel tests, a hot reload.
+		// Clearing the survivor's singleton is a live app rendering through
+		// nothing.
+		const first = await started();
+		const mine = getInker();
+		const second = await started();
+		expect(getInker()).not.toBe(mine);
+		const theirs = getInker();
+
+		await first.shutdown();
+
+		expect(getInker()).toBe(theirs);
+		await second.shutdown();
+		expect(getInker()).toBeUndefined();
 	});
 });

@@ -28,6 +28,17 @@ export function getInker(): InkerRenderer | undefined {
 	return instance;
 }
 
+/**
+ * @internal Release the singleton, as every other provider's accessor does.
+ *
+ * Named `clear*` on purpose: `scripts/check-service-accessors.mjs` looks for
+ * exactly this beside the getter, and inker was the one package exempted from
+ * that gate.
+ */
+export function clearInker(): void {
+	instance = undefined;
+}
+
 // Sanctioned `as InkerRenderer` site — typed-Proxy idiom shared by
 // station/rosetta/aurora/inker `services/main.ts`. Every property access is
 // guarded by the `instance` check below, so the cast is structural and

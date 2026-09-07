@@ -1,7 +1,7 @@
 {
   "name": "@c9up/inker",
-  "version": "0.1.18",
-  "description": "Inker \u2014 server-side templating for the Ream framework. Hand-rolled lexer/parser/renderer with HTML-escape-by-default interpolation and .inker file convention.",
+  "version": "0.1.19",
+  "description": "Inker — server-side templating for the Ream framework. Hand-rolled lexer/parser/renderer with HTML-escape-by-default interpolation and .inker file convention.",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
