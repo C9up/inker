@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import type { HelperFn } from "./helpers.js";
 import type { InkerHttpContext } from "./InkerRenderer.js";
 import { InkerRenderer } from "./InkerRenderer.js";
+import { plugins } from "./plugins.js";
 import { SafeString } from "./SafeString.js";
 import { clearInker, getInker, setInker } from "./services/main.js";
 import { type CacheMode, Templates } from "./Templates.js";
@@ -51,6 +52,14 @@ interface InkerConfigStore {
 export interface InkerAppContext {
 	container: InkerContainer;
 	config: InkerConfigStore;
+	/**
+	 * Set to `true` by this provider's CONSTRUCTOR, mirroring the upstream
+	 * engine provider's `usingEdgeJS`. A package that contributes to templates
+	 * reads it before importing inker, so it stays installable in an app that
+	 * has no template engine. Optional because a host that is not ream
+	 * satisfies this interface structurally without carrying the field.
+	 */
+	usingInker?: boolean;
 }
 
 // ─── Configuration shape (D14) ──────────────────────────────────
@@ -133,7 +142,14 @@ export default class InkerProvider {
 	#peerWarnEmitted = false;
 	#appRootFallbackWarned = false;
 
-	constructor(protected app: InkerAppContext) {}
+	constructor(protected app: InkerAppContext) {
+		// In the CONSTRUCTOR, not in a phase, and that is the point: providers
+		// are constructed before any of them boots, so a package that wants to
+		// contribute to templates can read this during its own boot and be
+		// answered truthfully. Upstream's engine provider sets its flag in the
+		// same place for the same reason.
+		this.app.usingInker = true;
+	}
 
 	register(): void {
 		this.app.container.singleton(InkerRenderer, () =>
@@ -211,6 +227,11 @@ export default class InkerProvider {
 		for (const [name, value] of buildCanonicalGlobals(this.app)) {
 			templates.global(name, value);
 		}
+		// Plugins other packages pushed while this engine did not exist yet —
+		// rosetta's i18n globals arrive here. After the canonical globals, so a
+		// plugin can see what the engine already publishes; `Templates#use`
+		// still only enqueues, so none of them runs before the first render.
+		plugins.applyTo(templates);
 		// `ctx.view` — a renderer per request, seeded with the request, exactly as
 		// AdonisJS's edge provider installs it. Without it every migrated
 		// controller's `ctx.view.render(...)` breaks. Resolved through the
