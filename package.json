@@ -24,6 +24,9 @@
       "import": "./src/testing/index.ts"
     }
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:napi": "cargo build --release -p inker-engine-napi && pnpm build:napi-types && node scripts/copy-napi.mjs",
