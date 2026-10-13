@@ -451,6 +451,23 @@ function jsStringify(value: unknown): SafeString {
 	);
 }
 
+/**
+ * `<script type="application/ld+json">` for a page's structured data — Inker's
+ * own, Edge has none. The value is written with `js.stringify`'s escapes, so no
+ * value can end the script, whatever it holds; the nonce, when given, goes on
+ * the tag: `{{ html.jsonLd(product, cspNonce()) }}`. Nothing for no value.
+ */
+function htmlJsonLd(value: unknown, nonce?: unknown): SafeString {
+	if (value === undefined || value === null) return new SafeString("");
+	const attribute =
+		typeof nonce === "string" && nonce !== ""
+			? ` nonce="${escapeAttr(nonce)}"`
+			: "";
+	return new SafeString(
+		`<script type="application/ld+json"${attribute}>${jsStringify(value).value}</script>`,
+	);
+}
+
 /** Inker's built-in globals, keyed for injection into every expression scope. */
 export const INKER_GLOBALS: Readonly<Record<string, unknown>> = Object.freeze({
 	camelCase,
@@ -478,6 +495,7 @@ export const INKER_GLOBALS: Readonly<Record<string, unknown>> = Object.freeze({
 		classNames,
 		safe: htmlSafe,
 		escape: htmlEscape,
+		jsonLd: htmlJsonLd,
 	}),
 	js: Object.freeze({ stringify: jsStringify }),
 });

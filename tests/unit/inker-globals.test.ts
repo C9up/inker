@@ -161,6 +161,33 @@ describe("Edge-core globals (62-7)", () => {
 		);
 	});
 
+	it("html.jsonLd writes a JSON-LD script no value can end", () => {
+		const product = {
+			"@context": "https://schema.org",
+			"@type": "Product",
+			name: "</script><script>alert(1)</script>",
+		};
+		const out = render("{{ html.jsonLd(p, nonce) }}", {
+			p: product,
+			nonce: 'n"1',
+		});
+		expect(out).toBe(
+			'<script type="application/ld+json" nonce="n&quot;1">{"@context":"https://schema.org","@type":"Product","name":"\\u003C/script\\u003E\\u003Cscript\\u003Ealert(1)\\u003C/script\\u003E"}</script>',
+		);
+		const json = out.slice(out.indexOf(">") + 1, out.lastIndexOf("</script>"));
+		expect(JSON.parse(json)).toEqual(product);
+	});
+
+	it("html.jsonLd writes no nonce without one, and nothing for no value", () => {
+		expect(render("{{ html.jsonLd(p) }}", { p: { "@type": "Thing" } })).toBe(
+			'<script type="application/ld+json">{"@type":"Thing"}</script>',
+		);
+		expect(
+			render("{{ html.jsonLd(p, '') }}", { p: { "@type": "Thing" } }),
+		).not.toContain("nonce");
+		expect(render("{{ html.jsonLd(p) }}", { p: null })).toBe("");
+	});
+
 	it("a registered helper can override a global", () => {
 		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
 			native.parseTemplateJson(
