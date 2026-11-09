@@ -741,6 +741,8 @@ interface LoadRequest {
 	readonly absPath: string;
 	readonly validatedName: string;
 	readonly root: string;
+	/** `disk::name` key of an in-memory template that would answer the load. */
+	readonly memoryKey: string;
 }
 
 /**
@@ -795,13 +797,30 @@ function askedForHtml(answer: NapiInkerAst | string): string {
 	return answer;
 }
 
+const DEFAULT_MEMORY_PREFIX = "default::";
+
+/**
+ * The key an in-memory template lives under: its disk and its validated
+ * name (`admin::welcome`, `default::welcome`), as Edge keys pre-registered
+ * templates by the full path. Disk namespaces are what keep integration
+ * packages apart, so a bare `welcome` must never answer `admin::welcome`.
+ */
+function memoryKey(name: string, prefix = ""): string {
+	const sep = name.indexOf("::");
+	const disk = sep === -1 ? "default" : name.slice(0, sep);
+	assertDiskName(disk);
+	const bare = sep === -1 ? name : name.slice(sep + 2);
+	return `${disk}::${validateName(`${prefix}${bare}`)}`;
+}
+
 /** Shorthand so a request reads like the call it replaced. */
 function loadRequest(
 	absPath: string,
 	validatedName: string,
 	root: string,
+	memoryKey: string,
 ): LoadRequest {
-	return { absPath, validatedName, root };
+	return { absPath, validatedName, root, memoryKey };
 }
 
 /** A callable global doubles as a helper, so the parser accepts `{{ name(x) }}`
@@ -1037,11 +1056,10 @@ export class Templates {
 	 * separate loader object, so the disk surface lives on the engine itself.
 	 */
 	resolve(name: string): { template: string } {
-		const inMemory = this.#inMemory.get(
-			validateName(this.#splitDisk(name).bare),
-		);
+		const { root, validated, absPath, memoryKey } =
+			this.#resolveTemplateFile(name);
+		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) return { template: inMemory };
-		const { root, validated, absPath } = this.#resolveTemplateFile(name);
 		// The same guarded read a render does: the root is a containment
 		// boundary for every way a template's source leaves the disk.
 		return { template: readContainedSync(absPath, root, validated) };
@@ -1058,7 +1076,13 @@ export class Templates {
 	/** Templates registered in memory (Edge `loader.templates`). */
 	get templates(): Readonly<Record<string, { template: string }>> {
 		const out: Record<string, { template: string }> = Object.create(null);
-		for (const [name, template] of this.#inMemory) out[name] = { template };
+		for (const [key, template] of this.#inMemory) {
+			// Listed under the name it was registered with.
+			const name = key.startsWith(DEFAULT_MEMORY_PREFIX)
+				? key.slice(DEFAULT_MEMORY_PREFIX.length)
+				: key;
+			out[name] = { template };
+		}
 		return Object.freeze(out);
 	}
 
@@ -1194,12 +1218,12 @@ export class Templates {
 	#resolveTemplateFile(
 		name: string,
 		prefix = "",
-	): { root: string; validated: string; absPath: string } {
+	): { root: string; validated: string; absPath: string; memoryKey: string } {
 		const { root, bare } = this.#splitDisk(name);
 		const validated = validateName(`${prefix}${bare}`);
 		const absPath = path.join(root, `${validated}${TEMPLATE_EXT}`);
 		assertContained(root, absPath, validated);
-		return { root, validated, absPath };
+		return { root, validated, absPath, memoryKey: memoryKey(name, prefix) };
 	}
 
 	/**
@@ -1243,7 +1267,12 @@ export class Templates {
 			// whether it is fatal (a missing partial is not, until it renders).
 			let ast: NapiInkerAst;
 			try {
-				ast = await this.#loadAst(req.absPath, req.validatedName, req.root);
+				ast = await this.#loadAst(
+					req.absPath,
+					req.validatedName,
+					req.root,
+					req.memoryKey,
+				);
 			} catch (e) {
 				next = step.throw(e);
 				continue;
@@ -1283,7 +1312,12 @@ export class Templates {
 			}
 			let ast: NapiInkerAst;
 			try {
-				ast = this.#loadAstSync(req.absPath, req.validatedName, req.root);
+				ast = this.#loadAstSync(
+					req.absPath,
+					req.validatedName,
+					req.root,
+					req.memoryKey,
+				);
 			} catch (e) {
 				next = step.throw(e);
 				continue;
@@ -1302,7 +1336,8 @@ export class Templates {
 		// Plugins run before anything is resolved — one may register a global or
 		// a tag this very render depends on.
 		this.#executePlugins();
-		const { root, validated, absPath } = this.#resolveTemplateFile(name);
+		const { root, validated, absPath, memoryKey } =
+			this.#resolveTemplateFile(name);
 
 		// Registered globals and the renderer's shared values sit UNDER the
 		// caller's data. The data itself is never inspected: it is plain JS the
@@ -1310,7 +1345,9 @@ export class Templates {
 		const sharedState = this.#sharedState(shared);
 		const state = renderState(sharedState, data);
 
-		const entryAst = askedForAst(yield loadRequest(absPath, validated, root));
+		const entryAst = askedForAst(
+			yield loadRequest(absPath, validated, root, memoryKey),
+		);
 		const composed = yield* this.#compose(
 			entryAst,
 			validated,
@@ -1425,7 +1462,7 @@ export class Templates {
 	): NonNullable<NodeRenderContext["loadTemplate"]> {
 		return (kind, name) => {
 			const isComponent = kind === "component";
-			const { root, validated, absPath } = this.#resolveTemplateFile(
+			const { root, validated, absPath, memoryKey } = this.#resolveTemplateFile(
 				name,
 				isComponent ? "components/" : "",
 			);
@@ -1453,8 +1490,8 @@ export class Templates {
 				return nodes;
 			};
 			return sync
-				? accept(this.#loadAstSync(absPath, validated, root))
-				: this.#loadAst(absPath, validated, root).then(accept);
+				? accept(this.#loadAstSync(absPath, validated, root, memoryKey))
+				: this.#loadAst(absPath, validated, root, memoryKey).then(accept);
 		};
 	}
 
@@ -1782,8 +1819,9 @@ export class Templates {
 	 * reports whether the template parses instead of returning the artifact.
 	 */
 	compile(name: string): void {
-		const { root, validated, absPath } = this.#resolveTemplateFile(name);
-		this.#loadAstSync(absPath, validated, root);
+		const { root, validated, absPath, memoryKey } =
+			this.#resolveTemplateFile(name);
+		this.#loadAstSync(absPath, validated, root, memoryKey);
 	}
 
 	/**
@@ -1866,13 +1904,14 @@ export class Templates {
 		// Validate the name on the same rules as a disk lookup: an in-memory
 		// template must not be reachable under a name a file could never carry,
 		// or the two namespaces drift apart.
-		this.#inMemory.set(validateName(name), contents.template);
+		// Keyed with its disk, so `welcome` never answers `admin::welcome`.
+		this.#inMemory.set(memoryKey(name), contents.template);
 		this.clearCache();
 	}
 
 	/** Drop a template registered from memory (Edge `removeTemplate`). */
 	removeTemplate(name: string): void {
-		if (this.#inMemory.delete(validateName(name))) this.clearCache();
+		if (this.#inMemory.delete(memoryKey(name))) this.clearCache();
 	}
 
 	clearCache(): void {
@@ -1890,6 +1929,7 @@ export class Templates {
 		absPath: string,
 		validatedName: string,
 		root: string,
+		memoryKey: string,
 	): Promise<NapiInkerAst> {
 		// Key the cache/inflight maps by the resolving disk's root AND the
 		// absolute path, not the path alone. Two disks with overlapping roots
@@ -1900,7 +1940,7 @@ export class Templates {
 		// An in-memory template short-circuits the whole disk path: no stat, no
 		// open, no mtime cache. It is parsed on each load — there is no file to
 		// watch for staleness, and registerTemplate() already clears the cache.
-		const inMemory = this.#inMemory.get(validatedName);
+		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) {
 			const source = this.#applyRaw(inMemory);
 			return callNative(() =>
@@ -2109,8 +2149,9 @@ export class Templates {
 		absPath: string,
 		validatedName: string,
 		root: string,
+		memoryKey: string,
 	): NapiInkerAst {
-		const inMemory = this.#inMemory.get(validatedName);
+		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) {
 			const source = this.#applyRaw(inMemory);
 			return callNative(() =>
@@ -2195,6 +2236,7 @@ export class Templates {
 			root: layoutRoot,
 			validated: layoutValidated,
 			absPath: layoutAbsPath,
+			memoryKey: layoutMemoryKey,
 		} = this.#resolveTemplateFile(layoutName);
 
 		if (includeStack.has(layoutAbsPath)) {
@@ -2214,7 +2256,12 @@ export class Templates {
 		let layoutAst: NapiInkerAst;
 		try {
 			layoutAst = askedForAst(
-				yield loadRequest(layoutAbsPath, layoutValidated, layoutRoot),
+				yield loadRequest(
+					layoutAbsPath,
+					layoutValidated,
+					layoutRoot,
+					layoutMemoryKey,
+				),
 			);
 		} catch (e) {
 			includeStack.delete(layoutAbsPath);
@@ -2305,12 +2352,18 @@ export class Templates {
 				root: partialRoot,
 				validated: partialValidated,
 				absPath: partialAbsPath,
+				memoryKey: partialMemoryKey,
 			} = this.#resolveTemplateFile(node.name);
 
 			let partialAst: NapiInkerAst;
 			try {
 				partialAst = askedForAst(
-					yield loadRequest(partialAbsPath, partialValidated, partialRoot),
+					yield loadRequest(
+						partialAbsPath,
+						partialValidated,
+						partialRoot,
+						partialMemoryKey,
+					),
 				);
 			} catch (e) {
 				if (!isTemplateNotFound(e)) throw e;
@@ -2375,6 +2428,7 @@ export class Templates {
 				root: componentRoot,
 				validated: componentValidated,
 				absPath: componentAbsPath,
+				memoryKey: componentMemoryKey,
 			} = this.#resolveTemplateFile(node.name, "components/");
 
 			let componentAst: NapiInkerAst;
@@ -2384,6 +2438,7 @@ export class Templates {
 						componentAbsPath,
 						componentValidated,
 						componentRoot,
+						componentMemoryKey,
 					),
 				);
 			} catch (e) {
