@@ -32,6 +32,9 @@ export type InkerErrorCode =
 	/** The render nested too deep: runaway component/partial recursion, or a
 	 * helper that overflowed the stack. */
 	| "E_INKER_RENDER_DEPTH"
+	/** The module singleton was asked to render before any `InkerProvider`
+	 * built an engine. */
+	| "E_INKER_ENGINE_MISSING"
 	| "E_INKER_NAPI_REQUIRED";
 
 export interface InkerErrorContext {

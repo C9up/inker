@@ -202,7 +202,7 @@ describe("InkerRenderer", () => {
 		});
 	});
 
-	describe("_templates seam", () => {
+	describe("templates accessor", () => {
 		it("exposes the underlying Templates instance", () => {
 			const stub = makeStubTemplates(() => "");
 			const renderer = new InkerRenderer(
@@ -210,7 +210,7 @@ describe("InkerRenderer", () => {
 				new AsyncLocalStorage<InkerHttpContext>(),
 			);
 
-			expect(renderer._templates).toBe(stub);
+			expect(renderer.templates).toBe(stub);
 		});
 	});
 

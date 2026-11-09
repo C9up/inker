@@ -17,7 +17,11 @@ export {
 // The default export is the plugin registrar, the way `import edge from
 // 'edge.js'` hands back the engine to push plugins into. Read `plugins.ts` for
 // why it is a registrar here and not the engine itself.
-export { default, plugins } from "./plugins.js";
+export {
+	default,
+	type InkerSharedRenderer,
+	plugins,
+} from "./plugins.js";
 export type {
 	InkerTag,
 	InkerTagBuffer,

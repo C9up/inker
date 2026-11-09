@@ -63,7 +63,7 @@ describe("services/main inker singleton", () => {
 		const renderer = makeRenderer();
 		mod.setInker(renderer);
 
-		expect(mod.default._templates).toBe(renderer._templates);
+		expect(mod.default.templates).toBe(renderer.templates);
 	});
 
 	it("binds methods so detached destructuring still works", async () => {

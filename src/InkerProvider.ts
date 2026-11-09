@@ -232,6 +232,8 @@ export default class InkerProvider {
 		// plugin can see what the engine already publishes; `Templates#use`
 		// still only enqueues, so none of them runs before the first render.
 		plugins.applyTo(templates);
+		// The singleton renders with this engine too (`inker.share().render()`).
+		plugins.attach(templates);
 		// `ctx.view` — a renderer per request, seeded with the request, exactly as
 		// AdonisJS's edge provider installs it. Without it every migrated
 		// controller's `ctx.view.render(...)` breaks. Resolved through the

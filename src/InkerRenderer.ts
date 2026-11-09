@@ -63,8 +63,8 @@ export class InkerRenderer {
 		this.#templates.unmount(diskName);
 	}
 
-	/** @internal Test seam — access the underlying Templates for cache control. */
-	get _templates(): Templates {
+	/** The underlying engine (cache control, tags, globals). */
+	get templates(): Templates {
 		return this.#templates;
 	}
 }

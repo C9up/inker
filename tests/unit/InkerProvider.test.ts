@@ -839,7 +839,7 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		// The internal Templates uses #root — surface via a render attempt
 		// against an absent file in the customRoot to confirm the path is in
 		// the error message.
-		await expect(renderer._templates.render("missing", {})).rejects.toThrow(
+		await expect(renderer.templates.render("missing", {})).rejects.toThrow(
 			/missing\.inker/,
 		);
 	});

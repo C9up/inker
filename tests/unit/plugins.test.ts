@@ -11,6 +11,7 @@ import type { InkerRenderer } from "../../src/InkerRenderer.js";
 import inkerDefault, { plugins } from "../../src/index.js";
 import { clearInker } from "../../src/services/main.js";
 import type { Templates } from "../../src/Templates.js";
+import { asTyped } from "../__helpers__/bypass-type-check.js";
 
 function mkApp(appRoot: string): InkerAppContext {
 	const resolved: Record<string, unknown> = {
@@ -53,7 +54,7 @@ function mkApp(appRoot: string): InkerAppContext {
 /** The engine the provider built, through the renderer's documented seam. */
 async function engineOf(app: InkerAppContext): Promise<Templates> {
 	const renderer = await app.container.resolve<InkerRenderer>("inker");
-	return renderer._templates;
+	return renderer.templates;
 }
 
 describe("inker > plugin registrar", () => {
@@ -158,5 +159,61 @@ describe("inker > provider drains the registrar", () => {
 		// registrar is process-wide, so the first must not empty it for the
 		// second.
 		expect(engines).toBe(2);
+	});
+});
+
+describe("inker > share().render() on the module singleton", () => {
+	let tmp: string;
+
+	beforeEach(() => {
+		plugins.clear();
+		resetInkerProviderFlags();
+		tmp = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-share-")),
+		);
+		const views = path.join(tmp, "resources/templates");
+		fs.mkdirSync(path.join(views, "components"), { recursive: true });
+		fs.writeFileSync(
+			path.join(views, "mail.inker"),
+			"{{ greeting }} {{ name }}|@!component('sig')",
+		);
+		fs.writeFileSync(
+			path.join(views, "components/sig.inker"),
+			"[{{ greeting }}]",
+		);
+	});
+	afterEach(() => {
+		plugins.clear();
+		clearInker();
+		fs.rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("renders with the engine the provider built, as Adonis mail does with edge.share()", async () => {
+		const provider = new InkerProvider(mkApp(tmp));
+		provider.register();
+		await provider.start();
+
+		// Shared values reach components; per-call data stays with the template.
+		expect(
+			await inkerDefault
+				.share({ greeting: "Hi" })
+				.render("mail", { name: "Ada" }),
+		).toBe("Hi Ada|[Hi]");
+		// Each share() is its own renderer: nothing leaks into the next one.
+		expect(
+			await inkerDefault
+				.share({})
+				.render("mail", { greeting: "Yo", name: "B" }),
+		).toBe("Yo B|[]");
+	});
+
+	it("throws a typed error when no provider has built an engine", async () => {
+		await expect(
+			inkerDefault.share({ greeting: "Hi" }).render("mail", {}),
+		).rejects.toMatchObject({ code: "E_INKER_ENGINE_MISSING" });
+	});
+
+	it("refuses shared state that is not an object", () => {
+		expect(() => inkerDefault.share(asTyped(null))).toThrow(InkerRenderError);
 	});
 });

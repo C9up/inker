@@ -49,8 +49,18 @@ interface QueuedPlugin {
 	readonly apply: (templates: Templates) => void;
 }
 
+/** What `share()` hands back: a render bound to the shared state. */
+export interface InkerSharedRenderer {
+	render(
+		template: string,
+		data?: Readonly<Record<string, unknown>>,
+	): Promise<string>;
+}
+
 class InkerPlugins {
 	readonly #queued: QueuedPlugin[] = [];
+	/** The engine the provider built, once it has. */
+	#engine: Templates | undefined;
 
 	/**
 	 * Register a plugin against every engine this process builds.
@@ -95,9 +105,52 @@ class InkerPlugins {
 		for (const plugin of this.#queued) plugin.apply(templates);
 	}
 
-	/** @internal Drop the queue. For tests that build several applications. */
+	/**
+	 * @internal Remember the engine the provider built, so the singleton can
+	 * render with it. Called by `InkerProvider.start()`; a later application
+	 * in the same process replaces it.
+	 */
+	attach(templates: Templates): void {
+		this.#engine = templates;
+	}
+
+	/**
+	 * Render with shared state, outside any request (Edge `edge.share(state)`).
+	 * This is what a mailer needs — AdonisJS's mail sets
+	 * `Message.templateEngine` to `edge.share(helpers).render(template, data)`:
+	 *
+	 *   const inker = await import('@c9up/inker')
+	 *   await inker.default.share(sharedState).render('emails/welcome', data)
+	 *
+	 * Shared values reach partials and components; `data` stays with the
+	 * template. The engine is looked up when `render` runs, so a renderer
+	 * shared during boot works once the provider has started.
+	 */
+	share(state: Readonly<Record<string, unknown>>): InkerSharedRenderer {
+		if (typeof state !== "object" || state === null || Array.isArray(state)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_PATH",
+				`share() expects an object; got ${state === null ? "null" : typeof state}`,
+			);
+		}
+		return {
+			render: async (template, data = {}) => {
+				const engine = this.#engine;
+				if (engine === undefined) {
+					throw new InkerRenderError(
+						"E_INKER_ENGINE_MISSING",
+						`Cannot render '${template}': no template engine has been built yet — register InkerProvider and let it start before rendering through the inker singleton`,
+					);
+				}
+				return engine.share(state).render(template, data);
+			},
+		};
+	}
+
+	/** @internal Drop the queue and the engine. For tests that build several applications. */
 	clear(): void {
 		this.#queued.length = 0;
+		this.#engine = undefined;
 	}
 }
 
