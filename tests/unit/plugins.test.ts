@@ -207,6 +207,25 @@ describe("inker > share().render() on the module singleton", () => {
 		).toBe("Yo B|[]");
 	});
 
+	it("applies a plugin pushed AFTER the provider started", async () => {
+		// ream and warden publish their tags late in the lifecycle; the engine
+		// already exists by then and must still receive them.
+		const provider = new InkerProvider(mkApp(tmp));
+		provider.register();
+		await provider.start();
+		plugins.use((engine) => {
+			engine.registerTag({
+				tagName: "late",
+				block: false,
+				seekable: false,
+				compile: (_parser, buffer) => buffer.writeRaw("LATE"),
+			});
+		});
+		const views = path.join(tmp, "resources/templates");
+		fs.writeFileSync(path.join(views, "late.inker"), "[@late]");
+		expect(await inkerDefault.share({}).render("late")).toBe("[LATE]");
+	});
+
 	it("throws a typed error when no provider has built an engine", async () => {
 		await expect(
 			inkerDefault.share({ greeting: "Hi" }).render("mail", {}),

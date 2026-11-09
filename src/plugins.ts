@@ -78,11 +78,16 @@ class InkerPlugins {
 				`Plugin must be a function; got ${typeof plugin}`,
 			);
 		}
-		this.#queued.push({
+		const queued: QueuedPlugin = {
 			apply: (templates) => {
 				templates.use(plugin, options);
 			},
-		});
+		};
+		this.#queued.push(queued);
+		// An engine that already exists gets it too: a package may publish
+		// after the provider started (ream and warden register their tags
+		// late), and `Templates#use` still defers it to the next render.
+		if (this.#engine !== undefined) queued.apply(this.#engine);
 		return this;
 	}
 
