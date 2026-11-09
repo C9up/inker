@@ -202,6 +202,66 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 		);
 	});
 
+	it("keys @pushOnceTo on the file holding it, not on the entry template", async () => {
+		// Two different partials whose tag sits at the same line and column.
+		const t = withTemplates({
+			"partials/a": "@pushOnceTo('js')<script src=a></script>@endpushOnceTo",
+			"partials/b": "@pushOnceTo('js')<script src=b></script>@endpushOnceTo",
+			page: "@include('partials/a')@include('partials/b')[@stack('js')]",
+		});
+		expect(await t.render("page")).toBe(
+			"[<script src=a></script><script src=b></script>]",
+		);
+	});
+
+	it("names the partial itself in $filename and @newError", async () => {
+		const t = withTemplates({
+			"partials/a": "[{{ $filename }}]",
+			"partials/boom": "@newError('nope')",
+			page: "{{ $filename }}@include('partials/a')",
+			broken: "@include('partials/boom')",
+		});
+		expect(await t.render("page")).toBe("page[partials/a]");
+		try {
+			await t.render("broken");
+			expect.fail("should have thrown");
+		} catch (e) {
+			expect(e).toBeInstanceOf(InkerRenderError);
+			if (e instanceof InkerRenderError) {
+				expect(e.context.templateName).toBe("partials/boom");
+			}
+		}
+	});
+
+	it("pushes once for one partial included twice", async () => {
+		const t = withTemplates({
+			"partials/a": "@pushOnceTo('js')<script src=a></script>@endpushOnceTo",
+			page: "@include('partials/a')@include('partials/a')[@stack('js')]",
+		});
+		expect(await t.render("page")).toBe("[<script src=a></script>]");
+	});
+
+	it("tells a partial and a component of the same name apart", async () => {
+		const t = withTemplates({
+			x: "@pushOnceTo('js')<p>@endpushOnceTo",
+			"components/x": "@pushOnceTo('js')<c>@endpushOnceTo",
+			page: "@include('x')@!component('x')@!component('x')[@stack('js')]",
+		});
+		expect(await t.render("page")).toBe("[<p><c>]");
+	});
+
+	it("does not collide between a layout and the page body", async () => {
+		// Both tags sit at line 2, column 1 of their own file.
+		const t = withTemplates({
+			"layouts/main":
+				"[@stack('js')]\n@pushOnceTo('js')<l>@endpushOnceTo{{> body }}",
+			page: "@layout('layouts/main')\n@pushOnceTo('js')<p>@endpushOnceTo",
+		});
+		const out = await t.render("page");
+		expect(out).toContain("<p>");
+		expect(out).toContain("<l>");
+	});
+
 	it("does not RENDER a repeated @pushOnceTo body at all", () => {
 		// hasSource and pushOnceTo once joined their key differently, so the
 		// lookup never matched: the body was rendered on every repeat and only

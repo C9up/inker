@@ -680,6 +680,12 @@ export interface NodeRenderContext {
 	readonly superHtml?: string;
 	/** Name of the template being rendered — surfaced to components as `$caller.filename`. */
 	readonly templateName?: string;
+	/**
+	 * Identity of the template FILE whose nodes are being walked: the entry,
+	 * a partial, a component or the layout. `@pushOnceTo` keys on it, as Edge
+	 * keys on the tag's own filename, so two files never share a call site.
+	 */
+	readonly file?: string;
 	/** Runtime-registered custom tags; a `@<name>(...)` resolves its handler here. */
 	readonly tags?: TagMap;
 	/**
@@ -707,6 +713,14 @@ export function collectSections(nodes: readonly InkerNodeJson[]): {
 		}
 	}
 	return { sections, body };
+}
+
+/** The file a component key resolves to, in the namespace of template names. */
+function componentFile(key: string): string {
+	const sep = key.indexOf("::");
+	return sep === -1
+		? `components/${key}`
+		: `${key.slice(0, sep)}::components/${key.slice(sep + 2)}`;
 }
 
 /** Mirror the Rust `normalize_partial_key`: strip `./`, collapse `//`, drop
@@ -899,7 +913,16 @@ function* renderNode(
 					`@include('${node.name}') — partial not loaded (composer must preload it)`,
 				);
 			}
-			yield* renderNodes(partial, scope, helpers, ctx, out);
+			// Same scope as the host, but the partial is its own file: `$filename`,
+			// `@newError` and `@pushOnceTo` must name it, not the host.
+			const name = normalizePartialKey(node.name);
+			yield* renderNodes(
+				partial,
+				childScope(scope, { $filename: name }),
+				helpers,
+				{ ...ctx, templateName: name, file: name },
+				out,
+			);
 			return;
 		}
 		case "Component":
@@ -1060,7 +1083,7 @@ function* renderNode(
 				// The source id is the CALL SITE, so a component used ten times
 				// contributes its script tag once — which is the tag's whole point.
 				// Rendering the body is skipped entirely on a repeat.
-				const sourceId = `${ctx.templateName ?? "?"}:${node.line}:${node.column}`;
+				const sourceId = `${ctx.file ?? ctx.templateName ?? "?"}:${node.line}:${node.column}`;
 				if (stacks.hasSource(name, sourceId)) return;
 				const body: string[] = [];
 				yield* renderNodes(node.body_nodes, scope, helpers, ctx, body);
@@ -1419,6 +1442,7 @@ function* renderComponent(
 		// A component nested in THIS one must see this component as its caller;
 		// without it `$caller.filename` was undefined one level down.
 		templateName: node.name,
+		file: componentFile(normalizePartialKey(node.name)),
 	};
 	yield* renderNodes(template, componentScope, helpers, subCtx, out);
 }

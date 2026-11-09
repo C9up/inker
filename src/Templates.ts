@@ -22,6 +22,7 @@ import {
 	type NodeRenderContext,
 	renderNodeTree,
 	renderNodeTreeAsync,
+	normalizePartialKey as templateFileKey,
 } from "./renderNode.js";
 import { Stacks } from "./stacks.js";
 import { inProduction } from "./vendor/nodeEnv.js";
@@ -1273,6 +1274,7 @@ export class Templates {
 			components,
 			tags: this.#tags,
 			templateName: name,
+			file: templateFileKey(name),
 			stacks,
 			sharedState,
 		};
@@ -1298,12 +1300,22 @@ export class Templates {
 
 		const layoutNodes = this.#astNodes(composed.layoutAst);
 		const { sections: layoutDefaults } = collectSections(layoutNodes);
+		// The layout's own nodes (its section defaults included) belong to the
+		// layout file, not to the page that named it.
+		const layoutCtx = {
+			...baseCtx,
+			templateName: composed.layoutName,
+			file:
+				composed.layoutName === undefined
+					? undefined
+					: templateFileKey(composed.layoutName),
+		};
 		const sections = new Map<string, string>();
 		for (const [name, sectionNodes] of childSections) {
 			const layoutDefault = layoutDefaults.get(name);
 			const superHtml =
 				layoutDefault !== undefined
-					? askedForHtml(yield { nodes: layoutDefault, state, ctx: baseCtx })
+					? askedForHtml(yield { nodes: layoutDefault, state, ctx: layoutCtx })
 					: "";
 			sections.set(
 				name,
@@ -1323,7 +1335,7 @@ export class Templates {
 					yield {
 						nodes: layoutNodes,
 						state,
-						ctx: { ...baseCtx, bodyHtml, sections },
+						ctx: { ...layoutCtx, bodyHtml, sections },
 					},
 				),
 			),
@@ -2191,7 +2203,7 @@ export class Templates {
 		return {
 			bodyAst,
 			layoutAst,
-			layoutName: layoutValidated,
+			layoutName,
 			layoutAbsPath,
 			partialAsts,
 			componentAsts,
