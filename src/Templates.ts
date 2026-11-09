@@ -790,13 +790,10 @@ export class Templates {
 	// `@name()` resolves as a call, whereas a global is plain render state and
 	// must NOT change how a template parses.
 	readonly #globals: Map<string, unknown> = new Map();
-	// Globals whose value is callable. The Rust parser validates `{{ name(…) }}`
-	// against the helper-name list handed to `parseTemplate`, so a callable global
-	// must ALSO be published as a helper or the template fails to parse with
-	// E_INKER_UNKNOWN_HELPER. Kept separate from `#helpers` (constructor-supplied,
-	// frozen) so the composed view can be memoised and invalidated on its own.
+	// Globals whose value is callable, also published in the helper layer so a
+	// component (whose scope is its props) can call them like any helper. Kept
+	// separate from `#helpers` (constructor-supplied, frozen name set).
 	readonly #globalFns: Map<string, HelperFn> = new Map();
-	#composedHelpers: ReadonlyMap<string, HelperFn> | undefined;
 	// Source/output transforms (Edge `edge.processor.process`). INKER DEVIATION
 	// (named): Edge also exposes a `compiled` stage that rewrites the JavaScript
 	// its compiler emits. Inker has no such stage — templates parse to an AST in
@@ -1410,15 +1407,9 @@ export class Templates {
 		this.#globals.set(name, value);
 		if (isHelperFn(value)) {
 			this.#globalFns.set(name, value);
-			this.#composedHelpers = undefined;
-			// A callable global changes how templates PARSE — `{{ t('k') }}` only
-			// compiles once the parser knows `t`. Same contract as registerTag:
-			// register during boot, before the first render.
-			this.clearCache();
-		} else if (this.#globalFns.delete(name)) {
+		} else {
 			// Overwriting a callable global with a plain value withdraws the helper.
-			this.#composedHelpers = undefined;
-			this.clearCache();
+			this.#globalFns.delete(name);
 		}
 	}
 
@@ -1429,15 +1420,20 @@ export class Templates {
 			: [...this.#helperNames, ...this.#globalFns.keys()];
 	}
 
-	/** Render-time helper map: constructor helpers overlaid with callable globals. */
+	/**
+	 * Render-time helper map: constructor helpers overlaid with callable
+	 * globals. Only the names registered at construction are taken from
+	 * `#helpers` (D3), each looked up live so its implementation can still be
+	 * swapped (D4).
+	 */
 	#renderHelpers(): ReadonlyMap<string, HelperFn> {
-		if (this.#globalFns.size === 0) return this.#helpers;
-		if (this.#composedHelpers === undefined) {
-			const merged = new Map(this.#helpers);
-			for (const [name, fn] of this.#globalFns) merged.set(name, fn);
-			this.#composedHelpers = merged;
+		const merged = new Map<string, HelperFn>();
+		for (const name of this.#helperNames) {
+			const fn = this.#helpers.get(name);
+			if (fn !== undefined) merged.set(name, fn);
 		}
-		return this.#composedHelpers;
+		for (const [name, fn] of this.#globalFns) merged.set(name, fn);
+		return merged;
 	}
 
 	/**

@@ -79,7 +79,6 @@ pub enum ErrorCode {
     MismatchedBlockEnd,
     InvalidExpression,
     InvalidIterable,
-    UnknownHelper,
     HelperThrow,
     NapiRequired,
 }
@@ -110,7 +109,6 @@ impl ErrorCode {
             ErrorCode::MismatchedBlockEnd => "E_INKER_MISMATCHED_BLOCK_END",
             ErrorCode::InvalidExpression => "E_INKER_INVALID_EXPRESSION",
             ErrorCode::InvalidIterable => "E_INKER_INVALID_ITERABLE",
-            ErrorCode::UnknownHelper => "E_INKER_UNKNOWN_HELPER",
             ErrorCode::HelperThrow => "E_INKER_HELPER_THROW",
             ErrorCode::NapiRequired => "E_INKER_NAPI_REQUIRED",
         }
@@ -160,11 +158,10 @@ mod tests {
             ),
             (ErrorCode::InvalidExpression, "E_INKER_INVALID_EXPRESSION"),
             (ErrorCode::InvalidIterable, "E_INKER_INVALID_ITERABLE"),
-            (ErrorCode::UnknownHelper, "E_INKER_UNKNOWN_HELPER"),
             (ErrorCode::HelperThrow, "E_INKER_HELPER_THROW"),
             (ErrorCode::NapiRequired, "E_INKER_NAPI_REQUIRED"),
         ];
-        assert_eq!(pairs.len(), 23, "23 codes total post-55.1");
+        assert_eq!(pairs.len(), 22, "22 codes total");
         for (code, expected) in pairs {
             assert_eq!(code.as_str(), *expected);
         }

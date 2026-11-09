@@ -76,7 +76,9 @@ describe("Templates — helpers option (constructor)", () => {
 			await tpl.render("x", {});
 			expect.fail("should have thrown — bogus() not in frozen name set");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_UNKNOWN_HELPER");
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_UNKNOWN_IDENTIFIER",
+			);
 		}
 	});
 
@@ -89,25 +91,26 @@ describe("Templates — helpers option (constructor)", () => {
 		expect(await tpl.render("x", {})).toBe("v2");
 	});
 
-	it("without helpers option, a non-global {{ name(…) }} throws at parse time", async () => {
+	it("a call to a name that is neither helper, global nor data fails at render time", async () => {
 		const tpl = new Templates({ root });
-		// `foo` is neither a registered helper nor an Edge-core global (62-7),
-		// so it is still rejected at parse time (typo detection). The Edge globals
-		// ARE always registered, so the message lists them rather than saying
-		// "no helpers are registered".
-		fs.writeFileSync(path.join(root, "x.inker"), "{{ foo() }}");
+		// The callee is resolved by V8 when the expression runs (Edge
+		// semantics); the error names it and suggests the closest helper.
+		fs.writeFileSync(path.join(root, "x.inker"), "{{ truncat('abc', 1) }}");
 		try {
 			await tpl.render("x", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_UNKNOWN_HELPER");
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_UNKNOWN_IDENTIFIER",
+			);
+			expect(asTyped<InkerRenderError>(e).message).toContain("'truncat'");
 			expect(asTyped<InkerRenderError>(e).message).toContain(
-				"Unknown helper 'foo'",
+				"did you mean 'truncate'",
 			);
 		}
 	});
 
-	it("renderString validates helper names at parse time too", () => {
+	it("renderString resolves callees at render time too", () => {
 		const helpers = new Map<string, HelperFn>([["t", () => "T"]]);
 		const tpl = new Templates({ root, helpers });
 		expect(tpl.renderString("{{ t() }}", {})).toBe("T");
@@ -115,8 +118,44 @@ describe("Templates — helpers option (constructor)", () => {
 			tpl.renderString("{{ bogus() }}", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_UNKNOWN_HELPER");
+			expect(asTyped<InkerRenderError>(e).code).toBe(
+				"E_INKER_UNKNOWN_IDENTIFIER",
+			);
 		}
+	});
+
+	it("calls a function passed in the render data", () => {
+		const tpl = new Templates({ root });
+		const fmt = (n: unknown): string => `n=${String(n)}`;
+		expect(tpl.renderString("{{ fmt(2) }}", { fmt })).toBe("n=2");
+		expect(
+			tpl.renderString("@if(can('edit'))yes@endif", { can: () => true }),
+		).toBe("yes");
+	});
+
+	it("calls a function shared through a renderer", () => {
+		const tpl = new Templates({ root });
+		const r = tpl
+			.createRenderer()
+			.share({ t: (k: unknown) => `<${String(k)}>` });
+		expect(r.renderString("{{ t('k') }}")).toBe("&lt;k&gt;");
+	});
+
+	it("calls a function received as a component prop", async () => {
+		const dir = fs.mkdtempSync(path.join(root, "comp-"));
+		fs.mkdirSync(path.join(dir, "components"));
+		fs.writeFileSync(
+			path.join(dir, "components", "price.inker"),
+			"{{ fmt(amount) }}",
+		);
+		fs.writeFileSync(
+			path.join(dir, "page.inker"),
+			"@!component('price', { fmt: fmt, amount: 3 })",
+		);
+		const tpl = new Templates({ root: dir });
+		expect(
+			await tpl.render("page", { fmt: (n: unknown) => `${String(n)} EUR` }),
+		).toBe("3 EUR");
 	});
 
 	it("renderString emits raw SafeString helper return values", () => {

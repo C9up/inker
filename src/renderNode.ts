@@ -404,8 +404,17 @@ function evalExpr(
 		if (cause instanceof InkerRenderError) throw cause;
 		if (isStackOverflow(cause)) throw depthError(cause);
 		const msg = errMessage(cause);
-		// A bare unknown identifier / navigating into null/undefined maps to the
-		// same typed code the retired Rust path resolver produced.
+		const callee = unknownCallee(msg, scope, helpers);
+		if (callee !== undefined) {
+			throw new InkerRenderError(
+				"E_INKER_UNKNOWN_IDENTIFIER",
+				`'${callee}' is not a helper, a global or a function in the render data${suggestHelper(callee, helpers)}`,
+				{ line: pos?.line, column: pos?.column, expression: source },
+				{ cause },
+			);
+		}
+		// Navigating into null/undefined maps to the same typed code the retired
+		// Rust path resolver produced.
 		const code = /is not defined|cannot read propert/i.test(msg)
 			? "E_INKER_UNKNOWN_IDENTIFIER"
 			: "E_INKER_INVALID_EXPRESSION";
@@ -416,6 +425,53 @@ function evalExpr(
 			{ cause },
 		);
 	}
+}
+
+/**
+ * The bare name a failed call was made through, when nothing in scope carries
+ * it — the typo case the parser used to reject before callees were resolved
+ * at render time.
+ */
+function unknownCallee(
+	message: string,
+	scope: object,
+	helpers: object,
+): string | undefined {
+	const match = /^([A-Za-z_$][\w$]*) is not a function$/.exec(message);
+	const name = match?.[1];
+	if (name === undefined || name in scope || name in helpers) return undefined;
+	return name;
+}
+
+/** "did you mean …" for the closest helper name, when one is close enough. */
+function suggestHelper(name: string, helpers: object): string {
+	let best: string | undefined;
+	let bestDistance = Math.max(2, Math.floor(name.length / 3)) + 1;
+	for (const candidate of Object.keys(helpers)) {
+		const distance = editDistance(name, candidate);
+		if (distance < bestDistance) {
+			best = candidate;
+			bestDistance = distance;
+		}
+	}
+	return best === undefined ? "" : ` — did you mean '${best}'?`;
+}
+
+function editDistance(a: string, b: string): number {
+	let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+	for (let i = 1; i <= a.length; i++) {
+		const current = [i];
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			current[j] = Math.min(
+				(previous[j] ?? 0) + 1,
+				(current[j - 1] ?? 0) + 1,
+				(previous[j - 1] ?? 0) + cost,
+			);
+		}
+		previous = current;
+	}
+	return previous[b.length] ?? 0;
 }
 
 /**

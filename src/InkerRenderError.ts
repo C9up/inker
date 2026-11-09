@@ -20,7 +20,6 @@ export type InkerErrorCode =
 	| "E_INKER_MISMATCHED_BLOCK_END"
 	| "E_INKER_INVALID_EXPRESSION"
 	| "E_INKER_INVALID_ITERABLE"
-	| "E_INKER_UNKNOWN_HELPER"
 	| "E_INKER_HELPER_THROW"
 	| "E_INKER_UNKNOWN_TAG"
 	/** `@dd(expr)` — the render was deliberately stopped after dumping. */

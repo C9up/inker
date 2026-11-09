@@ -67,9 +67,9 @@ export declare class InkerAst {
 /**
  * Parse a template source string into an opaque `InkerAst` handle.
  *
- * `helpers_set` lists the helper names the parser should accept inside
- * `{{ name(...) }}` call positions. Names not in this set produce an
- * `E_INKER_UNKNOWN_HELPER` at parse time (no rendering required).
+ * `helpers_set` lists the registered helper names. A call to any other name
+ * is kept as a verbatim expression: the callee may come from the render data,
+ * and the Node renderer resolves it when the expression runs.
  *
  * `custom_tags_set` lists the runtime-registered custom-tag names (Edge
  * `registerTag`); the lexer/parser recognise `@<name>(args)` for each and emit

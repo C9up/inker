@@ -227,7 +227,9 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 		expect(() => render("{{ process.env.SECRET }}", {})).toThrowError(
 			/E_INKER_UNKNOWN_IDENTIFIER|cannot read propert/i,
 		);
-		expect(() => render("{{ require('fs') }}", {})).toThrowError(/E_INKER/);
+		expect(() => render("{{ require('fs') }}", {})).toThrowError(
+			/'require' is not a helper/,
+		);
 	});
 
 	it("a legitimate data/helper name still wins over the global shadow", () => {

@@ -328,30 +328,6 @@ fn fail_invalid_expression(
     fail_with_code(cursor, ErrorCode::InvalidExpression, reason, offset)
 }
 
-fn fail_unknown_helper(cursor: &Cursor, name: &str, offset: usize) -> InkerError {
-    let (line, column) = position_at(cursor, offset);
-    let mut registered: Vec<&String> = cursor.helpers.iter().collect();
-    registered.sort();
-    let shown: Vec<&str> = registered.iter().take(5).map(|s| s.as_str()).collect();
-    let shown = shown.join(", ");
-    let overflow = if registered.len() > 5 { ", …" } else { "" };
-    let hint = if registered.is_empty() {
-        "no helpers are registered".to_string()
-    } else {
-        format!("registered helpers: {shown}{overflow}")
-    };
-    let mut e = InkerError::new(
-        ErrorCode::UnknownHelper,
-        format!("Unknown helper '{name}' at line {line}, column {column} — {hint}"),
-    )
-    .with_pos(line, column)
-    .with_expr(name);
-    if let Some(t) = &cursor.template_path {
-        e = e.with_template(t.clone());
-    }
-    e
-}
-
 fn skip_whitespace(cursor: &mut Cursor) {
     while cursor.pos < cursor.chars.len() {
         let c = cursor.chars[cursor.pos];
@@ -700,8 +676,16 @@ fn parse_primary_inner(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 
         // Function call — `name(` IMMEDIATELY (no whitespace tolerance).
         if cursor.chars.get(cursor.pos) == Some(&'(') {
+            // A callee that is not a registered helper may still be a function
+            // the render data, a shared value or a component prop provides
+            // (Edge resolves it as `state.<name>`). Leave it to the full-JS
+            // `Raw` path; V8 resolves the name when the expression runs.
             if !cursor.helpers.contains(&name) {
-                return Err(fail_unknown_helper(cursor, &name, ident_start));
+                return Err(fail_parse(
+                    cursor,
+                    format!("'{name}' is not a registered helper"),
+                    ident_start,
+                ));
             }
             cursor.pos += 1;
             let args = parse_call_args(cursor)?;
@@ -1146,8 +1130,8 @@ fn parse_or(cursor: &mut Cursor) -> Result<Expression, InkerError> {
 
 /// Fallback for a source the restricted grammar could not parse: relax a
 /// grammar-shape `ParseError` into a full-JS `Raw` node (evaluated by the Node
-/// renderer in V8 — Edge parity, 62-2). Semantic guards (unknown helper,
-/// proto-pollution) are preserved and still error at parse time.
+/// renderer in V8 — Edge parity, 62-2). Semantic guards (proto-pollution) are
+/// preserved and still error at parse time.
 fn raw_fallback(
     source: &str,
     line: u32,
@@ -1155,10 +1139,10 @@ fn raw_fallback(
     strict_err: InkerError,
 ) -> Result<Expression, InkerError> {
     // Only RELAX pure grammar-shape rejections (`ParseError`: method calls,
-    // ternary, arrow fns, arithmetic, arrays, unary minus, …) into a full-JS
-    // `Raw` node. PRESERVE the semantic guards — unknown helper (`UnknownHelper`,
-    // typo detection) and proto-pollution / reserved-shorthand (`InvalidExpression`)
-    // keep erroring at parse time. A rich expression that CALLS a registered
+    // ternary, arrow fns, arithmetic, arrays, unary minus, calls to a name that
+    // is not a registered helper, …) into a full-JS `Raw` node. PRESERVE the
+    // semantic guards — proto-pollution / reserved-shorthand
+    // (`InvalidExpression`) keep erroring at parse time. A rich expression that CALLS a registered
     // helper (`filter(u => can(u))`) is a `ParseError` (method call) → `Raw`; the
     // Node renderer evaluates it in V8 with the helper in scope (62-2 Edge pivot).
     if strict_err.code != ErrorCode::ParseError {
@@ -1326,9 +1310,13 @@ mod tests {
     }
 
     #[test]
-    fn call_unknown_helper_errors() {
-        let e = parse_expression("upper('a')", 1, 1, &opts_no_helpers()).unwrap_err();
-        assert_eq!(e.code, ErrorCode::UnknownHelper);
+    fn call_to_a_non_helper_falls_back_to_raw() {
+        // The callee may be a function from the render data; V8 resolves it.
+        let e = parse_expression("fmt(2)", 1, 1, &opts_no_helpers()).unwrap();
+        match e {
+            Expression::Raw { source, .. } => assert_eq!(source, "fmt(2)"),
+            _ => panic!("expected raw"),
+        }
     }
 
     #[test]
