@@ -759,6 +759,29 @@ function isHelperFn(value: unknown): value is HelperFn {
 	return typeof value === "function";
 }
 
+/** Module-private key of the renderer entry points on {@link Templates}. */
+const RENDER_WITH_SHARED: unique symbol = Symbol("inker.renderWithShared");
+
+const NO_SHARED_STATE: Readonly<Record<string, unknown>> = Object.freeze({});
+
+/**
+ * A render's own top frame: the shared state, then the per-call data on top.
+ * Always a fresh object, so `@assign(count = …)` lands here and never in the
+ * object the caller passed (Edge renders against `{ ...sharedState, ...state }`
+ * the same way).
+ */
+function renderState(
+	sharedState: Readonly<Record<string, unknown>>,
+	data: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+	const state: Record<string, unknown> = Object.create(null);
+	Object.assign(state, sharedState);
+	if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+		Object.assign(state, data);
+	}
+	return state;
+}
+
 export class Templates {
 	readonly #root: string;
 	// Not readonly: `configure()` can swap it on a live engine (Edge parity).
@@ -1147,7 +1170,15 @@ export class Templates {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): Promise<string> {
-		const step = this.#renderSteps(name, data);
+		return this.#render(name, data, NO_SHARED_STATE);
+	}
+
+	async #render(
+		name: string,
+		data: Readonly<Record<string, unknown>>,
+		shared: Readonly<Record<string, unknown>>,
+	): Promise<string> {
+		const step = this.#renderSteps(name, data, shared);
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
@@ -1175,7 +1206,15 @@ export class Templates {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
-		const step = this.#renderSteps(name, data);
+		return this.#renderSync(name, data, NO_SHARED_STATE);
+	}
+
+	#renderSync(
+		name: string,
+		data: Readonly<Record<string, unknown>>,
+		shared: Readonly<Record<string, unknown>>,
+	): string {
+		const step = this.#renderSteps(name, data, shared);
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
@@ -1191,15 +1230,18 @@ export class Templates {
 	*#renderSteps(
 		name: string,
 		data: Readonly<Record<string, unknown>>,
+		shared: Readonly<Record<string, unknown>>,
 	): RenderSteps {
 		// Plugins run before anything is resolved — one may register a global or
 		// a tag this very render depends on.
 		this.#executePlugins();
 		const { root, validated, absPath } = this.#resolveTemplateFile(name);
 
-		// Registered globals sit UNDER the caller's data. The data itself is
-		// never inspected: it is plain JS the walker evaluates in V8.
-		const state = this.#withGlobals(data);
+		// Registered globals and the renderer's shared values sit UNDER the
+		// caller's data. The data itself is never inspected: it is plain JS the
+		// walker evaluates in V8.
+		const sharedState = this.#sharedState(shared);
+		const state = renderState(sharedState, data);
 
 		const entryAst = askedForAst(yield loadRequest(absPath, validated, root));
 		const composed = yield* this.#compose(
@@ -1232,6 +1274,7 @@ export class Templates {
 			tags: this.#tags,
 			templateName: name,
 			stacks,
+			sharedState,
 		};
 
 		// No layout → render the child directly (`@section`s render inline).
@@ -1300,6 +1343,14 @@ export class Templates {
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
+		return this.#renderString(source, data, NO_SHARED_STATE);
+	}
+
+	#renderString(
+		source: string,
+		data: Readonly<Record<string, unknown>>,
+		shared: Readonly<Record<string, unknown>>,
+	): string {
 		this.#executePlugins();
 		// T4 + P15: strip ALL U+FEFF (BOM) characters, not just a leading one.
 		// `validateName` already refuses BOM in any position of a template
@@ -1363,13 +1414,15 @@ export class Templates {
 		// No disk directives here (rejected above), so a bare node list renders
 		// through the Node renderer (62-2 pivot) with the helpers in scope.
 		// Globals apply to inline sources too, on the same precedence as render().
-		const state = this.#withGlobals(data);
+		const sharedState = this.#sharedState(shared);
+		const state = renderState(sharedState, data);
 		const stacks = new Stacks();
 		return this.#applyOutput(
 			stacks.fillPlaceholders(
 				renderNodeTree(this.#astNodes(ast), state, this.#renderHelpers(), {
 					tags: this.#tags,
 					stacks,
+					sharedState,
 				}),
 			),
 		);
@@ -1541,21 +1594,42 @@ export class Templates {
 	}
 
 	/**
-	 * Merge the registered globals UNDER the caller's data — per-render state
-	 * wins on a name collision, matching Edge's precedence. Always a fresh
-	 * object, even with no global registered: it is the render's own top frame,
-	 * so `@assign(count = …)` lands here and never in the object the caller
-	 * passed (Edge renders against `{ ...sharedState, ...state }` the same way).
+	 * The state every template AND every component of a render sees (Edge
+	 * `#sharedState`): the registered globals, overlaid with what the renderer
+	 * `share()`d. Components get it under their props; the per-call data stays
+	 * with the template it was passed to.
 	 */
-	#withGlobals(
-		data: Readonly<Record<string, unknown>>,
-	): Record<string, unknown> {
+	#sharedState(
+		shared: Readonly<Record<string, unknown>>,
+	): Readonly<Record<string, unknown>> {
 		const merged: Record<string, unknown> = Object.create(null);
 		for (const [name, value] of this.#globals) merged[name] = value;
-		if (typeof data === "object" && data !== null && !Array.isArray(data)) {
-			Object.assign(merged, data);
-		}
+		Object.assign(merged, shared);
 		return merged;
+	}
+
+	/**
+	 * Entry points for a {@link TemplateRenderer}: the same renders, with the
+	 * renderer's shared values kept apart from the per-call data so components
+	 * can see them. Keyed by a module-private symbol, so only the renderer
+	 * reaches it.
+	 */
+	[RENDER_WITH_SHARED](shared: Readonly<Record<string, unknown>>): {
+		render(
+			name: string,
+			data: Readonly<Record<string, unknown>>,
+		): Promise<string>;
+		renderSync(name: string, data: Readonly<Record<string, unknown>>): string;
+		renderString(
+			source: string,
+			data: Readonly<Record<string, unknown>>,
+		): string;
+	} {
+		return {
+			render: (name, data) => this.#render(name, data, shared),
+			renderSync: (name, data) => this.#renderSync(name, data, shared),
+			renderString: (source, data) => this.#renderString(source, data, shared),
+		};
 	}
 
 	/** Run the registered `raw` transforms over a template source. */
@@ -2370,14 +2444,17 @@ export class TemplateRenderer {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): Promise<string> {
-		return this.#templates.render(name, { ...this.#shared, ...data });
+		return this.#templates[RENDER_WITH_SHARED](this.#shared).render(name, data);
 	}
 
 	renderString(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
-		return this.#templates.renderString(source, { ...this.#shared, ...data });
+		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
+			source,
+			data,
+		);
 	}
 
 	/** Render a template from disk, synchronously (AdonisJS `renderSync`). */
@@ -2385,7 +2462,10 @@ export class TemplateRenderer {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
-		return this.#templates.renderSync(name, { ...this.#shared, ...data });
+		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderSync(
+			name,
+			data,
+		);
 	}
 
 	/** Render a template string (Edge `renderRawSync`). Alias of `renderString`. */

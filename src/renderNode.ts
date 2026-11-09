@@ -682,6 +682,12 @@ export interface NodeRenderContext {
 	readonly templateName?: string;
 	/** Runtime-registered custom tags; a `@<name>(...)` resolves its handler here. */
 	readonly tags?: TagMap;
+	/**
+	 * Engine globals plus the renderer's `share()`d values (Edge
+	 * `#sharedState`). Every component scope starts from it, under its props;
+	 * the caller's per-call data never reaches a component.
+	 */
+	readonly sharedState?: Readonly<Record<string, unknown>>;
 }
 
 /** Split a node list into its top-level `@section` blocks and the rest (the
@@ -1391,6 +1397,7 @@ function* renderComponent(
 		filename: ctx.templateName,
 	});
 	const componentScope = {
+		...ctx.sharedState,
 		...props,
 		$props: makeProps(props),
 		$slots,
@@ -1406,6 +1413,7 @@ function* renderComponent(
 		components: ctx.components,
 		tags: ctx.tags,
 		stacks: ctx.stacks,
+		sharedState: ctx.sharedState,
 		slots,
 		context: $context,
 		// A component nested in THIS one must see this component as its caller;

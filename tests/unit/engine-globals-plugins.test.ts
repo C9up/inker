@@ -331,3 +331,55 @@ describe("inker > the loader surface Edge puts on edge.loader", () => {
 		);
 	});
 });
+
+describe("inker > components see the engine globals and shared state", () => {
+	function withFiles(files: Record<string, string>): Templates {
+		const dir = fs.mkdtempSync(path.join(root, "comp-"));
+		for (const [name, source] of Object.entries(files)) {
+			const file = path.join(dir, `${name}.inker`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, source);
+		}
+		return new Templates({ root: dir, cacheMode: "never" });
+	}
+
+	it("reads a non-callable global and a share()d value", async () => {
+		const t = withFiles({
+			"components/title": "<h1>{{ siteName }} / {{ request.url }}</h1>",
+			page: "@!component('title')",
+		});
+		t.global("siteName", "Acme");
+		const r = t.createRenderer().share({ request: { url: "/x" } });
+		expect(await r.render("page")).toBe("<h1>Acme / /x</h1>");
+		expect(r.renderSync("page")).toBe("<h1>Acme / /x</h1>");
+	});
+
+	it("lets a prop of the same name win over a global", async () => {
+		const t = withFiles({
+			"components/title": "{{ siteName }}",
+			page: "@!component('title', { siteName: 'Prop' })",
+		});
+		t.global("siteName", "Acme");
+		expect(await t.render("page")).toBe("Prop");
+	});
+
+	it("keeps the caller's per-render data out of the component", async () => {
+		const t = withFiles({
+			"components/who": "[{{ user }}]",
+			page: "@!component('who')",
+		});
+		t.global("siteName", "Acme");
+		const r = t.createRenderer().share({ request: { url: "/x" } });
+		expect(await r.render("page", { user: "Ada" })).toBe("[]");
+	});
+
+	it("reaches a nested component too", async () => {
+		const t = withFiles({
+			"components/outer": "@!component('inner')",
+			"components/inner": "{{ siteName }}",
+			page: "@!component('outer')",
+		});
+		t.global("siteName", "Acme");
+		expect(await t.render("page")).toBe("Acme");
+	});
+});
