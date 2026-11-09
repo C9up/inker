@@ -413,148 +413,6 @@ function callNative<T>(fn: () => T): T {
 	}
 }
 
-// JS `Map` / `Set` instances do not cross the NAPI boundary as serde_json
-// values (a Map serialises to `{}`), so the renderer would see them as empty.
-// Encode them into the array-of-pairs / array-of-values shapes the Rust
-// renderer's destructured-`each` iteration expects (mirrors the pre-Rust TS
-// renderer's `Map.entries()` / `Set` iteration). Plain objects and arrays are
-// recursed (to catch nested Maps); Dates / class instances pass through so
-// napi-rs serialises them as it did before.
-// Guard against circular references: the Rust engine serialises the entire data
-// tree across the NAPI boundary, so a cycle would otherwise overflow the stack
-// here (or fail opaquely at the serde boundary). Surface a clear, catchable
-// error instead. `seen` tracks the current ancestor chain (added on entry,
-// removed on exit) so shared-but-acyclic subgraphs (a DAG) are not false-flagged.
-function enterCycleGuard(value: object, seen: WeakSet<object>): void {
-	if (seen.has(value)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_EXPRESSION",
-			"render data contains a circular reference — Inker serialises the full data tree to the Rust engine and cannot encode cyclic structures",
-		);
-	}
-	seen.add(value);
-}
-
-const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
-const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
-
-function encodeData(
-	value: unknown,
-	seen: WeakSet<object> = new WeakSet(),
-): unknown {
-	if (value === undefined) {
-		// An explicit `undefined` own-property is silently dropped by JSON
-		// encoding, after which the Rust engine treats the key as missing and
-		// throws E_INKER_UNKNOWN_IDENTIFIER. The pre-Rust TS engine rendered null
-		// and undefined identically (empty string, falsy). Normalise undefined to
-		// null to preserve that behavior; the engine already maps the `undefined`
-		// literal to null too.
-		return null;
-	}
-	if (value instanceof Map) return encodeMap(value, seen);
-	if (value instanceof Set) return encodeSet(value, seen);
-	if (Array.isArray(value)) return encodeArray(value, seen);
-	if (value !== null && typeof value === "object") {
-		const proto = Object.getPrototypeOf(value);
-		if (proto === Object.prototype || proto === null) {
-			return encodePlainObject(value, seen);
-		}
-		// Date, class instance, etc. — let napi-rs serialise as before.
-		return value;
-	}
-	if (typeof value === "bigint") return encodeBigInt(value);
-	if (typeof value === "number" && !Number.isFinite(value)) {
-		// NaN / ±Infinity have no JSON representation (serde encodes them as null,
-		// which would render as empty). The pre-Rust TS engine rendered the literal
-		// "NaN" / "Infinity"; that is unreachable through the JSON boundary, so fail
-		// loudly instead of rendering empty.
-		throw new InkerRenderError(
-			"E_INKER_INVALID_EXPRESSION",
-			`Cannot pass non-finite number ${value} as template data — NaN and Infinity have no representation across the engine boundary; format it via a helper before rendering`,
-		);
-	}
-	return value;
-}
-
-function encodeMap(
-	value: Map<unknown, unknown>,
-	seen: WeakSet<object>,
-): unknown[] {
-	enterCycleGuard(value, seen);
-	const out = Array.from(value, ([k, v]) => [
-		encodeData(k, seen),
-		encodeData(v, seen),
-	]);
-	seen.delete(value);
-	return out;
-}
-
-function encodeSet(value: Set<unknown>, seen: WeakSet<object>): unknown[] {
-	enterCycleGuard(value, seen);
-	const out = Array.from(value, (v) => encodeData(v, seen));
-	seen.delete(value);
-	return out;
-}
-
-/**
- * Structural sharing: only allocate a new array if a descendant actually
- * changed (a Map/Set was encoded). The common Map/Set-free data tree is
- * returned by reference, avoiding a full deep clone on every render.
- */
-function encodeArray(value: unknown[], seen: WeakSet<object>): unknown {
-	enterCycleGuard(value, seen);
-	let changed = false;
-	const out: unknown[] = new Array(value.length);
-	for (let i = 0; i < value.length; i++) {
-		// Sparse holes survive JSON encoding as `null`, which the Rust engine
-		// would silently iterate/index. The pre-Rust TS engine rejected holes
-		// with a typed error; restore that here (eager, since the hole is only
-		// visible JS-side — slightly stricter than the old lazy check, which
-		// only fired when the hole was actually iterated or indexed).
-		if (!(i in value)) {
-			seen.delete(value);
-			throw new InkerRenderError(
-				"E_INKER_INVALID_ITERABLE",
-				`Sparse array hole at index ${i} — Inker does not support sparse arrays; fill holes with explicit values`,
-			);
-		}
-		const encoded = encodeData(value[i], seen);
-		if (encoded !== value[i]) changed = true;
-		out[i] = encoded;
-	}
-	seen.delete(value);
-	return changed ? out : value;
-}
-
-/** Encode a plain object's own entries, sharing the reference when unchanged. */
-function encodePlainObject(value: object, seen: WeakSet<object>): unknown {
-	enterCycleGuard(value, seen);
-	let changed = false;
-	const out: Record<string, unknown> = {};
-	for (const [k, v] of Object.entries(value)) {
-		const encoded = encodeData(v, seen);
-		if (encoded !== v) changed = true;
-		out[k] = encoded;
-	}
-	seen.delete(value);
-	return changed ? out : value;
-}
-
-/**
- * `bigint` cannot cross the NAPI boundary (serde JSON has no bigint). Widen to
- * `Number` when it round-trips exactly; refuse the lossy case rather than
- * silently dropping precision (the pre-Rust TS engine used `String(value)`).
- */
-function encodeBigInt(value: bigint): number {
-	if (value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT) {
-		return Number(value);
-	}
-	throw new InkerRenderError(
-		"E_INKER_INVALID_EXPRESSION",
-		`Cannot pass bigint ${value} as template data — it exceeds Number.MAX_SAFE_INTEGER and cannot cross the engine boundary without precision loss; convert it to a string via a helper or a precomputed field`,
-	);
-}
-
 /**
  * Validate `options.root` and return its canonical (realpath'd) absolute path.
  * Refuses non-absolute, filesystem/drive-root, missing, non-directory, and
@@ -1342,16 +1200,9 @@ export class Templates {
 		this.#executePlugins();
 		const { root, validated, absPath } = this.#resolveTemplateFile(name);
 
-		// Registered globals sit UNDER the caller's data; validation then runs on
-		// the merged tree, so a bad global is rejected here rather than surfacing
-		// as a render-time fault in an unrelated template.
+		// Registered globals sit UNDER the caller's data. The data itself is
+		// never inspected: it is plain JS the walker evaluates in V8.
 		const state = this.#withGlobals(data);
-
-		// Validate the data tree (rejects NaN / ±Infinity / out-of-range bigint /
-		// sparse holes / circular refs) — the Node renderer evaluates the ORIGINAL
-		// data in V8 (Maps/Sets intact), so `encodeData`'s result is discarded and
-		// only its guard side-effects are kept.
-		encodeData(state);
 
 		const entryAst = askedForAst(yield loadRequest(absPath, validated, root));
 		const composed = yield* this.#compose(
@@ -1516,8 +1367,6 @@ export class Templates {
 		// through the Node renderer (62-2 pivot) with the helpers in scope.
 		// Globals apply to inline sources too, on the same precedence as render().
 		const state = this.#withGlobals(data);
-		// Validate the data tree (guard side-effects only; render the original).
-		encodeData(state);
 		const stacks = new Stacks();
 		return this.#applyOutput(
 			stacks.fillPlaceholders(

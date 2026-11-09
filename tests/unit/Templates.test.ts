@@ -98,18 +98,11 @@ describe("Templates — render() filesystem behaviour", () => {
 		}
 	});
 
-	it("renderString throws a clear error on circular render data (not a stack overflow)", () => {
+	it("renderString renders data that holds a circular reference", () => {
 		const templates = new Templates({ root });
 		const cyclic: Record<string, unknown> = { name: "x" };
 		cyclic.self = cyclic;
-		try {
-			templates.renderString("hi {{ name }}", cyclic);
-			expect.fail("should have thrown");
-		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_INVALID_EXPRESSION",
-			);
-		}
+		expect(templates.renderString("hi {{ name }}", cyclic)).toBe("hi x");
 	});
 
 	it("renderString renders an integer-valued number without a trailing .0 (JS String semantics)", () => {

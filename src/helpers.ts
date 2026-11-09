@@ -1,26 +1,14 @@
 import type { SafeString } from "./SafeString.js";
 
 /**
- * A caller-registered template helper. Receives the in-scope-evaluated
- * argument values and returns a string (HTML-escaped by the renderer) or a
- * `SafeString` (emitted verbatim). Re-homed here from the deleted `render.ts`
- * when the lex/parse/render hot path moved to the Rust engine (Story 55.1).
- *
- * NOTE (55.1): argument values are evaluated in the Rust engine and cross the
- * NAPI boundary as JSON, so they are JSON-coerced before reaching the helper:
- * a `Date` arrives as a string, a `bigint` as a (possibly lossy) number, and
- * `NaN` / `±Infinity` as `null`. Pass pre-stringified values for any type that
- * does not survive JSON if the helper needs the original form.
- */
-/**
  * A helper callable from a template expression.
  *
  * The return type is open because a helper feeds more than output: `@if(can(u))`
  * reads a boolean, `@each(r in rows())` an iterable, and `{{ await who() }}` a
  * promise (reachable on the `render()` path — a synchronous render raises
  * rather than emitting a pending promise, the line Adonis draws between
- * `render` and `renderSync`). What may actually be INTERPOLATED is enforced at
- * render time, where a non-scalar raises a typed error naming the expression.
+ * `render` and `renderSync`). Arguments are the real JS values evaluated in
+ * V8: a `Date` stays a `Date`, a `bigint` a `bigint`.
  */
 export type HelperFn = (...args: readonly unknown[]) => unknown;
 
