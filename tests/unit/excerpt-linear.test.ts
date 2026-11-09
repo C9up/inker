@@ -19,9 +19,9 @@ describe("excerpt tag stripping", () => {
 		expect(performance.now() - started).toBeLessThan(50);
 	});
 
-	it("still strips tags, and keeps an unclosed '<' at the end", () => {
+	it("still strips tags; a stray '<' opens a tag, as in Edge", () => {
 		expect(excerpt("<p>hello <b>world</b></p>", 100)).toBe("hello world");
-		expect(excerpt("a < b", 100)).toBe("a < b");
-		expect(excerpt("x <b>y</b> <", 100)).toBe("x y <");
+		expect(excerpt("a < b", 100)).toBe("a");
+		expect(excerpt("x <b>y</b> <", 100)).toBe("x y");
 	});
 });

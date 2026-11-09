@@ -1,4 +1,5 @@
 import { SafeString } from "./SafeString.js";
+import { type TruncatiseOptions, truncatise } from "./truncatise.js";
 
 /**
  * Edge-core built-in globals (62-7). Always in scope for every expression,
@@ -129,93 +130,40 @@ interface TruncateOptions {
 	readonly strict?: boolean;
 }
 
-// The characters truncatise (behind Edge's truncate/excerpt) treats as part
-// of a word when completing one.
-const WORD_CHAR_RE = /[a-zA-ZÇ-Ü']/i;
-
-/**
- * Edge's character truncation (`@poppinss/string` → truncatise): trim, keep
- * the text whole when it fits, else cut once `length` characters are counted
- * — at the end of the current word unless `strict` — and append the suffix.
- */
-function truncateText(
-	value: string,
+/** Edge's globals: whole words unless `strict` (`completeWords` overrides). */
+function truncatiseOptions(
 	length: number,
 	options: TruncateOptions,
-): string {
-	const text = value.trim();
-	if (text.length <= length) return text;
+	stripHtml: boolean,
+): TruncatiseOptions {
 	const completeWords =
 		options.completeWords !== undefined
 			? options.completeWords
 			: !options.strict;
-	const suffix = typeof options.suffix === "string" ? options.suffix : "...";
-	let end = 0;
-	while (end < text.length) {
-		end += 1;
-		if (end < length) continue;
-		if (!completeWords) break;
-		const current = text.charAt(end - 1);
-		const next = text.charAt(end);
-		if (!WORD_CHAR_RE.test(current) || !WORD_CHAR_RE.test(next)) break;
-	}
-	const cut = text.slice(0, end);
-	return (end < text.length ? cut + suffix : cut).trim();
+	return {
+		length,
+		strict: !completeWords,
+		stripHtml,
+		suffix: typeof options.suffix === "string" ? options.suffix : "...",
+	};
 }
 
+/** Shorten text, keeping its tags and closing the ones left open (Edge). */
 function truncate(
 	value: unknown,
 	length = 20,
 	options: TruncateOptions = {},
 ): string {
-	return truncateText(str(value), length, options);
+	return truncatise(str(value), truncatiseOptions(length, options, false));
 }
 
+/** Shorten text with its tags stripped (Edge). */
 function excerpt(
 	value: unknown,
 	length = 20,
 	options: TruncateOptions = {},
 ): string {
-	const text = str(value)
-		.trim()
-		.replace(/<br( \/)?>/gi, " ");
-	return truncateText(stripTags(stripComments(text)), length, options);
-}
-
-/** Remove `<!-- … -->` comments in one pass (an unclosed one is kept). */
-function stripComments(text: string): string {
-	let out = "";
-	let i = 0;
-	while (i < text.length) {
-		const open = text.indexOf("<!--", i);
-		if (open === -1) break;
-		const close = text.indexOf("-->", open + 4);
-		if (close === -1) break;
-		out += text.slice(i, open);
-		i = close + 3;
-	}
-	return out + text.slice(i);
-}
-
-/**
- * Remove every `<…>` tag, as `/<[^>]*>/g` would, in ONE pass. The regex is
- * quadratic on a long run of `<` with no `>` (each `<` rescans to the end),
- * and excerpt's input is user-authored text. NAMED DEVIATION (hardening):
- * Edge strips with a regex of the same shape and shares the slowdown.
- */
-function stripTags(text: string): string {
-	let out = "";
-	let i = 0;
-	while (i < text.length) {
-		const open = text.indexOf("<", i);
-		if (open === -1) break;
-		const close = text.indexOf(">", open + 1);
-		// No `>` after this `<`: no tag can close anywhere further on.
-		if (close === -1) break;
-		out += text.slice(i, open);
-		i = close + 1;
-	}
-	return out + text.slice(i);
+	return truncatise(str(value), truncatiseOptions(length, options, true));
 }
 
 /**
