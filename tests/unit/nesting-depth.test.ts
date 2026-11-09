@@ -49,7 +49,7 @@ describe("block nesting depth", () => {
 			const native = require(${JSON.stringify(binary)});
 			const src = "@if(true)".repeat(20000) + "x" + "@endif".repeat(20000);
 			try {
-				native.parseTemplate(src, [], [], [], "");
+				native.parseTemplate(src, [], [], [], "", []);
 				console.log("PARSED");
 			} catch (e) {
 				console.log(JSON.parse(e.message).code);

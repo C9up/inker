@@ -42,17 +42,19 @@ const fixturesRoot = path.resolve(
 // Edge-syntax migration — the fixture moved to `@`-tags and the new
 // newline-trim-after-tag feature removed the blank lines that followed each tag.
 // The diff was verified content-identical (only tag-adjacent whitespace changed).
+// RE-BASELINED 2026-11-09 (bug 516) for Edge's line-based newline model: a tag
+// line's indentation is dropped, a line break leads into content lines only,
+// and the page loses one leading and one trailing line break. Content unchanged.
 // Re-capture via `tests/__helpers__/capture-byte-parity.ts` (see procedure above).
 const BYTE_PARITY_EXPECTED_B64 = [
 	"PCFkb2N0eXBlIGh0bWw+CjxodG1sPjxib2R5Pgo8aGVhZGVyPldlbGNvbWUgJmx0O2JvbGQmZ3Q7",
-	"PC9oZWFkZXI+CjxzZWN0aW9uPgogIDxoMj5DYXJ0ICZsdDtJdGVtcyZndDs8L2gyPgogICAgPHVs",
-	"PgogICAgICAgIDxsaT5BUFBMRSDigJQgMS4yMDwvbGk+CiAgICAgICAgPGxpPlBFQVIg4oCUIDAu",
-	"ODA8L2xpPgogICAgICA8L3VsPgogIAogICAgPHA+YSA9IDE8L3A+CiAgICA8cD5iID0gMjwvcD4K",
-	"ICAKICA8cD48ZW0+bm90IGVzY2FwZWQ8L2VtPjwvcD4KICA8cD4mbHQ7Ym9sZCZndDs8L3A+CiAg",
-	"PHA+VDpoZWxsby53b3JsZDwvcD4KICA8cD4vdS91c2Vycy5zaG93LzQyPC9wPgoKICA8YnV0dG9u",
-	"IGRhdGEtbGFiZWw9IkNhcnQgJmx0O0l0ZW1zJmd0OyI+Q2FydCAmbHQ7SXRlbXMmZ3Q7IChhY3Rp",
-	"dmU9dHJ1ZSk8L2J1dHRvbj4KPC9zZWN0aW9uPgo8Zm9vdGVyPsKpIDIwMjY8L2Zvb3Rlcj4KCjwv",
-	"Ym9keT48L2h0bWw+Cg==",
+	"PC9oZWFkZXI+Cgo8c2VjdGlvbj4KICA8aDI+Q2FydCAmbHQ7SXRlbXMmZ3Q7PC9oMj4KICA8dWw+",
+	"CiAgICA8bGk+QVBQTEUg4oCUIDEuMjA8L2xpPgogICAgPGxpPlBFQVIg4oCUIDAuODA8L2xpPgog",
+	"IDwvdWw+CgogIDxwPmEgPSAxPC9wPgogIDxwPmIgPSAyPC9wPgoKICA8cD48ZW0+bm90IGVzY2Fw",
+	"ZWQ8L2VtPjwvcD4KICA8cD4mbHQ7Ym9sZCZndDs8L3A+CiAgPHA+VDpoZWxsby53b3JsZDwvcD4K",
+	"ICA8cD4vdS91c2Vycy5zaG93LzQyPC9wPgo8YnV0dG9uIGRhdGEtbGFiZWw9IkNhcnQgJmx0O0l0",
+	"ZW1zJmd0OyI+Q2FydCAmbHQ7SXRlbXMmZ3Q7IChhY3RpdmU9dHJ1ZSk8L2J1dHRvbj4KCjwvc2Vj",
+	"dGlvbj48Zm9vdGVyPsKpIDIwMjY8L2Zvb3Rlcj4KCgo8L2JvZHk+PC9odG1sPg==",
 ].join("");
 
 const BYTE_PARITY_EXPECTED = Buffer.from(

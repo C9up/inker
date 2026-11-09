@@ -10,7 +10,7 @@ const native = getNative();
 function render(source: string, data: Record<string, unknown> = {}): string {
 	// Declare the global names so bare `{{ camelCase(x) }}` calls parse.
 	const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-		native.parseTemplateJson(source, [...INKER_GLOBAL_NAMES], [], [], ""),
+		native.parseTemplateJson(source, [...INKER_GLOBAL_NAMES], [], [], "", []),
 	);
 	return renderNodeTree(ast.nodes, data, new Map());
 }
@@ -226,6 +226,7 @@ describe("Edge-core globals (62-7)", () => {
 				[],
 				[],
 				"",
+				[],
 			),
 		);
 		const out = renderNodeTree(

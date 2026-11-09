@@ -831,6 +831,16 @@ function isHelperFn(value: unknown): value is HelperFn {
 	return typeof value === "function";
 }
 
+/**
+ * Drop one line break from each end of a rendered page, as Edge's template
+ * does (`#trimTopBottomNewLines`): its line model leads into every content
+ * line, the first one included, and ends on the source's final line break.
+ * Partials and components are not trimmed — they render inside a page.
+ */
+function trimTopBottomNewLines(value: string): string {
+	return value.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+}
+
 /** Module-private key of the renderer entry points on {@link Templates}. */
 const RENDER_WITH_SHARED: unique symbol = Symbol("inker.renderWithShared");
 
@@ -1191,6 +1201,16 @@ export class Templates {
 		return JSON.stringify(Object.fromEntries(this.#componentTags));
 	}
 
+	/** Names of the registered tags declared `noNewLine` (Edge): a line that
+	 * opens one also drops the line break leading into the next line. */
+	#noNewLineTagNames(): string[] {
+		const names: string[] = [];
+		for (const [name, tag] of this.#tags) {
+			if (tag.noNewLine === true) names.push(name);
+		}
+		return names;
+	}
+
 	/** Names of the registered tags declared `block: true` — the parser needs
 	 * them separately, to know which `@end<name>` closers exist. */
 	#blockTagNames(): string[] {
@@ -1412,7 +1432,9 @@ export class Templates {
 		if (composed.layoutAst === undefined) {
 			return this.#applyOutput(
 				stacks.fillPlaceholders(
-					askedForHtml(yield { nodes: childNodes, state, ctx: baseCtx }),
+					trimTopBottomNewLines(
+						askedForHtml(yield { nodes: childNodes, state, ctx: baseCtx }),
+					),
 				),
 				name,
 			);
@@ -1460,12 +1482,14 @@ export class Templates {
 
 		return this.#applyOutput(
 			stacks.fillPlaceholders(
-				askedForHtml(
-					yield {
-						nodes: layoutNodes,
-						state,
-						ctx: { ...layoutCtx, bodyHtml, sections },
-					},
+				trimTopBottomNewLines(
+					askedForHtml(
+						yield {
+							nodes: layoutNodes,
+							state,
+							ctx: { ...layoutCtx, bodyHtml, sections },
+						},
+					),
 				),
 			),
 			name,
@@ -1559,6 +1583,7 @@ export class Templates {
 				[...this.#tags.keys()],
 				this.#blockTagNames(),
 				this.#componentTagsJson(),
+				this.#noNewLineTagNames(),
 			),
 		);
 
@@ -1606,11 +1631,13 @@ export class Templates {
 		const stacks = new Stacks();
 		return this.#applyOutput(
 			stacks.fillPlaceholders(
-				renderNodeTree(this.#astNodes(ast), state, this.#renderHelpers(), {
-					tags: this.#tags,
-					stacks,
-					sharedState,
-				}),
+				trimTopBottomNewLines(
+					renderNodeTree(this.#astNodes(ast), state, this.#renderHelpers(), {
+						tags: this.#tags,
+						stacks,
+						sharedState,
+					}),
+				),
 			),
 		);
 	}
@@ -1867,6 +1894,7 @@ export class Templates {
 					[...this.#tags.keys()],
 					this.#blockTagNames(),
 					this.#componentTagsJson(),
+					this.#noNewLineTagNames(),
 				),
 			);
 		} catch (err) {
@@ -1974,6 +2002,7 @@ export class Templates {
 					[...this.#tags.keys()],
 					this.#blockTagNames(),
 					this.#componentTagsJson(),
+					this.#noNewLineTagNames(),
 				),
 			);
 		}
@@ -2102,6 +2131,7 @@ export class Templates {
 				[...this.#tags.keys()],
 				this.#blockTagNames(),
 				this.#componentTagsJson(),
+				this.#noNewLineTagNames(),
 			),
 		);
 
@@ -2185,6 +2215,7 @@ export class Templates {
 					[...this.#tags.keys()],
 					this.#blockTagNames(),
 					this.#componentTagsJson(),
+					this.#noNewLineTagNames(),
 				),
 			);
 		}

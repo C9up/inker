@@ -14,8 +14,9 @@ describe("inker > Stacks prepend", () => {
 		stacks.pushTo("scripts", "<b>");
 		stacks.pushToTop("scripts", "<a>");
 
-		// Prepend, not append: <a> was pushed second but comes out first.
-		expect(stacks.fillPlaceholders(token)).toBe("<a><b>");
+		// Prepend, not append: <a> was pushed second but comes out first. One
+		// line per source, as Edge joins them.
+		expect(stacks.fillPlaceholders(token)).toBe("<a>\n<b>");
 	});
 
 	it("prepends onto a stack that does not exist yet", () => {
@@ -35,7 +36,7 @@ describe("inker > Stacks prepend", () => {
 		stacks.pushToTop("s", "3");
 
 		// Each one goes in front of the previous.
-		expect(stacks.fillPlaceholders(token)).toBe("321");
+		expect(stacks.fillPlaceholders(token)).toBe("3\n2\n1");
 	});
 
 	it("drops a second pushOnceToTop from the same source", () => {
@@ -55,7 +56,7 @@ describe("inker > Stacks prepend", () => {
 		stacks.pushOnceToTop("scripts", "first", "A");
 
 		// Distinct sources both land, newest in front.
-		expect(stacks.fillPlaceholders(token)).toBe("AB");
+		expect(stacks.fillPlaceholders(token)).toBe("A\nB");
 		expect(stacks.hasSource("scripts", "first")).toBe(true);
 	});
 

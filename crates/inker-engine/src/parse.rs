@@ -468,7 +468,6 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
         | InkerNode::Partial(_)
         | InkerNode::Slot(_)
         | InkerNode::Super { .. }
-        | InkerNode::TrimNewline { .. }
         | InkerNode::Eval { .. }
         | InkerNode::Dump { .. }
         | InkerNode::Assign { .. }
@@ -557,15 +556,26 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     seen_non_whitespace_content = true;
                 }
             }
-            Token::TrimNewline { line, column } => {
-                push_node(
-                    InkerNode::TrimNewline {
-                        line: *line,
-                        column: *column,
-                    },
-                    &mut root_nodes,
-                    &mut open_blocks,
+            Token::Newline { .. } => {
+                // Edge ignores the first line break of a component's main slot,
+                // so a body starting on the line after the tag starts there.
+                let opens_main_slot = matches!(
+                    open_blocks.last(),
+                    Some(BlockFrame::Component {
+                        active_slot: None,
+                        body_nodes,
+                        ..
+                    }) if body_nodes.is_empty()
                 );
+                if !opens_main_slot {
+                    push_node(
+                        InkerNode::Text {
+                            value: "\n".to_string(),
+                        },
+                        &mut root_nodes,
+                        &mut open_blocks,
+                    );
+                }
             }
             Token::BlockTag { raw, line, column } => {
                 // Edge's generic `@end` closes whatever block is innermost.
@@ -1505,7 +1515,7 @@ impl Token {
             | Token::InterpRaw { line, .. }
             | Token::BlockTag { line, .. }
             | Token::SlotPlaceholder { line, .. }
-            | Token::TrimNewline { line, .. } => *line,
+            | Token::Newline { line, .. } => *line,
         }
     }
     fn column(&self) -> u32 {
@@ -1515,7 +1525,7 @@ impl Token {
             | Token::InterpRaw { column, .. }
             | Token::BlockTag { column, .. }
             | Token::SlotPlaceholder { column, .. }
-            | Token::TrimNewline { column, .. } => *column,
+            | Token::Newline { column, .. } => *column,
         }
     }
 }
@@ -1706,6 +1716,7 @@ mod tests {
             template_path: None,
             custom_tags: custom_tags.clone(),
             custom_block_tags: HashSet::new(),
+            no_newline_tags: HashSet::new(),
         };
         let tokens = lex("@svg('user', { class: size })", &lex_opts).unwrap();
         let opts = ParseOptions {
@@ -1833,14 +1844,39 @@ mod tests {
     }
 
     #[test]
-    fn trim_marker_becomes_a_node_where_the_tag_takes_effect() {
-        let ast = parse_str("@if(a)~\ny@end~\nz").unwrap();
-        match &ast.nodes[..] {
-            [InkerNode::If { then_nodes, .. }, InkerNode::TrimNewline { .. }, InkerNode::Text { .. }] =>
-            {
-                assert!(matches!(then_nodes[0], InkerNode::TrimNewline { .. }));
-            }
-            other => panic!("unexpected nodes: {other:?}"),
-        }
+    fn a_tag_takes_up_to_two_spaces_before_its_paren() {
+        assert!(matches!(
+            parse_str("@if (a)x@endif").unwrap().nodes[0],
+            InkerNode::If { .. }
+        ));
+        assert!(matches!(
+            parse_str("@if  (a)x@endif").unwrap().nodes[0],
+            InkerNode::If { .. }
+        ));
+        // Three spaces: Edge no longer reads the `(` as the tag's argument.
+        assert!(parse_str("@if   (a)x@endif").is_err());
+    }
+
+    #[test]
+    fn line_breaks_follow_edge_line_model() {
+        let text = |ast: &InkerAst| -> String {
+            ast.nodes
+                .iter()
+                .map(|n| match n {
+                    InkerNode::Text { value } => value.clone(),
+                    _ => "#".to_string(),
+                })
+                .collect()
+        };
+        // A line break leads into a content line; a `noNewLine` tag drops it.
+        assert_eq!(text(&parse_str("a\n@let(x = 1)\nb").unwrap()), "a#b");
+        assert_eq!(text(&parse_str("a\n@let(x = 1)~\nb").unwrap()), "a#b");
+        assert_eq!(text(&parse_str("a\nb\n").unwrap()), "a\nb\n");
+        // A tag line right after a tag line is led into; a closer never is.
+        assert_eq!(text(&parse_str("@eval(1)\n@eval(2)").unwrap()), "##");
+        assert_eq!(
+            text(&parse_str("@if(a)\n@endif\n@if(b)\n@endif").unwrap()),
+            "#\n#"
+        );
     }
 }

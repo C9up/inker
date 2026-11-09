@@ -76,6 +76,8 @@ export declare class InkerAst {
  * a `CustomTag` node the Node renderer resolves against its handler registry.
  * `custom_block_tags_set` is the subset registered with `block: true`: those
  * open a body closed by `@end<name>` (or self-close as `@!<name>`).
+ * `no_newline_tags_set` are the registered tags declared `noNewLine`: a line
+ * opening one drops the line break that leads into the next line (Edge).
  */
 
 export declare function parseTemplate(
@@ -84,6 +86,7 @@ export declare function parseTemplate(
 	customTagsSet: Array<string>,
 	customBlockTagsSet: Array<string>,
 	componentTagsJson: string,
+	noNewlineTagsSet: Array<string>,
 ): InkerAst;
 
 /**
@@ -100,6 +103,7 @@ export declare function parseTemplateJson(
 	customTagsSet: Array<string>,
 	customBlockTagsSet: Array<string>,
 	componentTagsJson: string,
+	noNewlineTagsSet: Array<string>,
 ): string;
 
 /**

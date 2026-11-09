@@ -481,7 +481,8 @@ describe("Templates — component resolution (53.3)", () => {
 		write("components/card", "[{{> body }}]");
 		write("components/badge", "<{{ text }}:{{> body }}>");
 		const templates = new Templates({ root, cacheMode: "mtime" });
-		expect(await templates.render("page", {})).toBe("[BEFORE<X:IN>AFTER]");
+		// The line break leads into the content line `AFTER…` (Edge line model).
+		expect(await templates.render("page", {})).toBe("[BEFORE<X:IN>\nAFTER]");
 	});
 
 	it("throws E_INKER_MISMATCHED_BLOCK_END when @endcomponent closes an open inner block", async () => {

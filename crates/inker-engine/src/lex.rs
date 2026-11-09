@@ -57,9 +57,9 @@ pub enum Token {
         line: u32,
         column: u32,
     },
-    /// A `~` ending a tag line (Edge's newline-trim marker): drop the newline
-    /// that leads into the next line of output.
-    TrimNewline {
+    /// The line break that leads into a line of output (Edge's lexer emits it
+    /// BEFORE each content line, never after a tag line).
+    Newline {
         line: u32,
         column: u32,
     },
@@ -74,6 +74,9 @@ pub struct LexOptions {
     /// The subset of `custom_tags` registered with `block: true`. Only these
     /// have a matching `@end<name>` to recognise.
     pub custom_block_tags: std::collections::HashSet<String>,
+    /// Registered tags declared `noNewLine` (Edge): a line opening one also
+    /// drops the line break that leads into the next line.
+    pub no_newline_tags: std::collections::HashSet<String>,
 }
 
 static SLOT_NAME_RE: Lazy<Regex> =
@@ -137,6 +140,82 @@ fn is_block_keyword(word: &str) -> bool {
             | "endpushOnceTo"
             | "end"
     )
+}
+
+/// A tag recognised at `i`: its keyword, whether it was written `@!`, and the
+/// index one past the keyword.
+struct TagMatch {
+    word: String,
+    self_closing: bool,
+    after_word: usize,
+}
+
+/// `@[!]keyword` at `i`, when `keyword` is a tag (`@word` that is not one —
+/// CSS `@media`, an e-mail address — is literal text).
+fn tag_at(chars: &[char], i: usize, options: &LexOptions) -> Option<TagMatch> {
+    if chars.get(i) != Some(&'@') {
+        return None;
+    }
+    let self_closing = chars.get(i + 1) == Some(&'!');
+    let word_start = if self_closing { i + 2 } else { i + 1 };
+    let (word, after_word) = read_ident(chars, word_start);
+    // A registered tag may be dotted (`@form.input`); a built-in keyword
+    // never is, so this only ever lengthens a custom/component tag.
+    let (word, after_word) = extend_dotted_tag(chars, word, after_word, options);
+    // `@end<name>` closes a custom tag registered with `block: true`.
+    let closes_custom_block = word
+        .strip_prefix("end")
+        .is_some_and(|n| options.custom_block_tags.contains(n));
+    // `@!name` is the explicit self-closing form: valid for `component` and
+    // for any block custom tag (which otherwise demands an `@end`).
+    let self_closable = word == "component" || options.custom_block_tags.contains(word.as_str());
+    // `me@end.org` is an address, not the generic closer.
+    let end_in_address = word == "end"
+        && chars.get(after_word) == Some(&'.')
+        && chars
+            .get(after_word + 1)
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+    let known = is_block_keyword(&word)
+        || options.custom_tags.contains(word.as_str())
+        || closes_custom_block;
+    if word.is_empty() || end_in_address || !known || (self_closing && !self_closable) {
+        return None;
+    }
+    Some(TagMatch {
+        word,
+        self_closing,
+        after_word,
+    })
+}
+
+/// A closing tag: the generic `@end` or a named `@end<name>`.
+fn is_closer(word: &str, options: &LexOptions) -> bool {
+    word == "end"
+        || word.strip_prefix("end").is_some_and(|n| {
+            !n.is_empty() && (is_block_keyword(word) || options.custom_block_tags.contains(n))
+        })
+}
+
+/// Edge's built-in tags declared `noNewLine` (`let`, `assign`, … and the
+/// deprecated `layout`); a registered tag opts in through `no_newline_tags`.
+fn drops_next_newline(word: &str, options: &LexOptions) -> bool {
+    matches!(
+        word,
+        "let"
+            | "assign"
+            | "eval"
+            | "inject"
+            | "slot"
+            | "pushTo"
+            | "pushOnceTo"
+            | "debugger"
+            | "newError"
+            | "layout"
+    ) || options.no_newline_tags.contains(word)
+}
+
+fn is_line_break(ch: char) -> bool {
+    ch == '\n' || ch == '\r'
 }
 
 /// `~` closing a tag line, optionally followed by spaces before the line
@@ -236,6 +315,38 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
     // of the following text run (Edge whitespace-control parity).
     let mut trim_pending_left = false;
 
+    // Edge's line model (edge-lexer `Tokenizer`): the line break that leads
+    // into a line is emitted at the START of that line, and only when the line
+    // is content — or a tag line right after another tag line. A closing tag
+    // line emits none. A `~` at the end of a tag line, or a tag declared
+    // `noNewLine` opening a line, drops the next one. Tags written mid-line are
+    // an inker extension and leave the line breaks alone.
+    let mut line_no: u32 = 1;
+    let mut at_line_start = true;
+    let mut is_last_line_a_tag = false;
+    let mut drop_newline = false;
+    // Set when the tag about to be lexed opens its line.
+    let mut tag_at_line_start = false;
+    // A `{{ … -}}` swallowed the line break: emit none for the next line.
+    let mut suppress_newline = false;
+
+    macro_rules! push_newline {
+        () => {{
+            if suppress_newline {
+                suppress_newline = false;
+            } else if line_no != 1 {
+                if drop_newline {
+                    drop_newline = false;
+                } else {
+                    tokens.push(Token::Newline {
+                        line: cursor.line,
+                        column: cursor.column,
+                    });
+                }
+            }
+        }};
+    }
+
     macro_rules! flush_text {
         ($cursor:expr, $start_line:expr, $start_col:expr, $buf:expr, $toks:expr) => {{
             if !$buf.is_empty() {
@@ -254,20 +365,84 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
         // Right-trim carry-over from a `{{ … -}}`: swallow the leading whitespace
         // of this text run before doing anything else.
         if trim_pending_left {
+            let mut crossed_line = false;
             while i < len
                 && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r' || chars[i] == '\n')
             {
+                if chars[i] == '\n' || (chars[i] == '\r' && chars.get(i + 1) != Some(&'\n')) {
+                    line_no += 1;
+                    crossed_line = true;
+                }
                 advance(&mut cursor, chars[i]);
                 i += 1;
             }
             trim_pending_left = false;
+            if crossed_line {
+                at_line_start = true;
+                suppress_newline = true;
+            }
             text_start_line = cursor.line;
             text_start_column = cursor.column;
             if i >= len {
                 break;
             }
         }
+
+        if at_line_start {
+            at_line_start = false;
+            let mut j = i;
+            while j < len && !is_line_break(chars[j]) && chars[j].is_whitespace() {
+                j += 1;
+            }
+            match tag_at(&chars, j, options) {
+                Some(found) => {
+                    if !is_closer(&found.word, options) {
+                        if is_last_line_a_tag {
+                            push_newline!();
+                        }
+                        is_last_line_a_tag = true;
+                    }
+                    // Edge drops the indentation of a tag line.
+                    while i < j {
+                        advance(&mut cursor, chars[i]);
+                        i += 1;
+                    }
+                    text_start_line = cursor.line;
+                    text_start_column = cursor.column;
+                    tag_at_line_start = true;
+                }
+                None => {
+                    push_newline!();
+                    is_last_line_a_tag = false;
+                    // An empty line is still a line of content (Edge's raw `""`):
+                    // a component's main slot keeps the break that follows it.
+                    if is_line_break(chars[i]) {
+                        tokens.push(Token::Text {
+                            value: String::new(),
+                            line: cursor.line,
+                            column: cursor.column,
+                        });
+                    }
+                }
+            }
+            suppress_newline = false;
+        }
         let ch = chars[i];
+
+        if is_line_break(ch) {
+            flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
+            if ch == '\r' && chars.get(i + 1) == Some(&'\n') {
+                advance(&mut cursor, '\r');
+                i += 1;
+            }
+            advance(&mut cursor, chars[i]);
+            i += 1;
+            line_no += 1;
+            at_line_start = true;
+            text_start_line = cursor.line;
+            text_start_column = cursor.column;
+            continue;
+        }
 
         // Edge `@` sigil: escapes (`@@`, `@{{`) + block tags (`@keyword(args)`,
         // `@keyword`, `@endkeyword`, `@!component(args)`). A `@word` that is not a
@@ -291,33 +466,11 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                 continue;
             }
             // `@[!]keyword` — a block tag only when `keyword` is known.
-            let self_closing = i + 1 < len && chars[i + 1] == '!';
-            let word_start = if self_closing { i + 2 } else { i + 1 };
-            let (word, after_word) = read_ident(&chars, word_start);
-            // A registered tag may be dotted (`@form.input`); a built-in keyword
-            // never is, so this only ever lengthens a custom/component tag.
-            let (word, after_word) = extend_dotted_tag(&chars, word, after_word, options);
-            // `@!` is only valid for `component`; `@!other` is literal.
-            // `@end<name>` closes a custom tag registered with `block: true`.
-            let closes_custom_block = word
-                .strip_prefix("end")
-                .is_some_and(|n| options.custom_block_tags.contains(n));
-            // `@!name` is the explicit self-closing form: valid for `component`
-            // and for any block custom tag (which otherwise demands an `@end`).
-            let self_closable =
-                word == "component" || options.custom_block_tags.contains(word.as_str());
-            // `me@end.org` is an address, not the generic closer.
-            let end_in_address = word == "end"
-                && chars.get(after_word) == Some(&'.')
-                && chars
-                    .get(after_word + 1)
-                    .is_some_and(|c| c.is_ascii_alphanumeric());
-            if !word.is_empty()
-                && !end_in_address
-                && (is_block_keyword(&word)
-                    || options.custom_tags.contains(word.as_str())
-                    || closes_custom_block)
-                && (!self_closing || self_closable)
+            if let Some(TagMatch {
+                word,
+                self_closing,
+                after_word,
+            }) = tag_at(&chars, i, options)
             {
                 flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
                 let open_line = cursor.line;
@@ -326,6 +479,22 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                 while i < after_word {
                     advance(&mut cursor, chars[i]);
                     i += 1;
+                }
+                // Edge allows up to two spaces between a tag and its `(`
+                // (`@if (x)`). Closers and argument-less tags take none.
+                if !is_closer(&word, options)
+                    && !matches!(word.as_str(), "else" | "super" | "debugger")
+                {
+                    let mut j = i;
+                    while j < len && j < i + 2 && (chars[j] == ' ' || chars[j] == '\t') {
+                        j += 1;
+                    }
+                    if j > i && chars.get(j) == Some(&'(') {
+                        while i < j {
+                            advance(&mut cursor, chars[i]);
+                            i += 1;
+                        }
+                    }
                 }
                 // Optional balanced `( … )` argument span (string-aware + nested).
                 let mut args = String::new();
@@ -407,25 +576,15 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                     line: open_line,
                     column: open_column,
                 });
+                let opened_line = std::mem::take(&mut tag_at_line_start);
                 if let Some(end) = trim_marker_end(&chars, i) {
-                    tokens.push(Token::TrimNewline {
-                        line: cursor.line,
-                        column: cursor.column,
-                    });
+                    drop_newline = true;
                     while i < end {
                         advance(&mut cursor, chars[i]);
                         i += 1;
                     }
-                }
-                // Edge trims ONE newline immediately after a block tag, so a tag on
-                // its own line injects no blank line into the output.
-                if i < len && chars[i] == '\r' {
-                    advance(&mut cursor, '\r');
-                    i += 1;
-                }
-                if i < len && chars[i] == '\n' {
-                    advance(&mut cursor, '\n');
-                    i += 1;
+                } else if opened_line && drops_next_newline(&word, options) {
+                    drop_newline = true;
                 }
                 text_start_line = cursor.line;
                 text_start_column = cursor.column;
@@ -515,11 +674,22 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
             if i < len && chars[i] == '-' {
                 advance(&mut cursor, '-');
                 i += 1;
-                if let Some(Token::Text { value, .. }) = tokens.last_mut() {
-                    *value = value.trim_end().to_string();
-                    // Don't leave a zero-width Text node when the whole run was ws.
-                    if value.is_empty() {
-                        tokens.pop();
+                // Back over the whitespace before it, line breaks included.
+                loop {
+                    match tokens.last_mut() {
+                        Some(Token::Newline { .. }) => {
+                            tokens.pop();
+                        }
+                        Some(Token::Text { value, .. }) => {
+                            let trimmed = value.trim_end().to_string();
+                            if trimmed.is_empty() {
+                                tokens.pop();
+                            } else {
+                                *value = trimmed;
+                                break;
+                            }
+                        }
+                        _ => break,
                     }
                 }
             }
@@ -796,6 +966,11 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
     }
 
     flush_text!(cursor, text_start_line, text_start_column, text_buf, tokens);
+    // A source ending with a line break ends with an empty line, which Edge
+    // still leads into.
+    if at_line_start {
+        push_newline!();
+    }
     Ok(tokens)
 }
 

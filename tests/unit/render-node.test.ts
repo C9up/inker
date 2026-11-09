@@ -26,6 +26,7 @@ function render(
 			[...tags.keys()],
 			[],
 			"",
+			[],
 		),
 	);
 	return renderNodeTree(ast.nodes, data, helpers, { tags });
@@ -138,6 +139,7 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 				[],
 				[],
 				"",
+				[],
 			),
 		);
 		expect(renderNodeTree(ast.nodes, {}, helpers)).toBe("kept");
@@ -213,7 +215,7 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 	it("an unregistered @tag at render time → typed error", () => {
 		// Parsed as a custom tag (name passed to the parser) but no tag wired.
 		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-			native.parseTemplateJson("@svg('x')", [], ["svg"], [], ""),
+			native.parseTemplateJson("@svg('x')", [], ["svg"], [], "", []),
 		);
 		expect(() =>
 			renderNodeTree(ast.nodes, {}, new Map(), { tags: new Map() }),

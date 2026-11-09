@@ -99,11 +99,6 @@ export type InkerNodeJson =
 	  }
 	| { readonly type: "Super" }
 	| {
-			readonly type: "TrimNewline";
-			readonly line?: number;
-			readonly column?: number;
-	  }
-	| {
 			readonly type: "Eval";
 			readonly source: string;
 			readonly line?: number;
@@ -271,6 +266,11 @@ export interface InkerTag {
 	readonly tagName: string;
 	readonly block: boolean;
 	readonly seekable: boolean;
+	/**
+	 * Edge `noNewLine`: a line that opens this tag also drops the line break
+	 * leading into the next line, so the tag leaves no blank line behind.
+	 */
+	readonly noNewLine?: boolean;
 	/**
 	 * Runs at RENDER time (see the deviation above). It may be ASYNC: an
 	 * authorization tag has to await its check — Adonis's `@can` emits
@@ -928,20 +928,6 @@ function requireStacks(
 	return ctx.stacks;
 }
 
-/**
- * Drop one line break from the end of what has been output so far — the one
- * leading into the next line (Edge's `~` marker on a tag line).
- */
-function trimTrailingNewline(out: string[]): void {
-	for (let i = out.length - 1; i >= 0; i--) {
-		const chunk = out[i] ?? "";
-		if (chunk === "") continue;
-		if (chunk.endsWith("\r\n")) out[i] = chunk.slice(0, -2);
-		else if (chunk.endsWith("\n")) out[i] = chunk.slice(0, -1);
-		return;
-	}
-}
-
 /** Find the frame in the scope chain that OWNS `name`, or null if none does. */
 function ownerFrame(scope: object, name: string): object | null {
 	let frame: object | null = scope;
@@ -1093,9 +1079,6 @@ function* renderNode(
 		case "Super":
 			// Inside a child section: the layout's default content for it.
 			if (ctx.superHtml !== undefined) out.push(ctx.superHtml);
-			return;
-		case "TrimNewline":
-			trimTrailingNewline(out);
 			return;
 		case "Eval":
 			// Evaluate for side effects (e.g. a helper call); emit nothing.

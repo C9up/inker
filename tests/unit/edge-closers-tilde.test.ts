@@ -37,7 +37,7 @@ describe("the generic @end closer", () => {
 
 	it("closes @pushTo and @pushOnceTo", () => {
 		expect(render("@pushTo('s')a@end@pushOnceTo('s')b@end[@stack('s')]")).toBe(
-			"[ab]",
+			"[a\nb]",
 		);
 	});
 
@@ -53,7 +53,8 @@ describe("the generic @end closer", () => {
 			},
 		};
 		t.registerTag(tag);
-		expect(t.renderString("@box\nx\n@end")).toBe("<box>x\n</box>");
+		// Edge: the body's line break leads into `x`; the closer emits none.
+		expect(t.renderString("@box\nx\n@end")).toBe("<box>\nx</box>");
 	});
 
 	it("closes @component and @slot", async () => {

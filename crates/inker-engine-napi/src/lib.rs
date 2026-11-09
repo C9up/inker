@@ -199,7 +199,7 @@ fn nodes_have_content(nodes: &[InkerNode]) -> bool {
                     return true;
                 }
             }
-            InkerNode::Section { .. } | InkerNode::TrimNewline { .. } => {}
+            InkerNode::Section { .. } => {}
             _ => return true,
         }
     }
@@ -364,6 +364,8 @@ fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
 /// a `CustomTag` node the Node renderer resolves against its handler registry.
 /// `custom_block_tags_set` is the subset registered with `block: true`: those
 /// open a body closed by `@end<name>` (or self-close as `@!<name>`).
+/// `no_newline_tags_set` are the registered tags declared `noNewLine`: a line
+/// opening one drops the line break that leads into the next line (Edge).
 #[napi]
 pub fn parse_template(
     source: String,
@@ -371,6 +373,7 @@ pub fn parse_template(
     custom_tags_set: Vec<String>,
     custom_block_tags_set: Vec<String>,
     component_tags_json: String,
+    no_newline_tags_set: Vec<String>,
 ) -> Result<InkerAst> {
     wrap(move || {
         let component_tags: std::collections::HashMap<String, String> =
@@ -397,6 +400,7 @@ pub fn parse_template(
             template_path: None,
             custom_tags: custom_tags.clone(),
             custom_block_tags: custom_block_tags.clone(),
+            no_newline_tags: no_newline_tags_set.into_iter().collect(),
         };
         let toks = inker_engine::lex::lex(&source, &lex_opts)?;
         let mut helpers: HashSet<String> = HashSet::new();
@@ -429,6 +433,7 @@ pub fn parse_template_json(
     custom_tags_set: Vec<String>,
     custom_block_tags_set: Vec<String>,
     component_tags_json: String,
+    no_newline_tags_set: Vec<String>,
 ) -> Result<String> {
     wrap(move || {
         let component_tags: std::collections::HashMap<String, String> =
@@ -455,6 +460,7 @@ pub fn parse_template_json(
             template_path: None,
             custom_tags: custom_tags.clone(),
             custom_block_tags: custom_block_tags.clone(),
+            no_newline_tags: no_newline_tags_set.into_iter().collect(),
         };
         let toks = inker_engine::lex::lex(&source, &lex_opts)?;
         let mut helpers: HashSet<String> = HashSet::new();

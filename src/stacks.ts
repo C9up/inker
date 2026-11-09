@@ -99,7 +99,8 @@ export class Stacks {
 	fillPlaceholders(contents: string): string {
 		let out = contents;
 		for (const [name, token] of this.#placeholders) {
-			out = out.split(token).join((this.#contents.get(name) ?? []).join(""));
+			// One line per pushed source, as Edge joins them.
+			out = out.split(token).join((this.#contents.get(name) ?? []).join("\n"));
 		}
 		return out;
 	}

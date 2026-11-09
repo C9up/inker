@@ -178,7 +178,7 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 			engine().renderString(
 				"@pushTo('s')<b>@endpushTo@pushTo('s')<i>@endpushTo[@stack('s')]",
 			),
-		).toBe("[<b><i>]");
+		).toBe("[<b>\n<i>]");
 	});
 
 	it("fills a stack in the layout from a push in the body", async () => {
@@ -209,8 +209,9 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 			"partials/b": "@pushOnceTo('js')<script src=b></script>@endpushOnceTo",
 			page: "@include('partials/a')@include('partials/b')[@stack('js')]",
 		});
+		// One line per pushed source, as Edge joins a stack.
 		expect(await t.render("page")).toBe(
-			"[<script src=a></script><script src=b></script>]",
+			"[<script src=a></script>\n<script src=b></script>]",
 		);
 	});
 
@@ -247,7 +248,7 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 			"components/x": "@pushOnceTo('js')<c>@endpushOnceTo",
 			page: "@include('x')@!component('x')@!component('x')[@stack('js')]",
 		});
-		expect(await t.render("page")).toBe("[<p><c>]");
+		expect(await t.render("page")).toBe("[<p>\n<c>]");
 	});
 
 	it("does not collide between a layout and the page body", async () => {
@@ -292,7 +293,7 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 			engine().renderString(
 				"@each(n in [1, 2])@pushTo('s'){{ n }}@endpushTo@endeach[@stack('s')]",
 			),
-		).toBe("[12]");
+		).toBe("[1\n2]");
 	});
 
 	it("renders the body in the surrounding scope", () => {
