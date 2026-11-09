@@ -115,12 +115,6 @@ describe("inker > @assign", () => {
 		).toBe("ab");
 	});
 
-	it("rejects assigning to an undeclared binding", () => {
-		expect(() => engine().renderString("@assign(ghost = 1)")).toThrow(
-			/no such binding in scope/,
-		);
-	});
-
 	it("rejects an argument that is not an assignment", () => {
 		expect(() => engine().renderString("@assign(a === b)")).toThrow(
 			/requires an assignment/,

@@ -103,9 +103,8 @@ describe("inker > Templates#createRenderer", () => {
 	it("keeps shared state out of the engine itself", () => {
 		const t = engine();
 		t.createRenderer().share({ secret: "leaked" });
-		// inker is strict on unknown identifiers, so the leak would surface as a
-		// rendered value; absence is proven by the reference failing to resolve.
-		expect(() => t.renderString("{{ secret }}")).toThrow(/not defined/);
+		// A missing name reads as undefined, so a leak would print the value.
+		expect(t.renderString("[{{ secret }}]")).toBe("[]");
 	});
 
 	it("layers engine global < shared < render data", () => {

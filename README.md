@@ -18,7 +18,7 @@ Interpolation is `{{ expr }}` (HTML-escaped) or `{{{ expr }}}` (raw). The `expr`
 ## Strict by default
 
 - Missing templates throw `InkerRenderError` with `code: "E_INKER_TEMPLATE_NOT_FOUND"`.
-- Unknown identifiers throw `code: "E_INKER_UNKNOWN_IDENTIFIER"` with the consumed path and the line + column of the offending interpolation.
+- A name missing from the render data reads as `undefined` (guard it with `@if(name)`); navigating into it throws `code: "E_INKER_UNKNOWN_IDENTIFIER"` with the line + column of the offending expression.
 - Parse errors throw `code: "E_INKER_PARSE_ERROR"` with a precise reason.
 
 The full reference (file layout, cache semantics, error surface) lives at <https://ream.dev/modules/inker>.

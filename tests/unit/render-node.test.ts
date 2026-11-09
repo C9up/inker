@@ -106,9 +106,9 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 		expect(render("{{ [icon()][0] }}", {}, helpers)).toBe("<svg/>");
 	});
 
-	it("unknown identifier → typed error", () => {
+	it("navigating into an unknown identifier → typed error", () => {
 		expect(() => render("{{ nope.x }}", {})).toThrowError(
-			/E_INKER_UNKNOWN_IDENTIFIER|not defined/,
+			/cannot read propert/i,
 		);
 	});
 

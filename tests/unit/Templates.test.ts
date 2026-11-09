@@ -86,16 +86,9 @@ describe("Templates — render() filesystem behaviour", () => {
 		).toBe("<h1>Hi</h1>");
 	});
 
-	it("renderString throws E_INKER_UNKNOWN_IDENTIFIER for missing data", () => {
+	it("renderString reads missing data as undefined (empty)", () => {
 		const templates = new Templates({ root });
-		try {
-			templates.renderString("{{ x }}", {});
-			expect.fail("should have thrown");
-		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNKNOWN_IDENTIFIER",
-			);
-		}
+		expect(templates.renderString("[{{ x }}]", {})).toBe("[]");
 	});
 
 	it("renderString renders data that holds a circular reference", () => {

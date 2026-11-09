@@ -296,6 +296,24 @@ const SANDBOX_SHADOW: Readonly<Record<string, undefined>> = Object.freeze({
 	__filename: undefined,
 });
 
+// The names `compileExpr` binds as its own parameters. The fallback scope
+// below must not claim them, or the scope objects themselves would read as
+// undefined.
+const SCOPE_PARAMS: ReadonlySet<string> = new Set(["$u", "$g", "$h", "$s"]);
+
+// Outermost scope of every expression: a name found in no render scope, helper
+// or shadow, and that is not a JavaScript global (`Math`, `JSON`, `Date`),
+// reads as `undefined` — Edge rewrites every non-local identifier to
+// `state.<name>`, so optional data is guarded with a plain `@if(name)`. An
+// assignment to such a name lands on this frozen target and is dropped,
+// instead of creating a global variable as sloppy-mode code otherwise would.
+const MISSING_AS_UNDEFINED: object = new Proxy(Object.freeze({}), {
+	has: (_target, key) =>
+		typeof key === "string" && !SCOPE_PARAMS.has(key) && !(key in globalThis),
+	get: () => undefined,
+	set: () => true,
+});
+
 // Compile-once cache: expression source → a JS fn evaluating it with helpers +
 // scope in scope (`with` — a `new Function` body is non-strict).
 const exprCache = new Map<string, CompiledExpr>();
@@ -337,12 +355,13 @@ function compileExpr(source: string): CompiledExpr {
 		// is non-strict), so the scope chain is identical either way.
 		const Ctor = AWAIT_RE.test(source) ? AsyncFunction : Function;
 		const compiled = new Ctor(
+			"$u",
 			"$g",
 			"$h",
 			"$s",
-			`with($g){ with($h){ with($s){ return (${source}); } } }`,
+			`with($u){ with($g){ with($h){ with($s){ return (${source}); } } } }`,
 		);
-		fn = (s, h) => compiled(SANDBOX_SHADOW, h, s);
+		fn = (s, h) => compiled(MISSING_AS_UNDEFINED, SANDBOX_SHADOW, h, s);
 	} catch (cause) {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_EXPRESSION",
@@ -512,14 +531,15 @@ function evalLetDestructure(
 			// right-hand side are template source, which is code the author
 			// wrote. Never build one of these from anything a request carried.
 			const compiled = new Function(
+				"$u",
 				"$g",
 				"$h",
 				"$s",
-				`with($g){ with($h){ with($s){ const ${pattern} = (${rhs}); return { ${names.join(", ")} }; } } }`,
+				`with($u){ with($g){ with($h){ with($s){ const ${pattern} = (${rhs}); return { ${names.join(", ")} }; } } } }`,
 			);
 			// `compiled` (a `Function`) returns `any`, assignable to the declared
 			// `Record<string, unknown>` result without a cast.
-			fn = (s, h) => compiled(SANDBOX_SHADOW, h, s);
+			fn = (s, h) => compiled(MISSING_AS_UNDEFINED, SANDBOX_SHADOW, h, s);
 		} catch (cause) {
 			throw new InkerRenderError(
 				"E_INKER_INVALID_EXPRESSION",
@@ -707,6 +727,16 @@ function ownerFrame(scope: object, name: string): object | null {
 	return null;
 }
 
+/** The outermost frame of a scope chain: the render's (or component's) own state. */
+function rootFrame(scope: object): object {
+	let frame = scope;
+	for (;;) {
+		const parent: object | null = Object.getPrototypeOf(frame);
+		if (parent === null || parent === Object.prototype) return frame;
+		frame = parent;
+	}
+}
+
 // ---- The walker ----
 
 /** Render a list of sibling nodes, threading `@let` bindings forward. */
@@ -864,14 +894,9 @@ function* renderNode(
 				// Compute in the reading scope, then store in the OWNING frame —
 				// `with(){ x = … }` would create a shadowing copy on the innermost
 				// frame instead, so a loop's writes would vanish at each iteration.
-				const owner = ownerFrame(scope, lhs);
-				if (owner === null) {
-					throw new InkerRenderError(
-						"E_INKER_UNKNOWN_IDENTIFIER",
-						`@assign cannot assign to '${lhs}' — no such binding in scope (use @let to declare it)`,
-						{ line: node.line, column: node.column },
-					);
-				}
+				// A name no frame owns is created on the render's top frame, as
+				// Edge's `state.<name> = …` does.
+				const owner = ownerFrame(scope, lhs) ?? rootFrame(scope);
 				const rhs =
 					operator === "="
 						? node.source
