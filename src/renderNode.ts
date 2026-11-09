@@ -359,6 +359,20 @@ function errMessage(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
 }
 
+/** V8's "Maximum call stack size exceeded". */
+function isStackOverflow(e: unknown): boolean {
+	return e instanceof RangeError && /call stack/i.test(e.message);
+}
+
+function depthError(cause: unknown): InkerRenderError {
+	return new InkerRenderError(
+		"E_INKER_RENDER_DEPTH",
+		`the render nested too deep: ${errMessage(cause)}`,
+		undefined,
+		{ cause },
+	);
+}
+
 function evalExpr(
 	source: string,
 	scope: object,
@@ -369,6 +383,7 @@ function evalExpr(
 		return compileExpr(source)(scope, helpers);
 	} catch (cause) {
 		if (cause instanceof InkerRenderError) throw cause;
+		if (isStackOverflow(cause)) throw depthError(cause);
 		const msg = errMessage(cause);
 		// A bare unknown identifier / navigating into null/undefined maps to the
 		// same typed code the retired Rust path resolver produced.
@@ -418,7 +433,7 @@ function* evalStep(
  * into the output.
  */
 function driveSync(step: RenderStep, out: string[], what: string): string {
-	const next = step.next();
+	const next = guardDepth(() => step.next());
 	while (!next.done) {
 		step.return(undefined);
 		throw new InkerRenderError(
@@ -430,20 +445,37 @@ function driveSync(step: RenderStep, out: string[], what: string): string {
 }
 
 function drive(step: RenderStep, out: string[]): string | Promise<string> {
-	let next = step.next();
+	let next = guardDepth(() => step.next());
 	while (!next.done) {
 		const pending = next.value;
 		if (!isThenable(pending)) {
-			next = step.next(pending);
+			next = guardDepth(() => step.next(pending));
 			continue;
 		}
 		return (async () => {
-			let cur = step.next(await pending);
-			while (!cur.done) cur = step.next(await cur.value);
+			const resumed = await pending;
+			let cur = guardDepth(() => step.next(resumed));
+			while (!cur.done) {
+				const value = await cur.value;
+				cur = guardDepth(() => step.next(value));
+			}
 			return out.join("");
 		})();
 	}
 	return out.join("");
+}
+
+/**
+ * Backstop for a walk that overflowed the V8 stack: the parser caps block
+ * nesting and the walker caps component depth, but a helper can still recurse
+ * without end, and an untyped RangeError must not reach the caller.
+ */
+function guardDepth<T>(fn: () => T): T {
+	try {
+		return fn();
+	} catch (cause) {
+		throw isStackOverflow(cause) ? depthError(cause) : cause;
+	}
 }
 
 // ---- @let destructuring (62-2 Edge parity): `@let({ a, b } = obj)` ----

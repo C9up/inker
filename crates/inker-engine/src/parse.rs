@@ -54,6 +54,13 @@ pub struct ParseOptions {
     pub component_tags: HashMap<String, String>,
 }
 
+/// Deepest block nesting a template may reach (open blocks plus the `If`
+/// nodes an `@elseif` chain folds into). Parsing, serialising, dropping and
+/// rendering the tree all recurse on its depth, so an uncapped template can
+/// overflow the native stack and kill the process instead of failing with an
+/// error. Same bound as `MAX_EXPRESSION_DEPTH`.
+pub const MAX_BLOCK_DEPTH: usize = 256;
+
 fn is_whitespace_only(value: &str) -> bool {
     value
         .chars()
@@ -209,24 +216,53 @@ impl BlockFrame {
     }
 }
 
+/// Depth the finished tree will have under the innermost open block: one level
+/// per frame, plus one per `@elseif` (each folds into a nested `If`).
+fn tree_depth(open_blocks: &[BlockFrame]) -> usize {
+    open_blocks
+        .iter()
+        .map(|frame| match frame {
+            BlockFrame::If { branches, .. } => branches.len(),
+            _ => 1,
+        })
+        .sum()
+}
+
+fn depth_error(open_blocks: &[BlockFrame], template_path: Option<&str>) -> Option<InkerError> {
+    if tree_depth(open_blocks) <= MAX_BLOCK_DEPTH {
+        return None;
+    }
+    let top = open_blocks.last()?;
+    Some(make_err(
+        ErrorCode::ParseError,
+        format!(
+            "@{} at line {}, column {} nests blocks beyond the maximum depth of {MAX_BLOCK_DEPTH} — flatten the template or move the inner part to a partial",
+            top.open_keyword(),
+            top.line(),
+            top.column()
+        ),
+        top.line(),
+        top.column(),
+        template_path,
+    ))
+}
+
 /// Fold an `If` frame's `if`/`elseif` branches plus optional `else` into a
 /// chain of two-way `InkerNode::If` (innermost `else` last). With no `elseif`
 /// this yields exactly the original single `If { then, else }` shape.
 fn fold_if_branches(branches: Vec<IfBranch>, else_nodes: Option<Vec<InkerNode>>) -> InkerNode {
     let mut acc: Option<Vec<InkerNode>> = else_nodes;
-    let mut node: Option<InkerNode> = None;
     for branch in branches.into_iter().rev() {
-        let if_node = InkerNode::If {
+        acc = Some(vec![InkerNode::If {
             condition: branch.condition,
             then_nodes: branch.nodes,
             else_nodes: acc.take(),
             line: branch.line,
             column: branch.column,
-        };
-        acc = Some(vec![if_node.clone()]);
-        node = Some(if_node);
+        }]);
     }
-    node.expect("If frame always has >= 1 branch")
+    acc.and_then(|mut nodes| nodes.pop())
+        .expect("If frame always has >= 1 branch")
 }
 
 /// Cheap leading-keyword sniff on a block tag's raw inner (already trimmed by
@@ -428,6 +464,9 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
     let mut helper_id_counter: u32 = 0;
 
     for (token_index, token) in tokens.iter().enumerate() {
+        if let Some(err) = depth_error(&open_blocks, template_path) {
+            return Err(err);
+        }
         match token {
             Token::Text { value, .. } => {
                 let node = InkerNode::Text {
@@ -1355,6 +1394,9 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
         }
     }
 
+    if let Some(err) = depth_error(&open_blocks, template_path) {
+        return Err(err);
+    }
     if let Some(top) = open_blocks.last() {
         let kw_lower = top.open_keyword();
         return Err(make_err(
@@ -1663,5 +1705,39 @@ mod tests {
         let e = parse_str("@pushOnceTo('s')x").unwrap_err();
         assert_eq!(e.code, ErrorCode::UnclosedBlock);
         assert!(e.message.contains("@pushOnceTo"), "got: {}", e.message);
+    }
+
+    fn nested_ifs(depth: usize) -> String {
+        format!("{}x{}", "@if(true)".repeat(depth), "@endif".repeat(depth))
+    }
+
+    #[test]
+    fn block_nesting_at_the_cap_parses() {
+        assert!(parse_str(&nested_ifs(MAX_BLOCK_DEPTH)).is_ok());
+    }
+
+    #[test]
+    fn block_nesting_past_the_cap_is_a_parse_error() {
+        let e = parse_str(&nested_ifs(MAX_BLOCK_DEPTH + 1)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ParseError);
+        assert!(e.message.contains("maximum depth"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn hostile_block_nesting_fails_without_overflowing_the_stack() {
+        // 20,000 levels used to overflow the native stack (SIGSEGV).
+        let e = parse_str(&nested_ifs(20_000)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ParseError);
+        let unclosed = parse_str(&"@if(true)".repeat(20_000)).unwrap_err();
+        assert_eq!(unclosed.code, ErrorCode::ParseError);
+    }
+
+    #[test]
+    fn elseif_chains_count_toward_the_depth_cap() {
+        // Each `@elseif` folds into one more nested `If` node.
+        let chain = |n: usize| format!("@if(a)x{}@endif", "@elseif(b)y".repeat(n));
+        assert!(parse_str(&chain(MAX_BLOCK_DEPTH - 1)).is_ok());
+        let e = parse_str(&chain(20_000)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ParseError);
     }
 }

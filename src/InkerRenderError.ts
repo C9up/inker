@@ -30,6 +30,9 @@ export type InkerErrorCode =
 	/** `await` reached a place that renders synchronously (a custom tag's body,
 	 * `renderString`). Use `render()`, whose walk can suspend. */
 	| "E_INKER_ASYNC_NOT_SUPPORTED"
+	/** The render nested too deep: runaway component/partial recursion, or a
+	 * helper that overflowed the stack. */
+	| "E_INKER_RENDER_DEPTH"
 	| "E_INKER_NAPI_REQUIRED";
 
 export interface InkerErrorContext {
