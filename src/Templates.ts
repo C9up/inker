@@ -1202,7 +1202,7 @@ export class Templates {
 		data: Readonly<Record<string, unknown>>,
 		shared: Readonly<Record<string, unknown>>,
 	): Promise<string> {
-		const step = this.#renderSteps(name, data, shared);
+		const step = this.#renderSteps(name, data, shared, false);
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
@@ -1249,7 +1249,7 @@ export class Templates {
 		data: Readonly<Record<string, unknown>>,
 		shared: Readonly<Record<string, unknown>>,
 	): string {
-		const step = this.#renderSteps(name, data, shared);
+		const step = this.#renderSteps(name, data, shared, true);
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
@@ -1275,6 +1275,7 @@ export class Templates {
 		name: string,
 		data: Readonly<Record<string, unknown>>,
 		shared: Readonly<Record<string, unknown>>,
+		sync: boolean,
 	): RenderSteps {
 		// Plugins run before anything is resolved — one may register a global or
 		// a tag this very render depends on.
@@ -1317,6 +1318,7 @@ export class Templates {
 			components,
 			missingPartials: composed.missingPartials,
 			missingComponents: composed.missingComponents,
+			loadTemplate: this.#templateLoader(sync, partials, components),
 			tags: this.#tags,
 			templateName: name,
 			file: templateFileKey(name),
@@ -1386,6 +1388,52 @@ export class Templates {
 			),
 			name,
 		);
+	}
+
+	/**
+	 * Load a partial or component at render time — one whose name the preload
+	 * could not know (`@include(which)`), or one such a template references in
+	 * turn. Same name validation, containment and file rules as the preload;
+	 * the result joins this render's maps so a loop loads it once.
+	 */
+	#templateLoader(
+		sync: boolean,
+		partials: Map<string, readonly InkerNodeJson[]>,
+		components: Map<string, readonly InkerNodeJson[]>,
+	): NonNullable<NodeRenderContext["loadTemplate"]> {
+		return (kind, name) => {
+			const isComponent = kind === "component";
+			const { root, validated, absPath } = this.#resolveTemplateFile(
+				name,
+				isComponent ? "components/" : "",
+			);
+			// Keyed the way the walker looks it up.
+			const key = templateFileKey(name);
+			const accept = (ast: NapiInkerAst): readonly InkerNodeJson[] => {
+				const info = ast.composeInfo;
+				if (info.hasLayout) {
+					throw new InkerRenderError(
+						"E_INKER_LAYOUT_IN_PARTIAL",
+						`${isComponent ? "Component" : "Partial"} file '${validated}' contains @layout() — ${isComponent ? "components" : "partials"} cannot declare layouts`,
+						{ templatePath: absPath, templateName: validated },
+					);
+				}
+				const slot = info.slots[0];
+				if (!isComponent && slot !== undefined) {
+					throw new InkerRenderError(
+						"E_INKER_UNKNOWN_SLOT",
+						`Partial '${validated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
+						{ templateName: validated, line: slot.line, column: slot.column },
+					);
+				}
+				const nodes = this.#astNodes(ast);
+				(isComponent ? components : partials).set(key, nodes);
+				return nodes;
+			};
+			return sync
+				? accept(this.#loadAstSync(absPath, validated, root))
+				: this.#loadAst(absPath, validated, root).then(accept);
+		};
 	}
 
 	/** Convert a parsed AST handle to its JSON node list (62-2 Node renderer). */

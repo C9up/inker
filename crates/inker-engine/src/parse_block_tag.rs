@@ -5,7 +5,7 @@
 //! "open / close / else" tokens for `if` / `each` so the top-level parser
 //! (`parse.rs`) can balance the structure.
 
-use crate::ast::{ComponentArg, ComponentNode, EachBinding, IfCondition, LayoutNode, PartialNode};
+use crate::ast::{ComponentNode, EachBinding, IfCondition, LayoutNode, PartialNode};
 use crate::error::{ErrorCode, InkerError};
 use crate::identifiers::{is_prototype_pollution_key, is_reserved_binding};
 use crate::parse_expression::{
@@ -342,6 +342,7 @@ fn parse_layout_or_include(
     } else {
         Ok(LayoutOrInclude::Partial(PartialNode {
             name,
+            name_source: None,
             raw: raw.to_string(),
             line,
             column,
@@ -539,7 +540,7 @@ fn find_top_level_in(s: &[char]) -> Option<(usize, usize)> {
             i += 1;
             continue;
         }
-        if c == '"' || c == '\'' {
+        if c == '"' || c == '\'' || c == '`' {
             string_delim = Some(c);
             i += 1;
             continue;
@@ -1463,27 +1464,15 @@ fn parse_include_if_tag(
     let (expression, next_id) =
         parse_expression_with_helper_count(&cond_source, line, column, &options, helper_id_start)?;
 
-    let name_pos = skip_whitespace(chars, start + comma + 1);
-    if name_pos >= chars.len() {
-        return Err(fail_parse(
-            "includeIf directive requires a quoted template name after the comma",
-            line,
-            column,
-            template_path,
-        ));
-    }
-    let (name, next) = read_quoted_string(chars, name_pos, line, column, template_path)?;
-    validate_path_name(&name, line, column, template_path)?;
-    let after_name = skip_whitespace(chars, next);
-    if after_name < chars.len() {
-        let trailing: String = chars[next..].iter().collect();
-        return Err(fail_parse(
-            format!("Unexpected tokens after includeIf name: '{trailing}'"),
-            line,
-            column,
-            template_path,
-        ));
-    }
+    let (name, name_source, next_id) = parse_template_name(
+        &body[comma + 1..],
+        "includeIf",
+        line,
+        column,
+        template_path,
+        helpers,
+        next_id,
+    )?;
     Ok((
         IfCondition {
             expression,
@@ -1491,6 +1480,7 @@ fn parse_include_if_tag(
         },
         PartialNode {
             name,
+            name_source,
             raw: raw.to_string(),
             line,
             column,
@@ -1636,86 +1626,62 @@ fn parse_each_tag(
     Ok((iterable, iterable_source, binding, next_id))
 }
 
-/// Slice an object literal (`{ … }`) accounting for nested braces/brackets/
-/// parens and string literals. Returns the substring including both `{`
-/// and `}` (as a String for ownership) and the END index in `chars`.
-fn slice_balanced_object(
-    chars: &[char],
-    start: usize,
+/// A template-name argument: a string literal is validated now; any other
+/// expression (`which`, `` `cards/${kind}` ``) is kept verbatim and validated
+/// when it is evaluated at render time, through the same name rules.
+fn parse_template_name(
+    source: &[char],
+    directive: &str,
     line: u32,
     column: u32,
     template_path: Option<&str>,
-) -> Result<(String, usize), InkerError> {
-    if chars.get(start).copied() != Some('{') {
-        return Err(fail_invalid_expression(
-            "expected '{' to start object literal",
+    helpers: &HashSet<String>,
+    helper_id_start: u32,
+) -> Result<(String, Option<String>, u32), InkerError> {
+    let text: String = source.iter().collect::<String>().trim().to_string();
+    if text.is_empty() {
+        return Err(fail_parse(
+            format!("{directive} directive requires a template name"),
             line,
             column,
             template_path,
         ));
     }
-    let mut opener_stack: Vec<char> = Vec::new();
-    let mut string_char: Option<char> = None;
-    let mut i = start;
-    while i < chars.len() {
-        let ch = chars[i];
-        if let Some(s) = string_char {
-            if ch == '\\' && i + 1 < chars.len() {
-                i += 2;
-                continue;
-            }
-            if ch == s {
-                string_char = None;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            string_char = Some(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '{' || ch == '[' || ch == '(' {
-            opener_stack.push(ch);
-        } else if ch == '}' || ch == ']' || ch == ')' {
-            let expected_opener = match ch {
-                '}' => '{',
-                ']' => '[',
-                ')' => '(',
-                _ => unreachable!(),
-            };
-            let top = opener_stack.last().copied();
-            if top != Some(expected_opener) {
-                let top_s = top
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "<empty>".into());
-                return Err(fail_invalid_expression(
-					format!(
-						"mismatched bracket in component args literal: '{ch}' has no matching opener (expected to close '{top_s}')"
-					),
-					line,
-					column,
-					template_path,
-				));
-            }
-            opener_stack.pop();
-            if opener_stack.is_empty() {
-                let slice: String = chars[start..=i].iter().collect();
-                return Ok((slice, i + 1));
+    let chars: Vec<char> = text.chars().collect();
+    if matches!(chars[0], '\'' | '"') {
+        if let Ok((name, next)) = read_quoted_string(&chars, 0, line, column, template_path) {
+            if skip_whitespace(&chars, next) >= chars.len() {
+                validate_path_name(&name, line, column, template_path)?;
+                return Ok((name, None, helper_id_start));
             }
         }
-        i += 1;
     }
-    Err(fail_invalid_expression(
-        "component args literal is unterminated; expected '}'",
+    let (_, next_id) = parse_expression_with_helper_count(
+        &text,
         line,
         column,
-        template_path,
-    ))
+        &expression_options(template_path, helpers),
+        helper_id_start,
+    )?;
+    Ok((String::new(), Some(text), next_id))
 }
 
+fn expression_options(
+    template_path: Option<&str>,
+    helpers: &HashSet<String>,
+) -> ParseExpressionOptions {
+    ParseExpressionOptions {
+        template_path: template_path.map(|s| s.to_string()),
+        helpers: helpers.clone(),
+    }
+}
+
+/// `@component(name[, props])`. The props are ANY JavaScript expression (an
+/// object literal, a variable, a spread), kept verbatim and evaluated in V8 at
+/// render time, as Edge does. They still go through the expression parser
+/// here so its prototype-pollution guard (`{ __proto__: … }`) fails at parse.
 // Threads the parser-wide position triple (line, column, template_path) plus the
-// helper-resolution context, matching the convention already allowed in render.rs.
+// helper-resolution context, like the other tag parsers here.
 #[allow(clippy::too_many_arguments)]
 fn parse_component_tag(
     raw: &str,
@@ -1727,108 +1693,81 @@ fn parse_component_tag(
     helpers: &HashSet<String>,
     helper_id_start: u32,
 ) -> Result<(ComponentNode, u32), InkerError> {
-    let after_kw_space = skip_whitespace(chars, after_keyword);
-    if after_kw_space >= chars.len() {
+    let rest = &chars[after_keyword..];
+    let start = skip_whitespace(rest, 0);
+    if start >= rest.len() {
         return Err(fail_invalid_expression(
-            "component directive requires a quoted component name",
+            "component directive requires a component name",
             line,
             column,
             template_path,
         ));
     }
-    let (name, next) = read_quoted_string(chars, after_kw_space, line, column, template_path)?;
-    validate_path_name(&name, line, column, template_path)?;
-
-    let mut i = skip_whitespace(chars, next);
-    // Edge separates the component name from its args object with a comma:
-    // `@component('name', { … })`. Accept (and skip) the optional comma.
-    if chars.get(i).copied() == Some(',') {
-        i = skip_whitespace(chars, i + 1);
+    // The historical `@component('name' { … })` form, without the comma.
+    let mut split: Option<(usize, usize)> = None;
+    if let Ok((_, next)) = read_quoted_string(rest, start, line, column, template_path) {
+        let after = skip_whitespace(rest, next);
+        if rest.get(after) == Some(&'{') {
+            split = Some((next, after));
+        }
     }
-    let mut args: Vec<ComponentArg> = Vec::new();
-    let mut next_id = helper_id_start;
-
-    if i < chars.len() {
-        if chars.get(i).copied() != Some('{') {
-            return Err(fail_invalid_expression(
-                format!(
-                    "component directive expected '{{' after name, got '{}'",
-                    chars[i]
-                ),
+    let (name_part, props_part) = match split {
+        Some((name_end, props_start)) => (&rest[..name_end], Some(&rest[props_start..])),
+        None => match find_top_level_comma(rest) {
+            Some(comma) => (&rest[..comma], Some(&rest[comma + 1..])),
+            None => (rest, None),
+        },
+    };
+    let (name, name_source, mut next_id) = parse_template_name(
+        name_part,
+        "component",
+        line,
+        column,
+        template_path,
+        helpers,
+        helper_id_start,
+    )?;
+    let props_source = match props_part {
+        None => None,
+        Some(props) => {
+            if let Some(extra) = find_top_level_comma(props) {
+                let trailing: String = props[extra..].iter().collect::<String>();
+                return Err(fail_invalid_expression(
+                    format!(
+                        "Unexpected tokens after component props: '{}'",
+                        trailing.trim()
+                    ),
+                    line,
+                    column,
+                    template_path,
+                ));
+            }
+            let text: String = props.iter().collect::<String>().trim().to_string();
+            if text.is_empty() {
+                return Err(fail_invalid_expression(
+                    "component directive has an empty props expression after the comma",
+                    line,
+                    column,
+                    template_path,
+                ));
+            }
+            let (_, end_id) = parse_expression_with_helper_count(
+                &text,
                 line,
                 column,
-                template_path,
-            ));
+                &expression_options(template_path, helpers),
+                next_id,
+            )?;
+            next_id = end_id;
+            Some(text)
         }
-        let obj_start = i;
-        let (obj_source, obj_end) =
-            slice_balanced_object(chars, obj_start, line, column, template_path)?;
-        // Compute the line/column at obj_start within the raw block (char-based)
-        let mut obj_line = line;
-        let mut obj_column = column;
-        for &ch in &chars[..obj_start] {
-            if ch == '\n' {
-                obj_line += 1;
-                obj_column = 1;
-            } else if ch != '\r' {
-                // `\r` is invisible to column counting, matching the lexer's
-                // `advance` and `parse_expression::position_at`.
-                obj_column += 1;
-            }
-        }
-        let opts = ParseExpressionOptions {
-            template_path: template_path.map(|s| s.to_string()),
-            helpers: helpers.clone(),
-        };
-        let (obj_expr, end_id) =
-            parse_expression_with_helper_count(&obj_source, obj_line, obj_column, &opts, next_id)?;
-        next_id = end_id;
-        let entries = match obj_expr {
-            Expression::Object { entries, .. } => entries,
-            _ => {
-                return Err(fail_invalid_expression(
-                    "component directive expected an object literal for args",
-                    line,
-                    column,
-                    template_path,
-                ));
-            }
-        };
-        let mut seen: HashSet<String> = HashSet::new();
-        for entry in entries {
-            if seen.contains(&entry.key) {
-                return Err(fail_invalid_expression(
-                    format!("component arg key '{}' is duplicated", entry.key),
-                    line,
-                    column,
-                    template_path,
-                ));
-            }
-            seen.insert(entry.key.clone());
-            let value_source = entry.value.source().to_string();
-            args.push(ComponentArg {
-                key: entry.key,
-                value: entry.value,
-                source: value_source,
-            });
-        }
-        i = obj_end;
-    }
-
-    let trailing: String = chars[i..].iter().collect::<String>().trim().to_string();
-    if !trailing.is_empty() {
-        return Err(fail_invalid_expression(
-            format!("Unexpected tokens after component args: '{trailing}'"),
-            line,
-            column,
-            template_path,
-        ));
-    }
+    };
 
     Ok((
         ComponentNode {
             name,
-            args,
+            name_source,
+            props_source,
             body_nodes: Vec::new(),
             named_slots: Vec::new(),
             raw: raw.to_string(),
@@ -1986,6 +1925,7 @@ pub enum ParsedBlockTag {
     },
     OpenSlot {
         name: String,
+        scope: Option<String>,
         line: u32,
         column: u32,
     },
@@ -2194,7 +2134,29 @@ pub fn parse_block_tag(
         ));
     }
 
-    if keyword == "layout" || keyword == "include" {
+    if keyword == "include" {
+        let (name, name_source, next_id) = parse_template_name(
+            &chars[after_keyword..],
+            "include",
+            line,
+            column,
+            template_path,
+            helpers,
+            helper_id_start,
+        )?;
+        return Ok((
+            ParsedBlockTag::Partial(PartialNode {
+                name,
+                name_source,
+                raw: raw.to_string(),
+                line,
+                column,
+            }),
+            next_id,
+        ));
+    }
+
+    if keyword == "layout" {
         let result = parse_layout_or_include(
             &keyword,
             raw,
@@ -2504,17 +2466,37 @@ pub fn parse_block_tag(
             ));
         }
         let after_name = skip_whitespace(&chars, next);
+        // `@slot('row', item)` — the component passes `item` when it renders
+        // the slot (`$slots.row(value)`).
+        let mut scope: Option<String> = None;
         if after_name < chars.len() {
             let trailing: String = chars[next..].iter().collect();
-            return Err(fail_parse(
-                format!("Unexpected tokens after slot name: '{trailing}'"),
-                line,
-                column,
-                template_path,
-            ));
+            let ident = trailing.trim().strip_prefix(',').map(str::trim);
+            match ident {
+                Some(ident)
+                    if BINDING_RE.is_match(ident)
+                        && !is_reserved_binding(ident)
+                        && !is_prototype_pollution_key(ident) =>
+                {
+                    scope = Some(ident.to_string());
+                }
+                _ => {
+                    return Err(fail_parse(
+                        format!("Unexpected tokens after slot name: '{trailing}'"),
+                        line,
+                        column,
+                        template_path,
+                    ));
+                }
+            }
         }
         return Ok((
-            ParsedBlockTag::OpenSlot { name, line, column },
+            ParsedBlockTag::OpenSlot {
+                name,
+                scope,
+                line,
+                column,
+            },
             helper_id_start,
         ));
     }
@@ -3047,12 +3029,60 @@ mod tests {
         match pb {
             ParsedBlockTag::Component(c) => {
                 assert_eq!(c.name, "button");
-                assert_eq!(c.args.len(), 2);
-                assert_eq!(c.args[0].key, "label");
-                assert_eq!(c.args[1].key, "disabled");
+                assert_eq!(
+                    c.props_source.as_deref(),
+                    Some("{ label: title, disabled: active }")
+                );
             }
             _ => panic!("expected Component"),
         }
+    }
+
+    #[test]
+    fn component_props_and_name_are_any_expression() {
+        let (pb, _) = parse_block_tag(
+            "component comp, { ...attrs, 'aria-label': x }",
+            1,
+            1,
+            &opts(),
+            0,
+        )
+        .unwrap();
+        match pb {
+            ParsedBlockTag::Component(c) => {
+                assert_eq!(c.name, "");
+                assert_eq!(c.name_source.as_deref(), Some("comp"));
+                assert_eq!(
+                    c.props_source.as_deref(),
+                    Some("{ ...attrs, 'aria-label': x }")
+                );
+            }
+            _ => panic!("expected Component"),
+        }
+        let e = parse_block_tag("component 'x', { __proto__: 1 }", 1, 1, &opts(), 0).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidExpression);
+        let e = parse_block_tag("component '../x'", 1, 1, &opts(), 0).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ParseError);
+    }
+
+    #[test]
+    fn include_takes_a_dynamic_name() {
+        let (pb, _) = parse_block_tag("include which", 1, 1, &opts(), 0).unwrap();
+        match pb {
+            ParsedBlockTag::Partial(p) => assert_eq!(p.name_source.as_deref(), Some("which")),
+            _ => panic!("expected Partial"),
+        }
+    }
+
+    #[test]
+    fn slot_takes_a_scope_binding() {
+        let (pb, _) = parse_block_tag("slot 'row', item", 1, 1, &opts(), 0).unwrap();
+        match pb {
+            ParsedBlockTag::OpenSlot { scope, .. } => assert_eq!(scope.as_deref(), Some("item")),
+            _ => panic!("expected OpenSlot"),
+        }
+        assert!(parse_block_tag("slot 'row', __proto__", 1, 1, &opts(), 0).is_err());
+        assert!(parse_block_tag("slot 'row', a b", 1, 1, &opts(), 0).is_err());
     }
 
     #[test]

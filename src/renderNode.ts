@@ -62,18 +62,27 @@ export type InkerNodeJson =
 			readonly column?: number;
 	  }
 	| { readonly type: "Layout"; readonly name: string }
-	| { readonly type: "Partial"; readonly name: string }
+	| {
+			readonly type: "Partial";
+			/** The literal name; empty when `name_source` computes it. */
+			readonly name: string;
+			readonly name_source?: string;
+			readonly line?: number;
+			readonly column?: number;
+	  }
 	| { readonly type: "Slot"; readonly name: string }
 	| {
 			readonly type: "Component";
+			/** The literal name; empty when `name_source` computes it. */
 			readonly name: string;
-			readonly args: readonly {
-				readonly key: string;
-				readonly source: string;
-			}[];
+			readonly name_source?: string;
+			/** The props: any JavaScript expression, evaluated in the caller. */
+			readonly props_source?: string;
 			readonly body_nodes: readonly InkerNodeJson[];
 			readonly named_slots: readonly {
 				readonly name: string;
+				/** `@slot('row', item)`: binds the slot call's first argument. */
+				readonly scope?: string;
 				readonly nodes: readonly InkerNodeJson[];
 			}[];
 			// ComponentNode carries these in Rust; the TS mirror had dropped them,
@@ -666,7 +675,10 @@ export interface NodeRenderContext {
 	 * then its slot body renders and nested components see the injected values.
 	 * Pre-rendering the bodies would run them before `@inject` ever executed.
 	 */
-	readonly slots?: ReadonlyMap<string, () => string | Promise<string>>;
+	readonly slots?: ReadonlyMap<
+		string,
+		(...args: readonly unknown[]) => string | Promise<string>
+	>;
 	/**
 	 * Shared state provided by an enclosing component (`@inject`), read by
 	 * nested components as `$context`. Undefined at the top level, which is how
@@ -688,6 +700,17 @@ export interface NodeRenderContext {
 	readonly missingComponents?: ReadonlyMap<string, InkerRenderError>;
 	/** How many partials / components deep this walk is. */
 	readonly depth?: number;
+	/**
+	 * Load a partial or component the preload did not cover — one whose name
+	 * is only known at render time (`@include(which)`), or one a template
+	 * loaded that way references in turn. Validates the name and its
+	 * containment exactly as the preload does. Absent for `renderString`,
+	 * which has no disk.
+	 */
+	readonly loadTemplate?: (
+		kind: "partial" | "component",
+		name: string,
+	) => readonly InkerNodeJson[] | Promise<readonly InkerNodeJson[]>;
 	/** Rendered `@section` content by name (child fills, injected at layout yields). */
 	readonly sections?: ReadonlyMap<string, string>;
 	/** Layout's default content for the section currently being rendered (`@super`). */
@@ -954,17 +977,9 @@ function* renderNode(
 		}
 		case "Partial": {
 			// `@include('name')` renders the partial's nodes in the SAME scope.
-			const name = normalizePartialKey(node.name);
-			const partial = ctx.partials?.get(name);
-			if (partial === undefined) {
-				throw (
-					ctx.missingPartials?.get(name) ??
-					new InkerRenderError(
-						"E_INKER_DISK_REQUIRED",
-						`@include('${node.name}') — partial not loaded (composer must preload it)`,
-					)
-				);
-			}
+			const raw = yield* templateName(node, scope, helpers, "@include");
+			const name = normalizePartialKey(raw);
+			const partial = yield* templateNodes(ctx, "partial", raw, name);
 			// Same scope as the host, but the partial is its own file: `$filename`,
 			// `@newError` and `@pushOnceTo` must name it, not the host.
 			yield* renderNodes(
@@ -975,7 +990,7 @@ function* renderNode(
 					...ctx,
 					templateName: name,
 					file: name,
-					depth: nextDepth(ctx, `@include('${node.name}')`),
+					depth: nextDepth(ctx, `@include('${raw}')`),
 				},
 				out,
 			);
@@ -1385,6 +1400,105 @@ function makeProps(values: Record<string, unknown>): PropsApi {
 	};
 }
 
+/** A partial's or component's name: its literal, or its expression's value. */
+function* templateName(
+	node: {
+		readonly name: string;
+		readonly name_source?: string;
+		readonly line?: number;
+		readonly column?: number;
+	},
+	scope: object,
+	helpers: object,
+	directive: string,
+): Generator<PromiseLike<unknown>, string, unknown> {
+	if (node.name_source === undefined) return node.name;
+	const value = yield* evalStep(node.name_source, scope, helpers, node);
+	if (typeof value !== "string" || value.length === 0) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`${directive}(${node.name_source}) must name a template with a non-empty string, got ${value === null ? "null" : typeof value}`,
+			{ line: node.line, column: node.column },
+		);
+	}
+	return value;
+}
+
+function isNodeList(value: unknown): value is readonly InkerNodeJson[] {
+	return Array.isArray(value);
+}
+
+/**
+ * The nodes of a partial or component: preloaded, or loaded now through
+ * `ctx.loadTemplate` (a name only known at render time). A template the
+ * preload found missing is reported here, where it is actually used.
+ */
+function* templateNodes(
+	ctx: NodeRenderContext,
+	kind: "partial" | "component",
+	raw: string,
+	key: string,
+): Generator<PromiseLike<unknown>, readonly InkerNodeJson[], unknown> {
+	const preloaded = (kind === "partial" ? ctx.partials : ctx.components)?.get(
+		key,
+	);
+	if (preloaded !== undefined) return preloaded;
+	const missing = (
+		kind === "partial" ? ctx.missingPartials : ctx.missingComponents
+	)?.get(key);
+	if (missing !== undefined) throw missing;
+	if (ctx.loadTemplate === undefined) {
+		throw new InkerRenderError(
+			"E_INKER_DISK_REQUIRED",
+			`@${kind === "partial" ? "include" : "component"}('${raw}') — no template loader in this render`,
+		);
+	}
+	const loaded = ctx.loadTemplate(kind, raw);
+	const nodes = isThenable(loaded) ? yield loaded : loaded;
+	if (!isNodeList(nodes)) {
+		throw new InkerRenderError(
+			"E_INKER_DISK_REQUIRED",
+			`@${kind === "partial" ? "include" : "component"}('${raw}') — the loader returned no template`,
+		);
+	}
+	return nodes;
+}
+
+/**
+ * The props a component is called with: whatever its props expression
+ * evaluates to, copied as own enumerable keys only (so an inherited or
+ * swapped prototype contributes nothing). An own `__proto__` / `constructor`
+ * / `prototype` key — `JSON.parse` output, a computed key — is refused.
+ */
+function* componentProps(
+	node: Extract<InkerNodeJson, { type: "Component" }>,
+	scope: object,
+	helpers: object,
+): Generator<PromiseLike<unknown>, Record<string, unknown>, unknown> {
+	const props: Record<string, unknown> = {};
+	if (node.props_source === undefined) return props;
+	const value = yield* evalStep(node.props_source, scope, helpers, node);
+	if (value === null || value === undefined) return props;
+	if (typeof value !== "object") {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_EXPRESSION",
+			`@component props \`${node.props_source}\` must be an object, got ${typeof value}`,
+			{ line: node.line, column: node.column },
+		);
+	}
+	for (const key of Object.keys(value)) {
+		if (PROTO_KEYS.has(key)) {
+			throw new InkerRenderError(
+				"E_INKER_INVALID_EXPRESSION",
+				`@component props key '${key}' is forbidden (prototype-pollution surface)`,
+				{ line: node.line, column: node.column },
+			);
+		}
+		props[key] = Reflect.get(value, key);
+	}
+	return props;
+}
+
 function* renderComponent(
 	node: Extract<InkerNodeJson, { type: "Component" }>,
 	scope: object,
@@ -1392,23 +1506,13 @@ function* renderComponent(
 	ctx: NodeRenderContext,
 	out: string[],
 ): RenderStep {
-	const key = normalizePartialKey(node.name);
-	const template = ctx.components?.get(key);
-	if (template === undefined) {
-		throw (
-			ctx.missingComponents?.get(key) ??
-			new InkerRenderError(
-				"E_INKER_DISK_REQUIRED",
-				`@component('${node.name}') — component not loaded (composer must preload it)`,
-			)
-		);
-	}
-	const depth = nextDepth(ctx, `@component('${node.name}')`);
-	// Args evaluate in the CALLER scope and become the component's OWN scope
-	// (props); the component does not inherit the caller's data.
-	const props: Record<string, unknown> = {};
-	for (const arg of node.args)
-		props[arg.key] = yield* evalStep(arg.source, scope, helpers);
+	const raw = yield* templateName(node, scope, helpers, "@component");
+	const key = normalizePartialKey(raw);
+	const template = yield* templateNodes(ctx, "component", raw, key);
+	const depth = nextDepth(ctx, `@component('${raw}')`);
+	// Props evaluate in the CALLER scope and become the component's OWN scope;
+	// the component does not inherit the caller's data.
+	const props = yield* componentProps(node, scope, helpers);
 
 	// `$context` — state an enclosing component provided via `@inject`, which
 	// this component may extend for its own descendants. Each level gets its OWN
@@ -1432,21 +1536,31 @@ function* renderComponent(
 	// back a string when it finished synchronously and a promise when it did
 	// not. `{{{ $slots.main() }}}` keeps working for the ordinary case, and an
 	// awaiting body is reached with `{{{ await $slots.main() }}}`, as in Adonis.
+	// `@slot('row', item)` binds the slot call's first argument to `item`, so
+	// a list component renders each row with `$slots.row(value)` (Edge).
 	const renderSlot = (
 		nodes: readonly InkerNodeJson[],
-	): (() => string | Promise<string>) => {
-		return () => {
+		scopeName?: string,
+	): ((...args: readonly unknown[]) => string | Promise<string>) => {
+		return (...args) => {
 			const slotOut: string[] = [];
+			const slotScope =
+				scopeName === undefined
+					? scope
+					: childScope(scope, { [scopeName]: args[0] });
 			return drive(
-				renderNodes(nodes, scope, helpers, slotCtx, slotOut),
+				renderNodes(nodes, slotScope, helpers, slotCtx, slotOut),
 				slotOut,
 			);
 		};
 	};
-	const slots = new Map<string, () => string | Promise<string>>();
+	const slots = new Map<
+		string,
+		(...args: readonly unknown[]) => string | Promise<string>
+	>();
 	slots.set("body", renderSlot(node.body_nodes));
 	for (const named of node.named_slots) {
-		slots.set(named.name, renderSlot(named.nodes));
+		slots.set(named.name, renderSlot(named.nodes, named.scope));
 	}
 
 	// `$slots.main()` renders the default (body) slot; `$slots.<name>()` a named
@@ -1466,7 +1580,7 @@ function* renderComponent(
 	$slots.main = () => asSafe(slots.get("body")?.() ?? "");
 	for (const [name, render] of slots) {
 		if (name === "body") continue;
-		$slots[name] = () => asSafe(render());
+		$slots[name] = (...args: readonly unknown[]) => asSafe(render(...args));
 	}
 
 	// `$caller` describes where the component was invoked from (Edge parity).
@@ -1492,7 +1606,7 @@ function* renderComponent(
 		$context,
 		// The component's OWN name (Edge `$filename`), as `$caller.filename` is
 		// the invoking template's.
-		$filename: node.name,
+		$filename: raw,
 	};
 
 	const subCtx: NodeRenderContext = {
@@ -1500,6 +1614,7 @@ function* renderComponent(
 		components: ctx.components,
 		missingPartials: ctx.missingPartials,
 		missingComponents: ctx.missingComponents,
+		loadTemplate: ctx.loadTemplate,
 		depth,
 		tags: ctx.tags,
 		stacks: ctx.stacks,
@@ -1508,8 +1623,8 @@ function* renderComponent(
 		context: $context,
 		// A component nested in THIS one must see this component as its caller;
 		// without it `$caller.filename` was undefined one level down.
-		templateName: node.name,
-		file: componentFile(normalizePartialKey(node.name)),
+		templateName: raw,
+		file: componentFile(key),
 	};
 	yield* renderNodes(template, componentScope, helpers, subCtx, out);
 }

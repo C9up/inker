@@ -167,7 +167,13 @@ pub struct LayoutNode {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PartialNode {
+    /// The template name when it is a string literal; empty when `name_source`
+    /// names it instead.
     pub name: String,
+    /// A non-literal name (`@include(which)`), evaluated at render time and
+    /// validated then like any other name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_source: Option<String>,
     pub raw: String,
     pub line: u32,
     pub column: u32,
@@ -199,19 +205,16 @@ pub enum EachBinding {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ComponentArg {
-    pub key: String,
-    pub value: Expression,
-    pub source: String,
-}
-
 /// A `@slot('name')…@endslot` block captured inside a component
 /// invocation body. Its `nodes` render in the CALLER's scope and are injected
 /// at the matching `{{> name }}` placeholder in the component template.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NamedSlot {
     pub name: String,
+    /// `@slot('row', item)`: the name the slot's first call argument is bound
+    /// to (`$slots.row(value)`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub nodes: Vec<InkerNode>,
     pub line: u32,
     pub column: u32,
@@ -219,8 +222,16 @@ pub struct NamedSlot {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ComponentNode {
+    /// The component name when it is a string literal; empty when
+    /// `name_source` names it instead.
     pub name: String,
-    pub args: Vec<ComponentArg>,
+    /// A non-literal name (`@component(comp)`), evaluated at render time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_source: Option<String>,
+    /// The props, as the verbatim JavaScript expression the author wrote (an
+    /// object literal, a variable, a spread…), evaluated in V8 at render time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub props_source: Option<String>,
     /// Default (`body`) slot content — the block body outside any
     /// `@slot()`. Empty for the self-closing `@component()` form.
     pub body_nodes: Vec<InkerNode>,

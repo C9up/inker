@@ -218,7 +218,7 @@ fn first_disk_node(nodes: &[InkerNode]) -> Option<DiskNodeRefNapi> {
             InkerNode::Partial(p) => {
                 return Some(DiskNodeRefNapi {
                     kind: "Partial".into(),
-                    name: p.name.clone(),
+                    name: p.name_source.clone().unwrap_or_else(|| p.name.clone()),
                 })
             }
             InkerNode::Slot(s) => {
@@ -230,7 +230,7 @@ fn first_disk_node(nodes: &[InkerNode]) -> Option<DiskNodeRefNapi> {
             InkerNode::Component(c) => {
                 return Some(DiskNodeRefNapi {
                     kind: "Component".into(),
-                    name: c.name.clone(),
+                    name: c.name_source.clone().unwrap_or_else(|| c.name.clone()),
                 })
             }
             InkerNode::If {
@@ -270,7 +270,9 @@ fn first_disk_node(nodes: &[InkerNode]) -> Option<DiskNodeRefNapi> {
 fn collect_partials(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
     for n in nodes {
         match n {
-            InkerNode::Partial(p) => out.push(NodeRefNapi {
+            // A name computed at render time cannot be preloaded; the renderer
+            // loads it when it gets there.
+            InkerNode::Partial(p) if p.name_source.is_none() => out.push(NodeRefNapi {
                 name: p.name.clone(),
                 line: p.line,
                 column: p.column,
@@ -312,11 +314,13 @@ fn collect_components(nodes: &[InkerNode], out: &mut Vec<NodeRefNapi>) {
     for n in nodes {
         match n {
             InkerNode::Component(c) => {
-                out.push(NodeRefNapi {
-                    name: c.name.clone(),
-                    line: c.line,
-                    column: c.column,
-                });
+                if c.name_source.is_none() {
+                    out.push(NodeRefNapi {
+                        name: c.name.clone(),
+                        line: c.line,
+                        column: c.column,
+                    });
+                }
                 // A `@component()` block body / named slots is caller content
                 // that may invoke further components — walk it so they pre-load.
                 collect_components(&c.body_nodes, out);

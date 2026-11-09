@@ -7,8 +7,7 @@
 //! the ADR-007 TS-side pre-resolve walk (AC6).
 
 use crate::ast::{
-    ComponentArg, ComponentNode, EachBinding, IfCondition, InkerNode, LayoutNode, NamedSlot,
-    SlotNode,
+    ComponentNode, EachBinding, IfCondition, InkerNode, LayoutNode, NamedSlot, SlotNode,
 };
 use crate::error::{ErrorCode, InkerError};
 use crate::lex::Token;
@@ -80,6 +79,7 @@ struct IfBranch {
 /// A `@slot('name')` currently being captured inside a component frame.
 struct SlotBuild {
     name: String,
+    scope: Option<String>,
     nodes: Vec<InkerNode>,
     line: u32,
     column: u32,
@@ -107,7 +107,8 @@ enum BlockFrame {
         line: u32,
         column: u32,
         name: String,
-        args: Vec<ComponentArg>,
+        name_source: Option<String>,
+        props_source: Option<String>,
         raw: String,
         body_nodes: Vec<InkerNode>,
         named_slots: Vec<NamedSlot>,
@@ -442,9 +443,6 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
             }
         }
         InkerNode::Component(c) => {
-            for a in &c.args {
-                collect_helpers_in_expr(&a.value, out);
-            }
             for n in &c.body_nodes {
                 collect_helpers_in_node(n, out);
             }
@@ -665,7 +663,8 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                                 line: component_node.line,
                                 column: component_node.column,
                                 name: component_node.name,
-                                args: component_node.args,
+                                name_source: component_node.name_source,
+                                props_source: component_node.props_source,
                                 raw: component_node.raw,
                                 body_nodes: Vec::new(),
                                 named_slots: Vec::new(),
@@ -687,6 +686,7 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     }
                     ParsedBlockTag::OpenSlot {
                         name,
+                        scope,
                         line: pl,
                         column: pc,
                     } => {
@@ -728,6 +728,7 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                                 }
                                 *active_slot = Some(SlotBuild {
                                     name,
+                                    scope,
                                     nodes: Vec::new(),
                                     line: pl,
                                     column: pc,
@@ -769,6 +770,7 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                             } => match active_slot.take() {
                                 Some(slot) => named_slots.push(NamedSlot {
                                     name: slot.name,
+                                    scope: slot.scope,
                                     nodes: slot.nodes,
                                     line: slot.line,
                                     column: slot.column,
@@ -829,7 +831,8 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                             line,
                             column,
                             name,
-                            args,
+                            name_source,
+                            props_source,
                             raw,
                             body_nodes,
                             named_slots,
@@ -848,7 +851,8 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                             push_node(
                                 InkerNode::Component(ComponentNode {
                                     name,
-                                    args,
+                                    name_source,
+                                    props_source,
                                     body_nodes,
                                     named_slots,
                                     raw,
@@ -1193,7 +1197,8 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                                 line: node.line,
                                 column: node.column,
                                 name: node.name,
-                                args: node.args,
+                                name_source: node.name_source,
+                                props_source: node.props_source,
                                 raw: node.raw,
                                 body_nodes: Vec::new(),
                                 named_slots: Vec::new(),
