@@ -1697,13 +1697,14 @@ export class Templates {
 
 	/**
 	 * Merge the registered globals UNDER the caller's data — per-render state
-	 * wins on a name collision, matching Edge's precedence. Returns `data`
-	 * untouched when nothing is registered, so the common path allocates nothing.
+	 * wins on a name collision, matching Edge's precedence. Always a fresh
+	 * object, even with no global registered: it is the render's own top frame,
+	 * so `@assign(count = …)` lands here and never in the object the caller
+	 * passed (Edge renders against `{ ...sharedState, ...state }` the same way).
 	 */
 	#withGlobals(
 		data: Readonly<Record<string, unknown>>,
-	): Readonly<Record<string, unknown>> {
-		if (this.#globals.size === 0) return data;
+	): Record<string, unknown> {
 		const merged: Record<string, unknown> = Object.create(null);
 		for (const [name, value] of this.#globals) merged[name] = value;
 		if (typeof data === "object" && data !== null && !Array.isArray(data)) {

@@ -78,6 +78,43 @@ describe("inker > @assign", () => {
 		).toBe("true");
 	});
 
+	it("never writes a bare-identifier assignment back into the caller's data", () => {
+		// A reused data object (module-level defaults, a cached view model) must
+		// render the same way twice: the render works on its own copy.
+		const data = { count: 0 };
+		const source = "@assign(count = count + 1){{ count }}";
+		const t = engine();
+		expect(t.renderString(source, data)).toBe("1");
+		expect(t.renderString(source, data)).toBe("1");
+		expect(data).toEqual({ count: 0 });
+	});
+
+	it("keeps the caller's data intact through render and renderSync", async () => {
+		const t = withTemplates({ page: "@assign(count = count + 1){{ count }}" });
+		const data = { count: 0 };
+		expect(await t.render("page", data)).toBe("1");
+		expect(t.renderSync("page", data)).toBe("1");
+		expect(await t.createRenderer().share({ count: 5 }).render("page")).toBe(
+			"6",
+		);
+		expect(data).toEqual({ count: 0 });
+	});
+
+	it("still mutates the object a member path points at", () => {
+		const user = { name: "unset" };
+		engine().renderString("@assign(user.name = 'Ada')", { user });
+		expect(user.name).toBe("Ada");
+	});
+
+	it("reaches an outer @let from inside an @each", () => {
+		expect(
+			engine().renderString(
+				"@let(seen = '')@each(c in list)@assign(seen = seen + c)@endeach{{ seen }}",
+				{ list: ["a", "b"] },
+			),
+		).toBe("ab");
+	});
+
 	it("rejects assigning to an undeclared binding", () => {
 		expect(() => engine().renderString("@assign(ghost = 1)")).toThrow(
 			/no such binding in scope/,
