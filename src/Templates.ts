@@ -109,6 +109,34 @@ interface PreloadClosure {
 }
 
 /**
+ * Read a template file without ever leaving `root`: open with `O_NOFOLLOW`
+ * first so a later path swap cannot redirect the read (T6 + P1), validate
+ * what the OS resolved, then read from the held descriptor.
+ */
+function readContainedSync(
+	absPath: string,
+	root: string,
+	validatedName: string,
+): string {
+	let fd: number;
+	try {
+		fd = fs.openSync(absPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+	} catch (cause) {
+		throw wrapFsError(cause, absPath, validatedName);
+	}
+	try {
+		assertRealpathContained(absPath, root, validatedName);
+		try {
+			return fs.readFileSync(fd, "utf8");
+		} catch (cause) {
+			throw wrapFsError(cause, absPath, validatedName);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
  * A load that failed only because the file is not there. The preload records
  * it instead of failing: Edge resolves partials and components when they
  * render, so one behind an untaken `@if` / `@includeIf` must not stop the page.
@@ -1013,16 +1041,10 @@ export class Templates {
 			validateName(this.#splitDisk(name).bare),
 		);
 		if (inMemory !== undefined) return { template: inMemory };
-		const { absPath } = this.#resolveTemplateFile(name);
-		try {
-			return { template: fs.readFileSync(absPath, "utf8") };
-		} catch {
-			throw new InkerRenderError(
-				"E_INKER_TEMPLATE_NOT_FOUND",
-				`Template not found: ${absPath}`,
-				{ templateName: name, templatePath: absPath },
-			);
-		}
+		const { root, validated, absPath } = this.#resolveTemplateFile(name);
+		// The same guarded read a render does: the root is a containment
+		// boundary for every way a template's source leaves the disk.
+		return { template: readContainedSync(absPath, root, validated) };
 	}
 
 	/** The mounted disks, name → canonicalised root (Edge `loader.mounted`).
@@ -2068,28 +2090,7 @@ export class Templates {
 			}
 		}
 
-		// T6 + P1: open with `O_NOFOLLOW` first so a later path swap cannot
-		// redirect the read, then validate what the OS resolved.
-		let fd: number;
-		try {
-			fd = fs.openSync(
-				absPath,
-				fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
-			);
-		} catch (cause) {
-			throw wrapFsError(cause, absPath, validatedName);
-		}
-		let source: string;
-		try {
-			assertRealpathContained(absPath, root, validatedName);
-			try {
-				source = fs.readFileSync(fd, "utf8");
-			} catch (cause) {
-				throw wrapFsError(cause, absPath, validatedName);
-			}
-		} finally {
-			fs.closeSync(fd);
-		}
+		const source = readContainedSync(absPath, root, validatedName);
 
 		return this.#parseAndCache(
 			source,
