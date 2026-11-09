@@ -913,8 +913,8 @@ export class Templates {
 	// tag names change how a template PARSES, registerTag() invalidates the cache.
 	readonly #tags: Map<string, InkerTag> = new Map();
 	// Named template "disks" (AdonisJS/Edge `edge.mount(name, dir)` parity).
-	// The DEFAULT disk is `#root` (the constructor `root`), addressed by a bare
-	// `template` name; a NAMED disk is addressed as `name::template`. Each value
+	// The DEFAULT disk is `#root` (the constructor `root`) unless a `default`
+	// entry here re-points it, and is addressed by a bare `template` name; a NAMED disk is addressed as `name::template`. Each value
 	// is a canonicalised absolute root — containment (assertContained + the
 	// #loadAst symlink guard) is enforced against the disk's OWN root, never a
 	// shared one, so mounting a package's templates cannot widen traversal.
@@ -944,8 +944,9 @@ export class Templates {
 	 * Mount a named templates "disk" (AdonisJS/Edge `edge.mount(name, dir)`
 	 * parity). Templates in a mounted disk are addressed as `name::template`
 	 * (including from `@layout()` / `@include()` / `@component()`
-	 * references); a BARE `template` name always resolves against the default
-	 * root, exactly like Edge. `dir` is canonicalised (absolute + realpath) the
+	 * references); a BARE `template` name resolves against the default disk —
+	 * the constructor root until `mount(dir)` / `mount('default', dir)`
+	 * re-points it, exactly like Edge. `dir` is canonicalised (absolute + realpath) the
 	 * same way the constructor root is, so each disk carries its own containment
 	 * boundary.
 	 *
@@ -978,6 +979,11 @@ export class Templates {
 			);
 		}
 		this.#disks.set(diskName, root);
+		// Bare names now resolve somewhere else; component tags follow the disk.
+		if (diskName === "default") {
+			this.#componentTags = undefined;
+			this.clearCache();
+		}
 	}
 
 	/**
@@ -988,7 +994,11 @@ export class Templates {
 	 * two directories canonicalise to overlapping absolute paths.
 	 */
 	unmount(diskName: string): void {
-		this.#disks.delete(diskName);
+		// Unmounting `default` hands bare names back to the constructor root.
+		if (this.#disks.delete(diskName) && diskName === "default") {
+			this.#componentTags = undefined;
+			this.clearCache();
+		}
 	}
 
 	/**
@@ -1068,7 +1078,7 @@ export class Templates {
 	/** The mounted disks, name → canonicalised root (Edge `loader.mounted`).
 	 * `default` is the root the engine was constructed with. */
 	get mounted(): Readonly<Record<string, string>> {
-		const out: Record<string, string> = { default: this.#root };
+		const out: Record<string, string> = { default: this.#defaultRoot() };
 		for (const [name, root] of this.#disks) out[name] = root;
 		return Object.freeze(out);
 	}
@@ -1097,8 +1107,10 @@ export class Templates {
 		diskName: string;
 		components: { componentName: string; tagName: string }[];
 	}[] {
-		const disks: [string, string][] = [["default", this.#root]];
-		for (const [name, root] of this.#disks) disks.push([name, root]);
+		const disks: [string, string][] = [["default", this.#defaultRoot()]];
+		for (const [name, root] of this.#disks) {
+			if (name !== "default") disks.push([name, root]);
+		}
 		return disks.map(([diskName, root]) => ({
 			diskName,
 			components: this.#scanComponents(diskName, root),
@@ -1189,16 +1201,26 @@ export class Templates {
 	}
 
 	/**
+	 * The default disk: what `mount(dir)` / `mount('default', dir)` pointed it
+	 * at, else the constructor root. Bare names resolve here, so the root
+	 * `mounted` reports is the one renders use.
+	 */
+	#defaultRoot(): string {
+		return this.#disks.get("default") ?? this.#root;
+	}
+
+	/**
 	 * Split an optionally-namespaced template name into its resolution root and
 	 * bare (disk-relative) name. `name::path` → the mounted disk's root; a bare
 	 * `path` → the default root. Unknown disk → loud E_INKER_INVALID_PATH.
 	 */
 	#splitDisk(name: string): { root: string; bare: string } {
 		const sep = name.indexOf("::");
-		if (sep === -1) return { root: this.#root, bare: name };
+		if (sep === -1) return { root: this.#defaultRoot(), bare: name };
 		const disk = name.slice(0, sep);
 		const bare = name.slice(sep + 2);
-		const root = this.#disks.get(disk);
+		const root =
+			disk === "default" ? this.#defaultRoot() : this.#disks.get(disk);
 		if (root === undefined) {
 			throw new InkerRenderError(
 				"E_INKER_INVALID_PATH",

@@ -169,3 +169,56 @@ describe("Templates — named disks (edge.mount parity)", () => {
 		}
 	});
 });
+
+describe("Templates#mount — the one-argument form re-points the default disk", () => {
+	function dirWith(files: Record<string, string>): string {
+		const dir = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(os.tmpdir(), "inker-default-")),
+		);
+		for (const [name, source] of Object.entries(files)) {
+			const file = path.join(dir, `${name}.inker`);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, source);
+		}
+		return dir;
+	}
+
+	it("resolves bare names under the mounted directory", async () => {
+		const views = dirWith({ home: "HOME", "components/c": "C" });
+		const t = new Templates({ root: dirWith({}) });
+		t.mount(views);
+		expect(await t.render("home")).toBe("HOME");
+		expect(t.renderSync("default::home")).toBe("HOME");
+		t.registerTemplate("page", { template: "@!component('c')" });
+		expect(await t.render("page")).toBe("C");
+		expect(t.makePath("home")).toBe(path.join(views, "home.inker"));
+	});
+
+	it("reports the root actually in force", () => {
+		const views = dirWith({ home: "HOME" });
+		const t = new Templates({ root: dirWith({}) });
+		t.mount("default", views);
+		expect(t.mounted.default).toBe(views);
+		expect(t.listComponents()[0]?.diskName).toBe("default");
+	});
+
+	it("enforces containment against the new default root", async () => {
+		const outside = dirWith({ secret: "SECRET" });
+		const views = dirWith({ home: "HOME" });
+		fs.symlinkSync(outside, path.join(views, "linked"));
+		const t = new Templates({ root: dirWith({}) });
+		t.mount(views);
+		await expect(t.render("../secret")).rejects.toMatchObject({
+			code: "E_INKER_INVALID_PATH",
+		});
+		await expect(t.render("linked/secret")).rejects.toMatchObject({
+			code: "E_INKER_INVALID_PATH",
+		});
+	});
+
+	it("refuses to re-point a mounted default disk without unmount", () => {
+		const t = new Templates({ root: dirWith({}) });
+		t.mount(dirWith({}));
+		expect(() => t.mount(dirWith({}))).toThrow(/already mounted/);
+	});
+});
