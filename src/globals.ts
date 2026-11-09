@@ -148,8 +148,28 @@ function excerpt(
 	length = 20,
 	options: TruncateOptions = {},
 ): string {
-	const plain = str(value).replace(/<[^>]*>/g, "");
-	return truncate(plain, length, options);
+	return truncate(stripTags(str(value)), length, options);
+}
+
+/**
+ * Remove every `<…>` tag, as `/<[^>]*>/g` would, in ONE pass. The regex is
+ * quadratic on a long run of `<` with no `>` (each `<` rescans to the end),
+ * and excerpt's input is user-authored text. NAMED DEVIATION (hardening):
+ * Edge strips with a regex of the same shape and shares the slowdown.
+ */
+function stripTags(text: string): string {
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const open = text.indexOf("<", i);
+		if (open === -1) break;
+		const close = text.indexOf(">", open + 1);
+		// No `>` after this `<`: no tag can close anywhere further on.
+		if (close === -1) break;
+		out += text.slice(i, open);
+		i = close + 1;
+	}
+	return out + text.slice(i);
 }
 
 /**
