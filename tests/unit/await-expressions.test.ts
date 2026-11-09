@@ -126,3 +126,44 @@ describe("inker > await in expressions", () => {
 		t.dispose();
 	});
 });
+
+describe("inker > the word await inside a literal", () => {
+	it("renders synchronously when await only appears in a string", () => {
+		const t = createTestTemplates({
+			templates: {
+				single: "{{ 'please await (this)' }}",
+				double: '{{ "await x" }}',
+			},
+		});
+		expect(t.engine.renderSync("single")).toBe("please await (this)");
+		expect(t.engine.renderSync("double")).toBe("await x");
+		t.dispose();
+	});
+
+	it("renders synchronously when await only appears in a template literal's text", () => {
+		const t = createTestTemplates({
+			templates: { page: ["{{ `await $", "{a}` }}"].join("") },
+		});
+		expect(t.engine.renderSync("page", { a: 1 })).toBe("await 1");
+		t.dispose();
+	});
+
+	it("still awaits inside a template literal's substitution", async () => {
+		const t = createTestTemplates({
+			templates: { page: ["{{ `n=$", "{await one()}` }}"].join("") },
+			helpers: new Map([["one", () => delayed(1)]]),
+		});
+		expect(await t.render("page")).toBe("n=1");
+		t.dispose();
+	});
+
+	it("still refuses a real await in a synchronous render", () => {
+		const t = createTestTemplates({
+			templates: { page: "{{ await p }}" },
+		});
+		expect(() =>
+			t.engine.renderSync("page", { p: Promise.resolve(1) }),
+		).toThrow(/cannot use `await`/);
+		t.dispose();
+	});
+});

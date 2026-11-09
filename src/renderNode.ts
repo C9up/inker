@@ -335,6 +335,60 @@ const exprCache = new Map<string, CompiledExpr>();
 /** `await` as a keyword, not as part of an identifier (`awaited`, `myAwait`). */
 const AWAIT_RE = /(^|[^\w$.])await[\s(]/;
 
+/**
+ * The expression's code with the text of its string and template literals
+ * blanked out (a template's `${…}` substitutions are code and stay), so a
+ * literal that merely contains the word `await` does not make the
+ * expression async.
+ */
+function codeOutsideLiterals(source: string): string {
+	let out = "";
+	// Each entry is the `{` depth at which a template literal's `${` opened.
+	const templates: number[] = [];
+	let depth = 0;
+	let quote: "'" | '"' | "`" | undefined;
+	for (let i = 0; i < source.length; i++) {
+		const ch = source.charAt(i);
+		if (quote !== undefined) {
+			if (ch === "\\") {
+				i++;
+				out += "  ";
+				continue;
+			}
+			if (quote === "`" && ch === "$" && source.charAt(i + 1) === "{") {
+				templates.push(depth);
+				depth++;
+				quote = undefined;
+				i++;
+				out += "${";
+				continue;
+			}
+			if (ch === quote) {
+				quote = undefined;
+				out += ch;
+			} else {
+				out += " ";
+			}
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			out += ch;
+			continue;
+		}
+		if (ch === "{") depth++;
+		if (ch === "}") {
+			depth--;
+			if (templates.length > 0 && templates[templates.length - 1] === depth) {
+				templates.pop();
+				quote = "`";
+			}
+		}
+		out += ch;
+	}
+	return out;
+}
+
 const AsyncFunction: FunctionConstructor = Object.getPrototypeOf(
 	async () => {},
 ).constructor;
@@ -367,7 +421,10 @@ function compileExpr(source: string): CompiledExpr {
 		// `await` is a syntax error anywhere else — and then returns a promise
 		// the walker suspends on. `with` is legal in both (a `new Function` body
 		// is non-strict), so the scope chain is identical either way.
-		const Ctor = AWAIT_RE.test(source) ? AsyncFunction : Function;
+		const Ctor =
+			AWAIT_RE.test(source) && AWAIT_RE.test(codeOutsideLiterals(source))
+				? AsyncFunction
+				: Function;
 		const compiled = new Ctor(
 			"$u",
 			"$g",
