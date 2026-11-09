@@ -16,6 +16,7 @@ import {
 	napiThrowToInker,
 } from "./loadNapi.js";
 import {
+	clearCompiledExpressions,
 	collectSections,
 	type InkerNodeJson,
 	type InkerTag,
@@ -1939,6 +1940,7 @@ export class Templates {
 	clearCache(): void {
 		this.#cacheGeneration += 1;
 		this.#cache.clear();
+		clearCompiledExpressions();
 		// T7: also drop the in-flight promise dedup map so the next render()
 		// for any in-flight key forces a fresh load instead of reusing the
 		// pre-clear promise. The promise itself still resolves for whoever

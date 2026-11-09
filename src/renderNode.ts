@@ -1,5 +1,6 @@
 import { classNames, htmlAttrs, INKER_GLOBALS } from "./globals.js";
 import { InkerRenderError } from "./InkerRenderError.js";
+import { LruCache } from "./lruCache.js";
 import { SafeString } from "./SafeString.js";
 import type { Stacks } from "./stacks.js";
 
@@ -328,9 +329,30 @@ const MISSING_AS_UNDEFINED: object = new Proxy(Object.freeze({}), {
 	set: () => true,
 });
 
+/**
+ * How many compiled expressions (and, separately, `@let` destructurings) stay
+ * cached. Bounded: `renderString` compiles whatever source it is given, so an
+ * unbounded cache keeps one closure per distinct expression for the life of
+ * the process. File templates use far fewer than this.
+ */
+export const COMPILED_EXPRESSION_CAPACITY = 4096;
+
 // Compile-once cache: expression source → a JS fn evaluating it with helpers +
 // scope in scope (`with` — a `new Function` body is non-strict).
-const exprCache = new Map<string, CompiledExpr>();
+const exprCache = new LruCache<string, CompiledExpr>(
+	COMPILED_EXPRESSION_CAPACITY,
+);
+
+/** Number of compiled expressions currently cached. */
+export function compiledExpressionCount(): number {
+	return exprCache.size;
+}
+
+/** Drop every compiled expression (`Templates#clearCache`). */
+export function clearCompiledExpressions(): void {
+	exprCache.clear();
+	destructureCache.clear();
+}
 
 /** `await` as a keyword, not as part of an identifier (`awaited`, `myAwait`). */
 const AWAIT_RE = /(^|[^\w$.])await[\s(]/;
@@ -634,10 +656,10 @@ function guardDepth<T>(fn: () => T): T {
 // we only compile `const <pattern> = (<rhs>); return { <names> }` in V8 and
 // thread the bound values into the render scope; `names` is already trusted.
 
-const destructureCache = new Map<
+const destructureCache = new LruCache<
 	string,
 	(scope: object, helpers: object) => Record<string, unknown>
->();
+>(COMPILED_EXPRESSION_CAPACITY);
 
 /** Evaluate a destructuring `@let` and return the newly-bound names as an
  * object to fold into the render scope. `names` are the Rust-validated bound
