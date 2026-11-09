@@ -679,6 +679,15 @@ export interface NodeRenderContext {
 	readonly partials?: ReadonlyMap<string, readonly InkerNodeJson[]>;
 	/** Pre-loaded `@component` templates by normalized key → their node list. */
 	readonly components?: ReadonlyMap<string, readonly InkerNodeJson[]>;
+	/**
+	 * Partials / components the preload found no file for. Not an error until
+	 * one actually renders — Edge resolves them at that point, so one behind an
+	 * untaken `@if` / `@includeIf` costs nothing.
+	 */
+	readonly missingPartials?: ReadonlyMap<string, InkerRenderError>;
+	readonly missingComponents?: ReadonlyMap<string, InkerRenderError>;
+	/** How many partials / components deep this walk is. */
+	readonly depth?: number;
 	/** Rendered `@section` content by name (child fills, injected at layout yields). */
 	readonly sections?: ReadonlyMap<string, string>;
 	/** Layout's default content for the section currently being rendered (`@super`). */
@@ -718,6 +727,26 @@ export function collectSections(nodes: readonly InkerNodeJson[]): {
 		}
 	}
 	return { sections, body };
+}
+
+/**
+ * How many partials / components may nest in one render. Recursion is legal
+ * (a tree component renders itself per child) and ends on the data; this
+ * bound turns a recursion that never ends into a typed error instead of a
+ * stack overflow.
+ */
+const MAX_TEMPLATE_DEPTH = 100;
+
+function nextDepth(ctx: NodeRenderContext, what: string): number {
+	const depth = (ctx.depth ?? 0) + 1;
+	if (depth > MAX_TEMPLATE_DEPTH) {
+		throw new InkerRenderError(
+			"E_INKER_RENDER_DEPTH",
+			`${what} nests partials/components more than ${MAX_TEMPLATE_DEPTH} levels deep — a recursion that never ends on the data`,
+			{ templateName: ctx.templateName },
+		);
+	}
+	return depth;
 }
 
 /** The file a component key resolves to, in the namespace of template names. */
@@ -925,21 +954,29 @@ function* renderNode(
 		}
 		case "Partial": {
 			// `@include('name')` renders the partial's nodes in the SAME scope.
-			const partial = ctx.partials?.get(normalizePartialKey(node.name));
+			const name = normalizePartialKey(node.name);
+			const partial = ctx.partials?.get(name);
 			if (partial === undefined) {
-				throw new InkerRenderError(
-					"E_INKER_DISK_REQUIRED",
-					`@include('${node.name}') — partial not loaded (composer must preload it)`,
+				throw (
+					ctx.missingPartials?.get(name) ??
+					new InkerRenderError(
+						"E_INKER_DISK_REQUIRED",
+						`@include('${node.name}') — partial not loaded (composer must preload it)`,
+					)
 				);
 			}
 			// Same scope as the host, but the partial is its own file: `$filename`,
 			// `@newError` and `@pushOnceTo` must name it, not the host.
-			const name = normalizePartialKey(node.name);
 			yield* renderNodes(
 				partial,
 				childScope(scope, { $filename: name }),
 				helpers,
-				{ ...ctx, templateName: name, file: name },
+				{
+					...ctx,
+					templateName: name,
+					file: name,
+					depth: nextDepth(ctx, `@include('${node.name}')`),
+				},
 				out,
 			);
 			return;
@@ -1355,13 +1392,18 @@ function* renderComponent(
 	ctx: NodeRenderContext,
 	out: string[],
 ): RenderStep {
-	const template = ctx.components?.get(normalizePartialKey(node.name));
+	const key = normalizePartialKey(node.name);
+	const template = ctx.components?.get(key);
 	if (template === undefined) {
-		throw new InkerRenderError(
-			"E_INKER_DISK_REQUIRED",
-			`@component('${node.name}') — component not loaded (composer must preload it)`,
+		throw (
+			ctx.missingComponents?.get(key) ??
+			new InkerRenderError(
+				"E_INKER_DISK_REQUIRED",
+				`@component('${node.name}') — component not loaded (composer must preload it)`,
+			)
 		);
 	}
+	const depth = nextDepth(ctx, `@component('${node.name}')`);
 	// Args evaluate in the CALLER scope and become the component's OWN scope
 	// (props); the component does not inherit the caller's data.
 	const props: Record<string, unknown> = {};
@@ -1456,6 +1498,9 @@ function* renderComponent(
 	const subCtx: NodeRenderContext = {
 		partials: ctx.partials,
 		components: ctx.components,
+		missingPartials: ctx.missingPartials,
+		missingComponents: ctx.missingComponents,
+		depth,
 		tags: ctx.tags,
 		stacks: ctx.stacks,
 		sharedState: ctx.sharedState,

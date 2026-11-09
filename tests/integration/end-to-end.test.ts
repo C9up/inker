@@ -145,7 +145,7 @@ describe("Templates — layouts and partials", () => {
 		expect(await templates.render("page", {})).toBe("X(wrap[inner])Y");
 	});
 
-	it("circular include — partials a → b → a throws E_INKER_CIRCULAR_INCLUDE", async () => {
+	it("unbounded include cycle — partials a → b → a throws E_INKER_RENDER_DEPTH", async () => {
 		fs.writeFileSync(
 			path.join(root, "partials/a.inker"),
 			"A:@include('partials/b')",
@@ -161,9 +161,8 @@ describe("Templates — layouts and partials", () => {
 			expect.fail("should have thrown");
 		} catch (e) {
 			const err = asTyped<InkerRenderError>(e);
-			expect(err.code).toBe("E_INKER_CIRCULAR_INCLUDE");
-			expect(err.message.replace(/\\/g, "/")).toContain("partials/a");
-			expect(err.message.replace(/\\/g, "/")).toContain("partials/b");
+			expect(err.code).toBe("E_INKER_RENDER_DEPTH");
+			expect(err.message.replace(/\\/g, "/")).toContain("partials/");
 		}
 	});
 
@@ -420,7 +419,7 @@ describe("Templates — layouts and partials", () => {
 			).toBe("HIDDEN");
 		});
 
-		it("detects component cycle (card→card) on disk fixture", async () => {
+		it("stops a component cycle (card→card) on disk fixture", async () => {
 			write("components/card.inker", "@component('card', {})");
 			write("page.inker", "@component('card', {})");
 			const templates = new Templates({ root, cacheMode: "mtime" });
@@ -428,9 +427,7 @@ describe("Templates — layouts and partials", () => {
 				await templates.render("page", {});
 				expect.fail();
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe(
-					"E_INKER_CIRCULAR_INCLUDE",
-				);
+				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_RENDER_DEPTH");
 			}
 		});
 

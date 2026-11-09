@@ -318,7 +318,7 @@ describe("Templates — component resolution (53.3)", () => {
 		}
 	});
 
-	it("detects component circular includes (card → card)", async () => {
+	it("stops a component that renders itself forever (card → card)", async () => {
 		write("page", "@component('card', {})");
 		write("components/card", "@component('card', {})");
 		const templates = new Templates({ root, cacheMode: "mtime" });
@@ -327,7 +327,7 @@ describe("Templates — component resolution (53.3)", () => {
 			expect.fail();
 		} catch (e) {
 			const err = asTyped<InkerRenderError>(e);
-			expect(err.code).toBe("E_INKER_CIRCULAR_INCLUDE");
+			expect(err.code).toBe("E_INKER_RENDER_DEPTH");
 		}
 	});
 

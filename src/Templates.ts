@@ -94,6 +94,29 @@ interface ComposedTemplate {
 	layoutAbsPath?: string;
 	partialAsts: Map<string, NapiInkerAst>;
 	componentAsts: Map<string, NapiInkerAst>;
+	/** Referenced partials whose file does not exist, keyed like `partialAsts`. */
+	missingPartials: Map<string, InkerRenderError>;
+	/** Referenced components whose file does not exist. */
+	missingComponents: Map<string, InkerRenderError>;
+}
+
+/** What the static preload collects: every reachable template, loaded once. */
+interface PreloadClosure {
+	readonly partialAsts: Map<string, NapiInkerAst>;
+	readonly componentAsts: Map<string, NapiInkerAst>;
+	readonly missingPartials: Map<string, InkerRenderError>;
+	readonly missingComponents: Map<string, InkerRenderError>;
+}
+
+/**
+ * A load that failed only because the file is not there. The preload records
+ * it instead of failing: Edge resolves partials and components when they
+ * render, so one behind an untaken `@if` / `@includeIf` must not stop the page.
+ */
+function isTemplateNotFound(e: unknown): e is InkerRenderError {
+	return (
+		e instanceof InkerRenderError && e.code === "E_INKER_TEMPLATE_NOT_FOUND"
+	);
 }
 
 /** The template file extension, shared by resolution and the component scan. */
@@ -1183,16 +1206,27 @@ export class Templates {
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
-			const html =
-				"nodes" in req
-					? await renderNodeTreeAsync(
-							req.nodes,
-							req.state,
-							this.#renderHelpers(),
-							req.ctx,
-						)
-					: await this.#loadAst(req.absPath, req.validatedName, req.root);
-			next = step.next(html);
+			if ("nodes" in req) {
+				next = step.next(
+					await renderNodeTreeAsync(
+						req.nodes,
+						req.state,
+						this.#renderHelpers(),
+						req.ctx,
+					),
+				);
+				continue;
+			}
+			// A failed load is handed back to the composition, which decides
+			// whether it is fatal (a missing partial is not, until it renders).
+			let ast: NapiInkerAst;
+			try {
+				ast = await this.#loadAst(req.absPath, req.validatedName, req.root);
+			} catch (e) {
+				next = step.throw(e);
+				continue;
+			}
+			next = step.next(ast);
 		}
 		return next.value;
 	}
@@ -1219,11 +1253,20 @@ export class Templates {
 		let next = step.next();
 		while (!next.done) {
 			const req = next.value;
-			const html =
-				"nodes" in req
-					? renderNodeTree(req.nodes, req.state, this.#renderHelpers(), req.ctx)
-					: this.#loadAstSync(req.absPath, req.validatedName, req.root);
-			next = step.next(html);
+			if ("nodes" in req) {
+				next = step.next(
+					renderNodeTree(req.nodes, req.state, this.#renderHelpers(), req.ctx),
+				);
+				continue;
+			}
+			let ast: NapiInkerAst;
+			try {
+				ast = this.#loadAstSync(req.absPath, req.validatedName, req.root);
+			} catch (e) {
+				next = step.throw(e);
+				continue;
+			}
+			next = step.next(ast);
 		}
 		return next.value;
 	}
@@ -1272,6 +1315,8 @@ export class Templates {
 		const baseCtx = {
 			partials,
 			components,
+			missingPartials: composed.missingPartials,
+			missingComponents: composed.missingComponents,
 			tags: this.#tags,
 			templateName: name,
 			file: templateFileKey(name),
@@ -2038,8 +2083,12 @@ export class Templates {
 		entryAbsPath: string,
 		includeStack: Set<string>,
 	): ComposeStep<ComposedTemplate> {
-		const partialAsts = new Map<string, NapiInkerAst>();
-		const componentAsts = new Map<string, NapiInkerAst>();
+		const closure: PreloadClosure = {
+			partialAsts: new Map(),
+			componentAsts: new Map(),
+			missingPartials: new Map(),
+			missingComponents: new Map(),
+		};
 
 		// The Rust parser already separates the leading `@layout()` into
 		// `ast.layout` and excludes it from `ast.nodes`, so `entryAst` IS the
@@ -2070,23 +2119,11 @@ export class Templates {
 		// Resolve partials + components reachable from the body AST. Both
 		// resolvers recurse mutually, so the full transitive closure (partials
 		// inside components and vice versa) is pre-loaded here.
-		yield* this.#resolvePartialsIn(
-			entryInfo.partials,
-			partialAsts,
-			componentAsts,
-			includeStack,
-			entryAbsPath,
-		);
-		yield* this.#resolveComponentsIn(
-			entryInfo.components,
-			partialAsts,
-			componentAsts,
-			includeStack,
-			entryAbsPath,
-		);
+		yield* this.#resolvePartialsIn(entryInfo.partials, closure);
+		yield* this.#resolveComponentsIn(entryInfo.components, closure);
 
 		if (!hasLayout) {
-			return { bodyAst, partialAsts, componentAsts };
+			return { bodyAst, ...closure };
 		}
 
 		// Resolve the layout file.
@@ -2182,20 +2219,8 @@ export class Templates {
 
 			// Resolve partials + components reachable from the layout AST (mutual
 			// recursion covers the full transitive closure).
-			yield* this.#resolvePartialsIn(
-				layoutInfo.partials,
-				partialAsts,
-				componentAsts,
-				includeStack,
-				layoutAbsPath,
-			);
-			yield* this.#resolveComponentsIn(
-				layoutInfo.components,
-				partialAsts,
-				componentAsts,
-				includeStack,
-				layoutAbsPath,
-			);
+			yield* this.#resolvePartialsIn(layoutInfo.partials, closure);
+			yield* this.#resolveComponentsIn(layoutInfo.components, closure);
 		} finally {
 			includeStack.delete(layoutAbsPath);
 		}
@@ -2205,117 +2230,95 @@ export class Templates {
 			layoutAst,
 			layoutName,
 			layoutAbsPath,
-			partialAsts,
-			componentAsts,
+			...closure,
 		};
 	}
 
+	/**
+	 * Preload every partial reachable from `refs` (and, through them, every
+	 * component). An optimisation, not a gate: a template already in the
+	 * closure is not loaded again, which is also what lets a partial include
+	 * itself — recursion is bounded at render time, on the data, as in Edge.
+	 */
 	*#resolvePartialsIn(
 		refs: readonly NapiNodeRef[],
-		partialAsts: Map<string, NapiInkerAst>,
-		componentAsts: Map<string, NapiInkerAst>,
-		includeStack: Set<string>,
-		hostAbsPath: string,
+		closure: PreloadClosure,
 	): ComposeStep<void> {
 		for (const node of refs) {
+			const partialKey = normalizePartialKey(node.name);
+			if (
+				closure.partialAsts.has(partialKey) ||
+				closure.missingPartials.has(partialKey)
+			) {
+				continue;
+			}
 			const {
 				root: partialRoot,
 				validated: partialValidated,
 				absPath: partialAbsPath,
 			} = this.#resolveTemplateFile(node.name);
-			const partialKey = normalizePartialKey(node.name);
 
-			if (includeStack.has(partialAbsPath)) {
-				throw new InkerRenderError(
-					"E_INKER_CIRCULAR_INCLUDE",
-					`Circular include: ${this.#cycleString(includeStack, partialAbsPath)} (referenced from ${hostAbsPath})`,
-					{
-						templatePath: partialAbsPath,
-						templateName: partialValidated,
-						line: node.line,
-						column: node.column,
-					},
-				);
-			}
-
-			if (partialAsts.has(partialKey)) {
-				// Already resolved (different host re-referenced the same partial).
-				continue;
-			}
-
-			includeStack.add(partialAbsPath);
 			let partialAst: NapiInkerAst;
 			try {
 				partialAst = askedForAst(
 					yield loadRequest(partialAbsPath, partialValidated, partialRoot),
 				);
 			} catch (e) {
-				includeStack.delete(partialAbsPath);
-				throw e;
+				if (!isTemplateNotFound(e)) throw e;
+				closure.missingPartials.set(partialKey, e);
+				continue;
 			}
 
-			try {
-				const info = partialAst.composeInfo;
-				// Layout-in-partial rejection.
-				if (info.hasLayout) {
-					throw new InkerRenderError(
-						"E_INKER_LAYOUT_IN_PARTIAL",
-						`Partial file '${partialValidated}' contains @layout() — partials cannot declare layouts`,
-						{
-							templatePath: partialAbsPath,
-							templateName: partialValidated,
-							line: info.layoutLine ?? undefined,
-							column: info.layoutColumn ?? undefined,
-						},
-					);
-				}
-
-				// Slot-in-partial rejection: slots only mean something in layouts.
-				const slot = info.slots[0];
-				if (slot !== undefined) {
-					throw new InkerRenderError(
-						"E_INKER_UNKNOWN_SLOT",
-						`Partial '${partialValidated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
-						{
-							templateName: partialValidated,
-							line: slot.line,
-							column: slot.column,
-						},
-					);
-				}
-
-				partialAsts.set(partialKey, partialAst);
-
-				// Recurse into nested partials AND components reachable from this
-				// partial (mutual recursion → full transitive closure).
-				yield* this.#resolvePartialsIn(
-					info.partials,
-					partialAsts,
-					componentAsts,
-					includeStack,
-					partialAbsPath,
+			const info = partialAst.composeInfo;
+			// Layout-in-partial rejection.
+			if (info.hasLayout) {
+				throw new InkerRenderError(
+					"E_INKER_LAYOUT_IN_PARTIAL",
+					`Partial file '${partialValidated}' contains @layout() — partials cannot declare layouts`,
+					{
+						templatePath: partialAbsPath,
+						templateName: partialValidated,
+						line: info.layoutLine ?? undefined,
+						column: info.layoutColumn ?? undefined,
+					},
 				);
-				yield* this.#resolveComponentsIn(
-					info.components,
-					partialAsts,
-					componentAsts,
-					includeStack,
-					partialAbsPath,
-				);
-			} finally {
-				includeStack.delete(partialAbsPath);
 			}
+
+			// Slot-in-partial rejection: slots only mean something in layouts.
+			const slot = info.slots[0];
+			if (slot !== undefined) {
+				throw new InkerRenderError(
+					"E_INKER_UNKNOWN_SLOT",
+					`Partial '${partialValidated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
+					{
+						templateName: partialValidated,
+						line: slot.line,
+						column: slot.column,
+					},
+				);
+			}
+
+			// Recorded BEFORE recursing, so a reference back to this partial
+			// finds it and stops.
+			closure.partialAsts.set(partialKey, partialAst);
+			yield* this.#resolvePartialsIn(info.partials, closure);
+			yield* this.#resolveComponentsIn(info.components, closure);
 		}
 	}
 
+	/** The component counterpart of {@link #resolvePartialsIn}. */
 	*#resolveComponentsIn(
 		refs: readonly NapiNodeRef[],
-		partialAsts: Map<string, NapiInkerAst>,
-		componentAsts: Map<string, NapiInkerAst>,
-		includeStack: Set<string>,
-		hostAbsPath: string,
+		closure: PreloadClosure,
 	): ComposeStep<void> {
 		for (const node of refs) {
+			const componentKey = normalizePartialKey(node.name);
+			if (
+				closure.componentAsts.has(componentKey) ||
+				closure.missingComponents.has(componentKey)
+			) {
+				continue;
+			}
 			// Split the optional `disk::` prefix off FIRST, then prepend the
 			// `components/` directory to the bare name so `disk::button` resolves
 			// to `<disk>/components/button.inker`, not `<default>/components/disk::button`.
@@ -2324,26 +2327,7 @@ export class Templates {
 				validated: componentValidated,
 				absPath: componentAbsPath,
 			} = this.#resolveTemplateFile(node.name, "components/");
-			const componentKey = normalizePartialKey(node.name);
 
-			if (includeStack.has(componentAbsPath)) {
-				throw new InkerRenderError(
-					"E_INKER_CIRCULAR_INCLUDE",
-					`Circular include: ${this.#cycleString(includeStack, componentAbsPath)} (referenced from ${hostAbsPath})`,
-					{
-						templatePath: componentAbsPath,
-						templateName: componentValidated,
-						line: node.line,
-						column: node.column,
-					},
-				);
-			}
-
-			if (componentAsts.has(componentKey)) {
-				continue;
-			}
-
-			includeStack.add(componentAbsPath);
 			let componentAst: NapiInkerAst;
 			try {
 				componentAst = askedForAst(
@@ -2354,54 +2338,36 @@ export class Templates {
 					),
 				);
 			} catch (e) {
-				includeStack.delete(componentAbsPath);
-				throw e;
+				if (!isTemplateNotFound(e)) throw e;
+				closure.missingComponents.set(componentKey, e);
+				continue;
 			}
 
-			try {
-				const info = componentAst.composeInfo;
-				// Layout-in-component rejection (reuse E_INKER_LAYOUT_IN_PARTIAL
-				// per AC5: same axis "layout in non-entry file").
-				if (info.hasLayout) {
-					throw new InkerRenderError(
-						"E_INKER_LAYOUT_IN_PARTIAL",
-						`Component file '${componentValidated}' contains @layout() — components cannot declare layouts`,
-						{
-							templatePath: componentAbsPath,
-							templateName: componentValidated,
-							line: info.layoutLine ?? undefined,
-							column: info.layoutColumn ?? undefined,
-						},
-					);
-				}
-
-				// A component template MAY contain slot placeholders: `{{> body }}`
-				// yields the default (block-body) slot and `{{> name }}` a named
-				// `@slot('name')` provided by the caller. Placeholders with no
-				// matching slot render empty (Edge parity), so no validation here.
-
-				componentAsts.set(componentKey, componentAst);
-
-				// Recurse into nested components AND partials included inside this
-				// component (mutual recursion → a @include() in a component is
-				// pre-loaded, fixing E_INKER_DISK_REQUIRED at render time).
-				yield* this.#resolveComponentsIn(
-					info.components,
-					partialAsts,
-					componentAsts,
-					includeStack,
-					componentAbsPath,
+			const info = componentAst.composeInfo;
+			// Layout-in-component rejection (reuse E_INKER_LAYOUT_IN_PARTIAL
+			// per AC5: same axis "layout in non-entry file").
+			if (info.hasLayout) {
+				throw new InkerRenderError(
+					"E_INKER_LAYOUT_IN_PARTIAL",
+					`Component file '${componentValidated}' contains @layout() — components cannot declare layouts`,
+					{
+						templatePath: componentAbsPath,
+						templateName: componentValidated,
+						line: info.layoutLine ?? undefined,
+						column: info.layoutColumn ?? undefined,
+					},
 				);
-				yield* this.#resolvePartialsIn(
-					info.partials,
-					partialAsts,
-					componentAsts,
-					includeStack,
-					componentAbsPath,
-				);
-			} finally {
-				includeStack.delete(componentAbsPath);
 			}
+
+			// A component template MAY contain slot placeholders: `{{> body }}`
+			// yields the default (block-body) slot and `{{> name }}` a named
+			// `@slot('name')` provided by the caller. Placeholders with no
+			// matching slot render empty (Edge parity), so no validation here.
+
+			// Recorded BEFORE recursing, so a recursive component finds itself.
+			closure.componentAsts.set(componentKey, componentAst);
+			yield* this.#resolveComponentsIn(info.components, closure);
+			yield* this.#resolvePartialsIn(info.partials, closure);
 		}
 	}
 
