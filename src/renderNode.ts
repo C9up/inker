@@ -549,22 +549,29 @@ function evalLetDestructure(
 	}
 }
 
-/** Stringify a scalar for interpolation (parity with the Rust `safe_stringify`). */
+/**
+ * The string form of an interpolated value (Edge `escape`: `String(input)`).
+ * A Date, an array or a class with `toString()` prints the way JavaScript
+ * prints it; `{{ }}` still escapes the result, so a `toString()` returning
+ * markup cannot inject it.
+ */
 function stringifyScalar(v: unknown, source: string): string {
 	switch (typeof v) {
 		case "string":
 			return v;
-		case "number":
-			return String(v); // JS renders integer floats without `.0`, `-0` → "0"
 		case "boolean":
 			return v ? "true" : "false";
-		case "bigint":
-			return v.toString();
 		default:
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
-				`cannot interpolate a ${Array.isArray(v) ? "array" : typeof v} value from \`${source}\``,
-			);
+			try {
+				return String(v);
+			} catch (cause) {
+				throw new InkerRenderError(
+					"E_INKER_INVALID_EXPRESSION",
+					`cannot interpolate the value of \`${source}\`: ${errMessage(cause)}`,
+					undefined,
+					{ cause },
+				);
+			}
 	}
 }
 
