@@ -66,6 +66,15 @@ pub enum InkerNode {
         line: u32,
         column: u32,
     },
+    /// A tag line ended with `~` (Edge's newline-trim marker): the renderer
+    /// drops the newline that the output so far ends with — the one leading
+    /// into the next line. Placed where the tag takes effect: first in a block
+    /// body for an opening tag (so once per branch or iteration), after the
+    /// block for a closing one.
+    TrimNewline {
+        line: u32,
+        column: u32,
+    },
     /// `@super` — inside a child section, yields the layout's default content
     /// for the enclosing section.
     Super {

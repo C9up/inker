@@ -57,6 +57,12 @@ pub enum Token {
         line: u32,
         column: u32,
     },
+    /// A `~` ending a tag line (Edge's newline-trim marker): drop the newline
+    /// that leads into the next line of output.
+    TrimNewline {
+        line: u32,
+        column: u32,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -129,7 +135,25 @@ fn is_block_keyword(word: &str) -> bool {
             | "endpushTo"
             | "pushOnceTo"
             | "endpushOnceTo"
+            | "end"
     )
+}
+
+/// `~` closing a tag line, optionally followed by spaces before the line
+/// break (Edge accepts the marker only as the last thing on the line). Returns
+/// the index one past the marker and its trailing spaces.
+fn trim_marker_end(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'~') {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+        j += 1;
+    }
+    match chars.get(j) {
+        None | Some('\n') | Some('\r') => Some(j),
+        _ => None,
+    }
 }
 
 /// Is `word` a tag the caller registered — either a tag name, or the
@@ -282,7 +306,14 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
             // and for any block custom tag (which otherwise demands an `@end`).
             let self_closable =
                 word == "component" || options.custom_block_tags.contains(word.as_str());
+            // `me@end.org` is an address, not the generic closer.
+            let end_in_address = word == "end"
+                && chars.get(after_word) == Some(&'.')
+                && chars
+                    .get(after_word + 1)
+                    .is_some_and(|c| c.is_ascii_alphanumeric());
             if !word.is_empty()
+                && !end_in_address
                 && (is_block_keyword(&word)
                     || options.custom_tags.contains(word.as_str())
                     || closes_custom_block)
@@ -376,6 +407,16 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                     line: open_line,
                     column: open_column,
                 });
+                if let Some(end) = trim_marker_end(&chars, i) {
+                    tokens.push(Token::TrimNewline {
+                        line: cursor.line,
+                        column: cursor.column,
+                    });
+                    while i < end {
+                        advance(&mut cursor, chars[i]);
+                        i += 1;
+                    }
+                }
                 // Edge trims ONE newline immediately after a block tag, so a tag on
                 // its own line injects no blank line into the output.
                 if i < len && chars[i] == '\r' {

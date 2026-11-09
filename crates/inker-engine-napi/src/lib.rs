@@ -199,7 +199,7 @@ fn nodes_have_content(nodes: &[InkerNode]) -> bool {
                     return true;
                 }
             }
-            InkerNode::Section { .. } => {}
+            InkerNode::Section { .. } | InkerNode::TrimNewline { .. } => {}
             _ => return true,
         }
     }

@@ -193,6 +193,19 @@ impl BlockFrame {
         }
     }
 
+    /// The named closer a generic `@end` stands for when this frame is the
+    /// innermost one.
+    fn closer(&self) -> String {
+        match self {
+            BlockFrame::Component {
+                active_slot: Some(_),
+                ..
+            } => "endslot".to_string(),
+            BlockFrame::Component { .. } => "endcomponent".to_string(),
+            other => format!("end{}", other.open_keyword()),
+        }
+    }
+
     fn line(&self) -> u32 {
         match self {
             BlockFrame::If { line, .. }
@@ -276,11 +289,14 @@ fn block_tag_keyword(raw: &str) -> &str {
 }
 
 /// Decide whether the `@component()` at `tokens[start]` opens a block (has a
-/// matching `@endcomponent`) or is the self-closing inline form. Treats
-/// component/endcomponent as balanced pairs: the nearest unpaired
-/// `endcomponent` closes this component. No matching end ⇒ self-closing, so
-/// legacy inline `@component()` (no endcomponent) stays backward compatible.
-fn component_opens_block(tokens: &[Token], start: usize) -> bool {
+/// matching closer) or is the self-closing inline form. Scans forward counting
+/// every block that opens and closes in between; the first `@endcomponent` or
+/// generic `@end` that brings the count back to this component closes it. A
+/// named closer of another kind at that level belongs to an enclosing block,
+/// so the component is inline — legacy inline `@component()` (no closer) stays
+/// backward compatible. A nested `@component()` counts as opening a block, the
+/// way Edge always treats it.
+fn component_opens_block(tokens: &[Token], start: usize, options: &ParseOptions) -> bool {
     // `@!component(...)` is Edge's EXPLICIT self-closing form, so it never opens
     // a block — and must not, or a `@!component` nested inside a
     // `@component`…`@endcomponent` would claim the enclosing `@endcomponent` and
@@ -291,22 +307,37 @@ fn component_opens_block(tokens: &[Token], start: usize) -> bool {
             return false;
         }
     }
-    let mut depth: i32 = 0;
-    let mut i = start + 1;
-    while i < tokens.len() {
-        if let Token::BlockTag { raw, .. } = &tokens[i] {
-            match block_tag_keyword(raw) {
-                "component" => depth += 1,
-                "endcomponent" => {
-                    if depth == 0 {
-                        return true;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
+    let opens_block = |kw: &str| {
+        matches!(
+            kw,
+            "if" | "unless" | "each" | "section" | "pushTo" | "pushOnceTo" | "slot" | "component"
+        ) || options.custom_block_tags.contains(kw)
+            || options.component_tags.contains_key(kw)
+    };
+    let mut depth: usize = 0;
+    for token in &tokens[start + 1..] {
+        let Token::BlockTag { raw, .. } = token else {
+            continue;
+        };
+        let kw = block_tag_keyword(raw);
+        if kw.starts_with('!') {
+            continue;
         }
-        i += 1;
+        if opens_block(kw) {
+            depth += 1;
+            continue;
+        }
+        let closes = kw == "end"
+            || kw
+                .strip_prefix("end")
+                .is_some_and(|name| opens_block(name) || name == "unless");
+        if !closes {
+            continue;
+        }
+        if depth == 0 {
+            return kw == "end" || kw == "endcomponent";
+        }
+        depth -= 1;
     }
     false
 }
@@ -439,6 +470,7 @@ fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
         | InkerNode::Partial(_)
         | InkerNode::Slot(_)
         | InkerNode::Super { .. }
+        | InkerNode::TrimNewline { .. }
         | InkerNode::Eval { .. }
         | InkerNode::Dump { .. }
         | InkerNode::Assign { .. }
@@ -527,7 +559,38 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     seen_non_whitespace_content = true;
                 }
             }
+            Token::TrimNewline { line, column } => {
+                push_node(
+                    InkerNode::TrimNewline {
+                        line: *line,
+                        column: *column,
+                    },
+                    &mut root_nodes,
+                    &mut open_blocks,
+                );
+            }
             Token::BlockTag { raw, line, column } => {
+                // Edge's generic `@end` closes whatever block is innermost.
+                let resolved_end;
+                let raw = if raw.trim() == "end" {
+                    resolved_end = match open_blocks.last() {
+                        Some(top) => top.closer(),
+                        None => {
+                            return Err(make_err(
+                                ErrorCode::UnmatchedBlockEnd,
+                                format!(
+                                    "@end with no open block (at line {line}, column {column})"
+                                ),
+                                *line,
+                                *column,
+                                template_path,
+                            ));
+                        }
+                    };
+                    &resolved_end
+                } else {
+                    raw
+                };
                 let bt_opts = ParseBlockTagOptions {
                     template_path: template_path.map(|s| s.to_string()),
                     helpers: options.helpers.clone(),
@@ -597,7 +660,7 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                         }
                     }
                     ParsedBlockTag::Component(component_node) => {
-                        if component_opens_block(tokens, token_index) {
+                        if component_opens_block(tokens, token_index, options) {
                             open_blocks.push(BlockFrame::Component {
                                 line: component_node.line,
                                 column: component_node.column,
@@ -1436,7 +1499,8 @@ impl Token {
             | Token::InterpEscaped { line, .. }
             | Token::InterpRaw { line, .. }
             | Token::BlockTag { line, .. }
-            | Token::SlotPlaceholder { line, .. } => *line,
+            | Token::SlotPlaceholder { line, .. }
+            | Token::TrimNewline { line, .. } => *line,
         }
     }
     fn column(&self) -> u32 {
@@ -1445,7 +1509,8 @@ impl Token {
             | Token::InterpEscaped { column, .. }
             | Token::InterpRaw { column, .. }
             | Token::BlockTag { column, .. }
-            | Token::SlotPlaceholder { column, .. } => *column,
+            | Token::SlotPlaceholder { column, .. }
+            | Token::TrimNewline { column, .. } => *column,
         }
     }
 }
@@ -1739,5 +1804,38 @@ mod tests {
         assert!(parse_str(&chain(MAX_BLOCK_DEPTH - 1)).is_ok());
         let e = parse_str(&chain(20_000)).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
+    }
+
+    #[test]
+    fn generic_end_closes_the_innermost_block() {
+        let ast = parse_str("@each(x in xs)@if(x)y@end@end").unwrap();
+        assert_eq!(ast.nodes.len(), 1);
+        assert!(matches!(ast.nodes[0], InkerNode::Each { .. }));
+        let e = parse_str("x@end").unwrap_err();
+        assert_eq!(e.code, ErrorCode::UnmatchedBlockEnd);
+    }
+
+    #[test]
+    fn generic_end_closes_a_component_block() {
+        let ast = parse_str("@component('card')@slot('t')T@end body@end").unwrap();
+        match &ast.nodes[0] {
+            InkerNode::Component(c) => {
+                assert_eq!(c.named_slots.len(), 1);
+                assert_eq!(c.body_nodes.len(), 1);
+            }
+            _ => panic!("expected component"),
+        }
+    }
+
+    #[test]
+    fn trim_marker_becomes_a_node_where_the_tag_takes_effect() {
+        let ast = parse_str("@if(a)~\ny@end~\nz").unwrap();
+        match &ast.nodes[..] {
+            [InkerNode::If { then_nodes, .. }, InkerNode::TrimNewline { .. }, InkerNode::Text { .. }] =>
+            {
+                assert!(matches!(then_nodes[0], InkerNode::TrimNewline { .. }));
+            }
+            other => panic!("unexpected nodes: {other:?}"),
+        }
     }
 }
