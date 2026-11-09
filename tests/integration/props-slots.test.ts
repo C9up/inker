@@ -28,7 +28,8 @@ describe("Templates — component $props / $slots (62-4)", () => {
 			"@component('btn', { label: 'Save', id: 'b', class: 'primary' })@endcomponent",
 		);
 		const out = await new Templates({ root }).render("page", {});
-		expect(out).toBe('<button id="b" class="btn primary">Save</button>');
+		// Defaults come first, as Edge spreads `{ ...defaults, ...props }`.
+		expect(out).toBe('<button class="btn primary" id="b">Save</button>');
 	});
 
 	it("$props.get with a default + $props.has", async () => {

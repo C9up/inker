@@ -1,4 +1,4 @@
-import { htmlAttrs, INKER_GLOBALS } from "./globals.js";
+import { classNames, htmlAttrs, INKER_GLOBALS } from "./globals.js";
 import { InkerRenderError } from "./InkerRenderError.js";
 import { SafeString } from "./SafeString.js";
 import type { Stacks } from "./stacks.js";
@@ -1348,31 +1348,71 @@ interface PropsApi {
 	toAttrs(): SafeString;
 }
 
+/** Every class in a `class` value, whatever form it takes (string, array, object). */
+function classList(value: unknown): string[] {
+	const joined = classNames(value);
+	return joined === "" ? [] : joined.split(" ");
+}
+
+/**
+ * Defaults under the caller's props (caller wins), with `class` unioned —
+ * defaults first — across its string, array and object forms (Edge `merge`).
+ */
 function mergeProps(
 	values: Record<string, unknown>,
 	defaults: Record<string, unknown>,
 ): Record<string, unknown> {
-	const out: Record<string, unknown> = { ...values };
-	for (const [key, val] of Object.entries(defaults)) {
-		if (
-			key === "class" &&
-			typeof val === "string" &&
-			typeof out.class === "string"
-		) {
-			out.class = `${val} ${out.class}`.trim(); // classes are combined (Edge)
-		} else if (!Object.hasOwn(out, key)) {
-			out[key] = val; // caller props win; defaults fill gaps
-		}
+	const out: Record<string, unknown> = { ...defaults, ...values };
+	if (
+		Object.hasOwn(defaults, "class") &&
+		Object.hasOwn(values, "class") &&
+		defaults.class &&
+		values.class
+	) {
+		out.class = [
+			...new Set([...classList(defaults.class), ...classList(values.class)]),
+		].join(" ");
 	}
 	return out;
 }
 
+/** Path segments of `a.b[0].c`, as lodash `get` / `has` read them. */
+function propPath(key: string): string[] {
+	return key.match(/[^.[\]]+/g) ?? [];
+}
+
+/**
+ * Walk a dot path over OWN properties only. A `__proto__` / `constructor` /
+ * `prototype` segment ends the walk, so `$props.get('x.constructor')` can
+ * never hand a template a constructor.
+ */
+function readPath(
+	values: Record<string, unknown>,
+	key: string,
+): { found: boolean; value: unknown } {
+	let current: unknown = values;
+	for (const segment of propPath(key)) {
+		if (
+			PROTO_KEYS.has(segment) ||
+			current === null ||
+			(typeof current !== "object" && typeof current !== "function") ||
+			!Object.hasOwn(current, segment)
+		) {
+			return { found: false, value: undefined };
+		}
+		current = Reflect.get(current, segment);
+	}
+	return { found: true, value: current };
+}
+
 function makeProps(values: Record<string, unknown>): PropsApi {
-	return {
+	const api: PropsApi = {
 		all: () => ({ ...values }),
-		get: (key, fallback) =>
-			Object.hasOwn(values, key) ? values[key] : fallback,
-		has: (key) => Object.hasOwn(values, key),
+		get: (key, fallback) => {
+			const read = readPath(values, key);
+			return read.found && read.value !== undefined ? read.value : fallback;
+		},
+		has: (key) => readPath(values, key).found,
 		only: (keys) =>
 			makeProps(
 				Object.fromEntries(
@@ -1398,6 +1438,18 @@ function makeProps(values: Record<string, unknown>): PropsApi {
 			condition ? makeProps(values) : makeProps(mergeProps(values, defaults)),
 		toAttrs: () => htmlAttrs(values),
 	};
+	// Each prop is also a property (`$props.title`), as Edge's ComponentProps
+	// assigns them — except where a prop would hide an API method.
+	for (const key of Object.keys(values)) {
+		if (Object.hasOwn(api, key) || PROTO_KEYS.has(key)) continue;
+		Object.defineProperty(api, key, {
+			value: values[key],
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+	}
+	return api;
 }
 
 /** A partial's or component's name: its literal, or its expression's value. */

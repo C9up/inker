@@ -350,9 +350,19 @@ export function htmlAttrs(attrs: unknown): SafeString {
 		if (!ATTR_NAME_RE.test(key)) continue; // drop unsafe attribute names
 		if (val === true) {
 			parts.push(key);
-		} else {
-			parts.push(`${key}="${escapeAttr(String(val))}"`);
+			continue;
 		}
+		// Edge's encoding rules: `class` accepts the classnames forms (string,
+		// array, `{ name: condition }`), any other array is a space-separated
+		// list. Every value is still escaped — Edge does not, and its `title`
+		// would close the attribute on a `"`.
+		const text =
+			key === "class"
+				? classNames(val)
+				: Array.isArray(val)
+					? val.map((v) => String(v)).join(" ")
+					: String(val);
+		parts.push(`${key}="${escapeAttr(text)}"`);
 	}
 	return new SafeString(parts.join(" "));
 }
@@ -382,7 +392,7 @@ function pushClasses(out: string[], arg: unknown): void {
  * Escaping changes nothing about a legitimate class name, which has no
  * character that escapes.
  */
-function classNames(...args: readonly unknown[]): string {
+export function classNames(...args: readonly unknown[]): string {
 	const out: string[] = [];
 	for (const a of args) pushClasses(out, a);
 	return out.join(" ");
