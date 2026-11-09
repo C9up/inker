@@ -1281,12 +1281,15 @@ function* renderEach(
 	} else if (iterable instanceof Set) {
 		let i = 0;
 		for (const val of iterable) entries.push([val, i++]);
+	} else if (typeof iterable === "string") {
+		// Per code point, as `for…of` reads a string (Edge `each`).
+		let i = 0;
+		for (const ch of iterable) entries.push([ch, i++]);
 	} else if (isRecord(iterable)) {
-		for (const [k, val] of Object.entries(iterable)) {
-			if (k === "__proto__" || k === "constructor" || k === "prototype")
-				continue;
-			entries.push([val, k]);
-		}
+		// Every own entry, `constructor` and `__proto__` included: they are
+		// ordinary data keys here, and bindings are defined on a fresh frame
+		// (`childScope`), never assigned through a prototype.
+		for (const [k, val] of Object.entries(iterable)) entries.push([val, k]);
 	} else {
 		// A null/undefined iterable is the common "maybe-absent value" mistake —
 		// point at the `@if()` guard (parity with the Rust hint).
@@ -1296,7 +1299,7 @@ function* renderEach(
 				: "";
 		throw new InkerRenderError(
 			"E_INKER_INVALID_ITERABLE",
-			`@each iterable \`${node.iterable_source}\` is not an array or object${hint}`,
+			`@each iterable \`${node.iterable_source}\` is not an array, a string or an object${hint}`,
 		);
 	}
 
