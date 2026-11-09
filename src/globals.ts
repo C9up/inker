@@ -125,6 +125,42 @@ function sentence(
 interface TruncateOptions {
 	readonly suffix?: string;
 	readonly completeWords?: boolean;
+	/** Cut at exactly `length` characters (Edge: `completeWords` defaults to `!strict`). */
+	readonly strict?: boolean;
+}
+
+// The characters truncatise (behind Edge's truncate/excerpt) treats as part
+// of a word when completing one.
+const WORD_CHAR_RE = /[a-zA-ZÇ-Ü']/i;
+
+/**
+ * Edge's character truncation (`@poppinss/string` → truncatise): trim, keep
+ * the text whole when it fits, else cut once `length` characters are counted
+ * — at the end of the current word unless `strict` — and append the suffix.
+ */
+function truncateText(
+	value: string,
+	length: number,
+	options: TruncateOptions,
+): string {
+	const text = value.trim();
+	if (text.length <= length) return text;
+	const completeWords =
+		options.completeWords !== undefined
+			? options.completeWords
+			: !options.strict;
+	const suffix = typeof options.suffix === "string" ? options.suffix : "...";
+	let end = 0;
+	while (end < text.length) {
+		end += 1;
+		if (end < length) continue;
+		if (!completeWords) break;
+		const current = text.charAt(end - 1);
+		const next = text.charAt(end);
+		if (!WORD_CHAR_RE.test(current) || !WORD_CHAR_RE.test(next)) break;
+	}
+	const cut = text.slice(0, end);
+	return (end < text.length ? cut + suffix : cut).trim();
 }
 
 function truncate(
@@ -132,15 +168,7 @@ function truncate(
 	length = 20,
 	options: TruncateOptions = {},
 ): string {
-	const s = str(value);
-	if (s.length <= length) return s;
-	const suffix = options.suffix ?? "…";
-	let end = length;
-	if (options.completeWords) {
-		// extend to the next word boundary so a word is never cut mid-way
-		while (end < s.length && s.charAt(end) !== " ") end += 1;
-	}
-	return s.slice(0, end).trimEnd() + suffix;
+	return truncateText(str(value), length, options);
 }
 
 function excerpt(
@@ -148,7 +176,25 @@ function excerpt(
 	length = 20,
 	options: TruncateOptions = {},
 ): string {
-	return truncate(stripTags(str(value)), length, options);
+	const text = str(value)
+		.trim()
+		.replace(/<br( \/)?>/gi, " ");
+	return truncateText(stripTags(stripComments(text)), length, options);
+}
+
+/** Remove `<!-- … -->` comments in one pass (an unclosed one is kept). */
+function stripComments(text: string): string {
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const open = text.indexOf("<!--", i);
+		if (open === -1) break;
+		const close = text.indexOf("-->", open + 4);
+		if (close === -1) break;
+		out += text.slice(i, open);
+		i = close + 3;
+	}
+	return out + text.slice(i);
 }
 
 /**

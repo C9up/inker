@@ -25,11 +25,41 @@ describe("Edge-core globals (62-7)", () => {
 	});
 
 	it("truncate + excerpt", () => {
-		expect(render("{{ truncate('a long string here', 6) }}")).toBe("a long…");
+		expect(render("{{ truncate('a long string here', 6) }}")).toBe("a long...");
 		expect(render("{{ truncate('short', 20) }}")).toBe("short");
 		expect(render("{{ excerpt('<p>hello <b>world</b></p>', 5) }}")).toBe(
-			"hello…",
+			"hello...",
 		);
+	});
+
+	// Expected outputs are edge.js 6.5.1's: whole words unless `strict`, and
+	// a "..." suffix.
+	it.each([
+		["{{ truncate('hello wonderful world', 8) }}", "hello wonderful..."],
+		[
+			"{{ truncate('hello wonderful world', 8, { strict: true }) }}",
+			"hello wo...",
+		],
+		[
+			"{{ truncate('hello wonderful world', 8, { completeWords: false }) }}",
+			"hello wo...",
+		],
+		[
+			"{{ truncate('hello wonderful world', 8, { suffix: ' [more]' }) }}",
+			"hello wonderful [more]",
+		],
+		["{{ truncate('hello wonderful', 5) }}", "hello..."],
+		["{{ truncate('  padded text here  ', 6) }}", "padded..."],
+		["{{ truncate('short', 20) }}", "short"],
+		["{{ excerpt('<p>hello wonderful world</p>', 8) }}", "hello wonderful..."],
+		[
+			"{{ excerpt('<p>hello wonderful world</p>', 8, { strict: true }) }}",
+			"hello wo...",
+		],
+		["{{ excerpt('a<br>b<!-- note -->c', 20) }}", "a bc"],
+		["{{ excerpt('short', 20) }}", "short"],
+	])("%s renders as Edge does", (source, expected) => {
+		expect(render(source)).toBe(expected);
 	});
 
 	it("nl2br turns newlines into breaks", () => {
