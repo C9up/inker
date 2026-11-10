@@ -59,7 +59,9 @@ export function truncatise(input: string, options: TruncatiseOptions): string {
 	let out = "";
 	let state = NOT_TAG;
 	let currentTag = "";
-	const tagStack: string[] = [];
+	// The last character before `>`: a `/` there makes `<tag/>` self-closing.
+	let lastTagChar = "";
+	const tagStack = new TagStack();
 	let charCounter = 0;
 	let pointer = 0;
 	for (; pointer < text.length; pointer++) {
@@ -77,13 +79,7 @@ export function truncatise(input: string, options: TruncatiseOptions): string {
 					state = NOT_TAG;
 					currentTag = currentTag.toLowerCase();
 					if (currentTag === "/p" && options.stripHtml) out += " ";
-					if (
-						!SELF_CLOSING_TAGS.has(currentTag) &&
-						!SELF_CLOSING_TAGS.has(`${currentTag}/`)
-					) {
-						if (currentTag.includes("/")) tagStack.pop();
-						else tagStack.push(currentTag);
-					}
+					tagStack.track(currentTag, lastTagChar === "/");
 				}
 				if (!options.stripHtml) out += ch;
 				break;
@@ -98,6 +94,7 @@ export function truncatise(input: string, options: TruncatiseOptions): string {
 				if (state === NOT_TAG || !options.stripHtml) out += ch;
 				break;
 		}
+		if (state !== NOT_TAG) lastTagChar = ch;
 		const next = text.charAt(pointer + 1);
 		const endOfWord =
 			options.strict || !WORD_CHAR_RE.test(ch) || !WORD_CHAR_RE.test(next);
@@ -105,7 +102,7 @@ export function truncatise(input: string, options: TruncatiseOptions): string {
 	}
 	if (!options.stripHtml) {
 		for (let tag = tagStack.pop(); tag !== undefined; tag = tagStack.pop()) {
-			if (tag !== "!--") out += `</${tag}>`;
+			out += `</${tag}>`;
 		}
 	}
 	if (pointer < text.length - 1) {
@@ -115,6 +112,53 @@ export function truncatise(input: string, options: TruncatiseOptions): string {
 				: out + options.suffix;
 	}
 	return out.trim();
+}
+
+/**
+ * The tags still open, to re-close after the cut.
+ *
+ * NAMED DEVIATION (correctness): upstream pops on any tag name holding a `/`,
+ * so `<br/>`, `<img/>` or `<span/>` popped their parent, which was then never
+ * re-closed; a closer that named no open tag popped one too. Here `</x>` pops
+ * up to the open `x` (or does nothing when none is open), and `<x/>`, void
+ * elements, comments and declarations are never pushed. Same output as
+ * upstream on well-formed markup. A per-name count keeps a closer linear.
+ */
+class TagStack {
+	readonly #tags: string[] = [];
+	readonly #open = new Map<string, number>();
+
+	track(tag: string, selfClosing: boolean): void {
+		if (tag.startsWith("/")) {
+			this.#close(tag.slice(1));
+			return;
+		}
+		const name = tag.endsWith("/") ? tag.slice(0, -1) : tag;
+		if (
+			name === "" ||
+			selfClosing ||
+			name.startsWith("!") ||
+			name.startsWith("?") ||
+			SELF_CLOSING_TAGS.has(name)
+		) {
+			return;
+		}
+		this.#tags.push(name);
+		this.#open.set(name, (this.#open.get(name) ?? 0) + 1);
+	}
+
+	pop(): string | undefined {
+		const tag = this.#tags.pop();
+		if (tag !== undefined) this.#open.set(tag, (this.#open.get(tag) ?? 1) - 1);
+		return tag;
+	}
+
+	#close(name: string): void {
+		if ((this.#open.get(name) ?? 0) === 0) return;
+		// Tags left open inside `name` close with it, as an HTML parser does.
+		let tag = this.pop();
+		while (tag !== undefined && tag !== name) tag = this.pop();
+	}
 }
 
 /** A JavaScript line terminator — what a regex `.` does not match. */

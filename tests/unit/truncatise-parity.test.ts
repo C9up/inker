@@ -65,6 +65,37 @@ describe("truncate / excerpt match Edge", () => {
 	});
 });
 
+// Edge's truncatise reads `<br/>` as a tag named `br/`, misses it in its
+// void list and pops the parent, so the parent is never re-closed. inker
+// tells `</tag>` from `<tag/>` and only pops the tag a closer names.
+describe("truncate keeps the tag stack across self-closing tags", () => {
+	it.each([
+		["<b>hello<br/> world again</b>", 8, "<b>hello<br/> world</b>..."],
+		["<p>one<img/>two three four</p>", 6, "<p>one<img/>two...</p>"],
+		["<div>a<hr/>bc de fg</div>", 3, "<div>a<hr/>bc</div>..."],
+		["<b>a<BR/>bc de fg</b>", 3, "<b>a<BR/>bc</b>..."],
+		["<b>a<img src=x />bc de fg</b>", 3, "<b>a<img src=x />bc</b>..."],
+		[
+			'<b>x<svg><path d="M0"/></svg> yz more</b>',
+			3,
+			'<b>x<svg><path d="M0"/></svg> yz</b>...',
+		],
+		["<b>a<span/>bc de fg</b>", 3, "<b>a<span/>bc</b>..."],
+	])("truncate(%j, %i)", (value, length, expected) => {
+		expect(call("truncate", value, length)).toBe(expected);
+	});
+
+	it("ignores a closer that names no open tag", () => {
+		expect(call("truncate", "<b>a</i> bc de</b>", 3)).toBe(
+			"<b>a</i> bc</b>...",
+		);
+	});
+
+	it("closes the tags a closer skips over", () => {
+		expect(call("truncate", "<b><i>a</b> bc de", 3)).toBe("<b><i>a</b> bc...");
+	});
+});
+
 describe("truncate / excerpt stay linear on hostile input", () => {
 	function timed(fn: () => unknown): number {
 		const started = performance.now();
@@ -87,6 +118,14 @@ describe("truncate / excerpt stay linear on hostile input", () => {
 	it("truncate of a long tag-heavy string", () => {
 		expect(
 			timed(() => call("truncate", "<b>".repeat(100_000), 20)),
+		).toBeLessThan(100);
+	});
+
+	it("truncate of many open tags followed by closers naming none of them", () => {
+		expect(
+			timed(() =>
+				call("truncate", `${"<b>".repeat(50_000)}${"</i>".repeat(50_000)}`, 20),
+			),
 		).toBeLessThan(100);
 	});
 });
