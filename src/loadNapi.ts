@@ -58,7 +58,7 @@ export function getNative(): NativeExports {
 
 	// The resolution and the export check are shared; the refusals below stay
 	// this package's own.
-	const attempt = loadNativeBinary(isNativeExports);
+	const attempt = loadNativeBinary(isNativeExports, NATIVE_CALLS);
 	if (attempt.loaded) {
 		cachedNative = attempt.binary;
 		return cachedNative;
