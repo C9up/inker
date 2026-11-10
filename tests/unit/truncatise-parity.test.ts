@@ -96,36 +96,62 @@ describe("truncate keeps the tag stack across self-closing tags", () => {
 	});
 });
 
+// A wall-clock ceiling measures the machine as much as the algorithm: CI
+// runners under v8 coverage missed a 100 ms bound on input that runs in 30 ms
+// locally. What separates linear from quadratic is how the time grows, so each
+// case times n and 4n (best of three after a warm-up) and bounds the ratio:
+// about 4 when linear, about 16 when quadratic.
 describe("truncate / excerpt stay linear on hostile input", () => {
-	function timed(fn: () => unknown): number {
-		const started = performance.now();
-		fn();
-		return performance.now() - started;
+	const MAX_GROWTH = 10;
+
+	function best(name: "truncate" | "excerpt", input: string): number {
+		call(name, input, 20);
+		let fastest = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3; run++) {
+			const started = performance.now();
+			call(name, input, 20);
+			fastest = Math.min(fastest, performance.now() - started);
+		}
+		return fastest;
 	}
 
-	it.each([
-		["unclosed '<'", "<".repeat(200_000)],
-		["'<>' pairs", "<>".repeat(100_000)],
-		["unclosed comments on one line", "<!--".repeat(50_000)],
+	function growth(
+		name: "truncate" | "excerpt",
+		make: (n: number) => string,
+		n: number,
+	): number {
+		const small = best(name, make(n));
+		const large = best(name, make(4 * n));
+		// Below half a millisecond the timer's own noise dominates the ratio.
+		return large / Math.max(small, 0.5);
+	}
+
+	it.each<[string, (n: number) => string, number]>([
+		["unclosed '<'", (n) => "<".repeat(n), 50_000],
+		["'<>' pairs", (n) => "<>".repeat(n), 25_000],
+		["unclosed comments on one line", (n) => "<!--".repeat(n), 12_500],
 		[
 			"a long line before a single line break",
-			`${"a".repeat(200_000)}\nb\n\nc`,
+			(n) => `${"a".repeat(n)}\nb\n\nc`,
+			50_000,
 		],
-	])("excerpt of %s", (_label, hostile) => {
-		expect(timed(() => call("excerpt", hostile, 20))).toBeLessThan(100);
+	])("excerpt of %s", (_label, make, n) => {
+		expect(growth("excerpt", make, n)).toBeLessThan(MAX_GROWTH);
 	});
 
 	it("truncate of a long tag-heavy string", () => {
-		expect(
-			timed(() => call("truncate", "<b>".repeat(100_000), 20)),
-		).toBeLessThan(100);
+		expect(growth("truncate", (n) => "<b>".repeat(n), 25_000)).toBeLessThan(
+			MAX_GROWTH,
+		);
 	});
 
 	it("truncate of many open tags followed by closers naming none of them", () => {
 		expect(
-			timed(() =>
-				call("truncate", `${"<b>".repeat(50_000)}${"</i>".repeat(50_000)}`, 20),
+			growth(
+				"truncate",
+				(n) => `${"<b>".repeat(n)}${"</i>".repeat(n)}`,
+				12_500,
 			),
-		).toBeLessThan(100);
+		).toBeLessThan(MAX_GROWTH);
 	});
 });
