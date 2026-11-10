@@ -479,45 +479,155 @@ function escapeScript(json: string): string {
 		.replace(/\u2029/g, "\\u2029");
 }
 
-function invalidJsonLd(what: string, key: string): InkerRenderError {
+type JsonPath = readonly (string | number)[];
+
+// Deeper than any real structured data, far below the stack a recursive walk
+// can take.
+const JSON_LD_MAX_DEPTH = 512;
+
+const IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+
+/** `offers[0].price`, `["@graph"][1]`: the path as code would read it. */
+function jsonPathText(path: JsonPath): string {
+	let out = "";
+	for (const part of path) {
+		if (typeof part === "number") out += `[${part}]`;
+		else if (IDENTIFIER_RE.test(part)) out += out === "" ? part : `.${part}`;
+		else out += `[${JSON.stringify(part)}]`;
+	}
+	return out === "" ? "the value" : out;
+}
+
+function invalidJsonLd(path: JsonPath, what: string): InkerRenderError {
 	const where =
-		key === "" ? "html.jsonLd was given" : `html.jsonLd: "${key}" is`;
+		path.length === 0
+			? "html.jsonLd was given"
+			: `html.jsonLd: ${jsonPathText(path)} is`;
 	return new InkerRenderError(
 		"E_INKER_INVALID_JSON_LD",
 		`${where} ${what}, which JSON-LD cannot hold`,
 	);
 }
 
+/** A getter or `toJSON` of the caller's data threw: its error, not a cycle. */
+function jsonLdThrew(action: string, cause: unknown): InkerRenderError {
+	const reason = cause instanceof Error ? cause.message : String(cause);
+	return new InkerRenderError(
+		"E_INKER_HELPER_THROW",
+		`html.jsonLd: ${action} threw: ${reason}`,
+		undefined,
+		{ cause },
+	);
+}
+
+function readJsonLd(
+	holder: object,
+	key: string | number,
+	path: JsonPath,
+): { value: unknown } {
+	try {
+		return { value: Reflect.get(holder, key) };
+	} catch (cause) {
+		throw jsonLdThrew(`reading ${jsonPathText(path)}`, cause);
+	}
+}
+
+/**
+ * The value as `JSON.stringify` would see it — `toJSON(key)` applied, boxed
+ * primitives unwrapped, `undefined` left for the caller to drop or null —
+ * refusing, with the full path, what JSON would silently alter or throw on.
+ * `ancestors` holds the objects on the current branch only, so a value shared
+ * by two branches is written twice, as JSON does, and only a real cycle is
+ * refused.
+ */
+function normalizeJsonLd(
+	input: unknown,
+	key: string,
+	path: JsonPath,
+	ancestors: Map<object, JsonPath>,
+): unknown {
+	let value = input;
+	if (
+		(typeof value === "object" && value !== null) ||
+		typeof value === "bigint"
+	) {
+		const { value: toJSON } = readJsonLd(Object(value), "toJSON", [
+			...path,
+			"toJSON",
+		]);
+		if (typeof toJSON === "function") {
+			try {
+				value = Reflect.apply(toJSON, value, [key]);
+			} catch (cause) {
+				throw jsonLdThrew(`the toJSON of ${jsonPathText(path)}`, cause);
+			}
+		}
+	}
+	if (value instanceof Number) value = Number(value);
+	else if (value instanceof String) value = String(value);
+	else if (value instanceof Boolean) value = value.valueOf();
+
+	if (value === null || value === undefined) return value;
+	if (typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) {
+			throw invalidJsonLd(path, Number.isNaN(value) ? "NaN" : String(value));
+		}
+		return value;
+	}
+	if (typeof value === "function") throw invalidJsonLd(path, "a function");
+	if (typeof value === "symbol") throw invalidJsonLd(path, "a symbol");
+	if (typeof value === "bigint") throw invalidJsonLd(path, "a bigint");
+
+	const target = ancestors.get(value);
+	if (target !== undefined) {
+		throw invalidJsonLd(path, `a cycle back to ${jsonPathText(target)}`);
+	}
+	if (path.length >= JSON_LD_MAX_DEPTH) {
+		throw invalidJsonLd(path, `nested deeper than ${JSON_LD_MAX_DEPTH} levels`);
+	}
+	ancestors.set(value, path);
+	try {
+		if (Array.isArray(value)) {
+			const items: unknown[] = [];
+			for (let index = 0; index < value.length; index++) {
+				const itemPath = [...path, index];
+				const { value: item } = readJsonLd(value, index, itemPath);
+				// JSON writes a hole, `undefined`, a function or a symbol in an
+				// array as null; the last two are refused above.
+				items.push(
+					normalizeJsonLd(item, String(index), itemPath, ancestors) ?? null,
+				);
+			}
+			return items;
+		}
+		const entries: [string, unknown][] = [];
+		for (const name of Object.keys(value)) {
+			const itemPath = [...path, name];
+			const { value: item } = readJsonLd(value, name, itemPath);
+			const normalized = normalizeJsonLd(item, name, itemPath, ancestors);
+			if (normalized !== undefined) entries.push([name, normalized]);
+		}
+		// fromEntries defines `__proto__` as an own data key, as JSON writes it.
+		return Object.fromEntries(entries);
+	} finally {
+		ancestors.delete(value);
+	}
+}
+
 /**
  * The JSON text of a JSON-LD value, refusing what `JSON.stringify` would turn
  * into something else: a function or symbol (dropped, or the text
  * "undefined" at the top), NaN and Infinity (written as null), a bigint and a
- * cycle (a raw TypeError). The replacer sees each value after its `toJSON`,
- * as JSON writes it.
+ * cycle (a raw TypeError). The value is checked first, with the path of each
+ * entry, then written.
  */
 function jsonLdText(value: unknown): string {
-	let json: string | undefined;
-	try {
-		json = JSON.stringify(value, function check(key, item: unknown) {
-			if (typeof item === "function") throw invalidJsonLd("a function", key);
-			if (typeof item === "symbol") throw invalidJsonLd("a symbol", key);
-			if (typeof item === "bigint") throw invalidJsonLd("a bigint", key);
-			if (typeof item === "number" && !Number.isFinite(item)) {
-				throw invalidJsonLd(Number.isNaN(item) ? "NaN" : String(item), key);
-			}
-			return item;
-		});
-	} catch (cause) {
-		if (cause instanceof InkerRenderError) throw cause;
-		throw new InkerRenderError(
-			"E_INKER_INVALID_JSON_LD",
-			"html.jsonLd was given a cycle, which JSON-LD cannot hold",
-			undefined,
-			{ cause },
-		);
+	const normalized = normalizeJsonLd(value, "", [], new Map());
+	if (normalized === undefined) {
+		throw invalidJsonLd([], "nothing JSON can write");
 	}
-	if (json === undefined) throw invalidJsonLd("nothing JSON can write", "");
-	return json;
+	return JSON.stringify(normalized);
 }
 
 /**

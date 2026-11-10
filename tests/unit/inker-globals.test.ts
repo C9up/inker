@@ -246,6 +246,133 @@ describe("Edge-core globals (62-7)", () => {
 		}
 	});
 
+	function jsonLdError(p: unknown): InkerRenderError {
+		try {
+			render("{{ html.jsonLd(p) }}", { p });
+		} catch (error) {
+			if (error instanceof InkerRenderError) return error;
+			throw error;
+		}
+		throw new Error("html.jsonLd did not throw");
+	}
+
+	it("html.jsonLd names the full path of a value JSON cannot hold", () => {
+		const offer = {
+			"@type": "Product",
+			offers: [{ price: 1 }, { "@type": "Offer", price: Number.NaN }],
+		};
+		const error = jsonLdError(offer);
+		expect(error.code).toBe("E_INKER_INVALID_JSON_LD");
+		expect(error.message).toBe(
+			"html.jsonLd: offers[1].price is NaN, which JSON-LD cannot hold",
+		);
+		// A key that is not an identifier is quoted, so the path stays readable.
+		expect(
+			jsonLdError({ "@graph": [{ "x-y": { z: [1, () => 2] } }] }).message,
+		).toBe(
+			'html.jsonLd: ["@graph"][0]["x-y"].z[1] is a function, which JSON-LD cannot hold',
+		);
+		expect(jsonLdError({ a: { b: 1n } }).message).toBe(
+			"html.jsonLd: a.b is a bigint, which JSON-LD cannot hold",
+		);
+	});
+
+	it("html.jsonLd names the path of a cycle and what it points back to", () => {
+		const seller: Record<string, unknown> = { name: "S" };
+		const product = { "@type": "Product", offers: [{ seller }] };
+		seller.product = product;
+		const error = jsonLdError(product);
+		expect(error.code).toBe("E_INKER_INVALID_JSON_LD");
+		expect(error.message).toBe(
+			"html.jsonLd: offers[0].seller.product is a cycle back to the value, which JSON-LD cannot hold",
+		);
+		const inner: Record<string, unknown> = {};
+		inner.self = inner;
+		expect(jsonLdError({ a: [inner] }).message).toBe(
+			"html.jsonLd: a[0].self is a cycle back to a[0], which JSON-LD cannot hold",
+		);
+	});
+
+	it("html.jsonLd writes a value seen twice that is not a cycle", () => {
+		const shared = { "@id": "#org" };
+		expect(
+			render("{{ html.jsonLd(p) }}", { p: { a: shared, b: [shared] } }),
+		).toBe(
+			'<script type="application/ld+json">{"a":{"@id":"#org"},"b":[{"@id":"#org"}]}</script>',
+		);
+	});
+
+	it("html.jsonLd reports a throwing getter or toJSON as such, not as a cycle", () => {
+		const getter = {
+			"@type": "Thing",
+			nested: {
+				get name(): string {
+					throw new Error("getter failed");
+				},
+			},
+		};
+		const fromGetter = jsonLdError(getter);
+		expect(fromGetter.code).toBe("E_INKER_HELPER_THROW");
+		expect(fromGetter.message).toBe(
+			"html.jsonLd: reading nested.name threw: getter failed",
+		);
+		expect(fromGetter.message).not.toContain("cycle");
+		expect(fromGetter.cause).toBeInstanceOf(Error);
+
+		const fromToJson = jsonLdError({
+			list: [
+				{
+					toJSON(): never {
+						throw new TypeError("toJSON failed");
+					},
+				},
+			],
+		});
+		expect(fromToJson.code).toBe("E_INKER_HELPER_THROW");
+		expect(fromToJson.message).toBe(
+			"html.jsonLd: the toJSON of list[0] threw: toJSON failed",
+		);
+	});
+
+	it("html.jsonLd validates what toJSON returns, at the path it replaces", () => {
+		expect(
+			jsonLdError({
+				offer: { price: { toJSON: () => Number.POSITIVE_INFINITY } },
+			}).message,
+		).toBe("html.jsonLd: offer.price is Infinity, which JSON-LD cannot hold");
+	});
+
+	it("html.jsonLd writes what JSON writes for undefined, boxed values and toJSON(key)", () => {
+		expect(
+			render("{{ html.jsonLd(p) }}", {
+				p: {
+					gone: undefined,
+					list: [undefined, 1],
+					boxed: [Object(2), Object("s"), Object(true)],
+					keyed: { toJSON: (key: string) => `key:${key}` },
+				},
+			}),
+		).toBe(
+			'<script type="application/ld+json">{"list":[null,1],"boxed":[2,"s",true],"keyed":"key:keyed"}</script>',
+		);
+	});
+
+	it("html.jsonLd keeps a __proto__ key as data", () => {
+		expect(
+			render("{{ html.jsonLd(p) }}", {
+				p: JSON.parse('{"__proto__":{"a":1}}'),
+			}),
+		).toBe('<script type="application/ld+json">{"__proto__":{"a":1}}</script>');
+	});
+
+	it("html.jsonLd refuses a value nested too deep instead of overflowing", () => {
+		let deep: unknown = 1;
+		for (let i = 0; i < 100_000; i++) deep = [deep];
+		const error = jsonLdError(deep);
+		expect(error.code).toBe("E_INKER_INVALID_JSON_LD");
+		expect(error.message).toContain("nested deeper than");
+	});
+
 	it("html.jsonLd still writes what toJSON gives, a Date as its ISO string", () => {
 		expect(
 			render("{{ html.jsonLd(p) }}", {
