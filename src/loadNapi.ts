@@ -8,22 +8,12 @@
 // Per cerebrum 2026-04-15 there is NO JS fallback. If the binary fails to
 // load, consumers get a typed error. Zero `as` / `any` per cerebrum 2026-05-04.
 
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { type InkerErrorCode, InkerRenderError } from "./InkerRenderError.js";
-import { nativeBinarySuffix, supportedTargets } from "./vendor/nativeBinary.js";
-
-function platformSuffix(): string {
-	// The table is shared; the refusal below stays this package's own.
-	const suffix = nativeBinarySuffix();
-	if (suffix === undefined) {
-		throw new InkerRenderError(
-			"E_INKER_NAPI_REQUIRED",
-			`No native binary for this platform for @c9up/inker native binary. Supported: ${supportedTargets().join(", ")}.`,
-		);
-	}
-	return suffix;
-}
+import {
+	hasFunctions,
+	loadNativeBinary,
+	supportedTargets,
+} from "./vendor/nativeBinary.js";
 
 /**
  * The engine's types, as the Rust declares them.
@@ -42,20 +32,23 @@ export type NapiComposeInfo = import("./native/generated.js").ComposeInfoNapi;
 export type NapiInkerAst = import("./native/generated.js").InkerAst;
 
 /**
- * The engine's surface, as the Rust declares it. The runtime guard below still
- * checks the four exports are actually there: a declaration says what the Rust
+ * What this package calls on the engine, typed as the Rust declares it. The
+ * guard checks the same calls at load: a declaration says what the Rust
  * promises, not what a stale binary shipped.
  */
-type NativeExports = typeof import("./native/generated.js");
+const NATIVE_CALLS = [
+	"parseTemplate",
+	"parseTemplateJson",
+	"astToJson",
+] as const;
+
+type NativeExports = Pick<
+	typeof import("./native/generated.js"),
+	(typeof NATIVE_CALLS)[number]
+>;
 
 function isNativeExports(value: unknown): value is NativeExports {
-	if (value === null || typeof value !== "object") return false;
-	return (
-		typeof Reflect.get(value, "engineVersion") === "function" &&
-		typeof Reflect.get(value, "parseTemplate") === "function" &&
-		typeof Reflect.get(value, "astToJson") === "function" &&
-		typeof Reflect.get(value, "parseTemplateJson") === "function"
-	);
+	return hasFunctions(value, NATIVE_CALLS);
 }
 
 let cachedNative: NativeExports | undefined;
@@ -63,47 +56,33 @@ let cachedNative: NativeExports | undefined;
 export function getNative(): NativeExports {
 	if (cachedNative !== undefined) return cachedNative;
 
-	const require = createRequire(import.meta.url);
-	const here = fileURLToPath(import.meta.url);
-	// `here` is `…/packages/inker/{src,dist}/loadNapi.ts|js`. The `.node` lives
-	// one level up at `…/packages/inker/index.<suffix>.node`. `..` traversal
-	// resolved via require (handles both dev `src/` and publish `dist/`).
-	const suffix = platformSuffix();
-	const candidates: readonly string[] = [`../index.${suffix}.node`];
-	let loaded: unknown;
-	let lastErr: unknown;
-	for (const candidate of candidates) {
-		try {
-			loaded = require(candidate);
-			break;
-		} catch (err) {
-			lastErr = err;
-		}
+	// The resolution and the export check are shared; the refusals below stay
+	// this package's own.
+	const attempt = loadNativeBinary(isNativeExports);
+	if (attempt.loaded) {
+		cachedNative = attempt.binary;
+		return cachedNative;
 	}
-	if (loaded === undefined) {
-		const causeMessage =
-			lastErr instanceof Error ? lastErr.message : String(lastErr);
-		// The prebuilt linux binaries target glibc (`-gnu`). On musl hosts (Alpine
-		// containers) the `-gnu` binary fails to dlopen with a libc symbol error —
-		// surface that explicitly rather than only pointing at the build step.
-		const muslHint = suffix.endsWith("-gnu")
-			? " If you are on Alpine/musl, note the prebuilt binaries target glibc (musl is not a supported target)."
-			: "";
+	const { suffix, cause } = attempt;
+	if (suffix === undefined) {
 		throw new InkerRenderError(
 			"E_INKER_NAPI_REQUIRED",
-			`@c9up/inker native binary 'index.${suffix}.node' not found or failed to load near ${here} — run 'pnpm --filter @c9up/inker build:napi' to build it.${muslHint} Cause: ${causeMessage}`,
-			undefined,
-			{ cause: lastErr },
+			`No native binary for this platform for @c9up/inker native binary. Supported: ${supportedTargets().join(", ")}.`,
 		);
 	}
-	if (!isNativeExports(loaded)) {
-		throw new InkerRenderError(
-			"E_INKER_NAPI_REQUIRED",
-			`@c9up/inker native binary loaded but missing expected exports (engineVersion / parseTemplate / renderAst). Rebuild with 'pnpm --filter @c9up/inker build:napi'.`,
-		);
-	}
-	cachedNative = loaded;
-	return cachedNative;
+	const causeMessage = cause instanceof Error ? cause.message : String(cause);
+	// The prebuilt linux binaries target glibc (`-gnu`). On musl hosts (Alpine
+	// containers) the `-gnu` binary fails to dlopen with a libc symbol error —
+	// surface that explicitly rather than only pointing at the build step.
+	const muslHint = suffix.endsWith("-gnu")
+		? " If you are on Alpine/musl, note the prebuilt binaries target glibc (musl is not a supported target)."
+		: "";
+	throw new InkerRenderError(
+		"E_INKER_NAPI_REQUIRED",
+		`@c9up/inker native binary 'index.${suffix}.node' not found, failed to load, or is stale — run 'pnpm --filter @c9up/inker build:napi' to build it.${muslHint} Cause: ${causeMessage}`,
+		undefined,
+		{ cause },
+	);
 }
 
 /**
