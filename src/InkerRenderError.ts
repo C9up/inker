@@ -35,7 +35,9 @@ export type InkerErrorCode =
 	/** The module singleton was asked to render before any `InkerProvider`
 	 * built an engine. */
 	| "E_INKER_ENGINE_MISSING"
-	| "E_INKER_NAPI_REQUIRED";
+	| "E_INKER_NAPI_REQUIRED"
+	/** `html.jsonLd` was given a value JSON cannot hold faithfully. */
+	| "E_INKER_INVALID_JSON_LD";
 
 export interface InkerErrorContext {
 	readonly templatePath?: string;

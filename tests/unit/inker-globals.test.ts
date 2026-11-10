@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { INKER_GLOBAL_NAMES } from "../../src/globals.js";
+import { InkerRenderError } from "../../src/InkerRenderError.js";
 import { getNative } from "../../src/loadNapi.js";
 import { type InkerNodeJson, renderNodeTree } from "../../src/renderNode.js";
 
@@ -216,6 +217,47 @@ describe("Edge-core globals (62-7)", () => {
 			render("{{ html.jsonLd(p, '') }}", { p: { "@type": "Thing" } }),
 		).not.toContain("nonce");
 		expect(render("{{ html.jsonLd(p) }}", { p: null })).toBe("");
+	});
+
+	it("html.jsonLd refuses a value JSON cannot hold instead of writing it", () => {
+		const cyclic: Record<string, unknown> = { "@type": "Thing" };
+		cyclic.self = cyclic;
+		const cases: [string, unknown][] = [
+			["a function", () => 1],
+			["a symbol", Symbol("x")],
+			["a bigint", { "@type": "Product", sku: 1n }],
+			["NaN", { "@type": "Product", weight: Number.NaN }],
+			["Infinity", { "@type": "Offer", price: [Number.POSITIVE_INFINITY] }],
+			["a function", { "@type": "Thing", name: () => "x" }],
+			["a cycle", cyclic],
+		];
+		for (const [what, p] of cases) {
+			let caught: unknown;
+			try {
+				render("{{ html.jsonLd(p) }}", { p });
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(InkerRenderError);
+			if (caught instanceof InkerRenderError) {
+				expect(caught.code).toBe("E_INKER_INVALID_JSON_LD");
+				expect(caught.message).toContain(what);
+			}
+		}
+	});
+
+	it("html.jsonLd still writes what toJSON gives, a Date as its ISO string", () => {
+		expect(
+			render("{{ html.jsonLd(p) }}", {
+				p: {
+					"@type": "Event",
+					startDate: new Date(Date.UTC(2026, 0, 1)),
+					url: new URL("https://a.example/e"),
+				},
+			}),
+		).toBe(
+			'<script type="application/ld+json">{"@type":"Event","startDate":"2026-01-01T00:00:00.000Z","url":"https://a.example/e"}</script>',
+		);
 	});
 
 	it("a registered helper can override a global", () => {

@@ -1,3 +1,4 @@
+import { InkerRenderError } from "./InkerRenderError.js";
 import { SafeString } from "./SafeString.js";
 import { type TruncatiseOptions, truncatise } from "./truncatise.js";
 
@@ -464,22 +465,66 @@ function htmlEscape(value: unknown): string {
  * even though JSON allows them raw.
  */
 function jsStringify(value: unknown): SafeString {
-	const json = JSON.stringify(value) ?? "undefined";
-	return new SafeString(
-		json
-			.replace(/</g, "\\u003C")
-			.replace(/>/g, "\\u003E")
-			.replace(/&/g, "\\u0026")
-			.replace(/\u2028/g, "\\u2028")
-			.replace(/\u2029/g, "\\u2029"),
+	return new SafeString(escapeScript(JSON.stringify(value) ?? "undefined"));
+}
+
+function escapeScript(json: string): string {
+	return json
+		.replace(/</g, "\\u003C")
+		.replace(/>/g, "\\u003E")
+		.replace(/&/g, "\\u0026")
+		.replace(/\u2028/g, "\\u2028")
+		.replace(/\u2029/g, "\\u2029");
+}
+
+function invalidJsonLd(what: string, key: string): InkerRenderError {
+	const where =
+		key === "" ? "html.jsonLd was given" : `html.jsonLd: "${key}" is`;
+	return new InkerRenderError(
+		"E_INKER_INVALID_JSON_LD",
+		`${where} ${what}, which JSON-LD cannot hold`,
 	);
+}
+
+/**
+ * The JSON text of a JSON-LD value, refusing what `JSON.stringify` would turn
+ * into something else: a function or symbol (dropped, or the text
+ * "undefined" at the top), NaN and Infinity (written as null), a bigint and a
+ * cycle (a raw TypeError). The replacer sees each value after its `toJSON`,
+ * as JSON writes it.
+ */
+function jsonLdText(value: unknown): string {
+	let json: string | undefined;
+	try {
+		json = JSON.stringify(value, function check(key, item: unknown) {
+			if (typeof item === "function") throw invalidJsonLd("a function", key);
+			if (typeof item === "symbol") throw invalidJsonLd("a symbol", key);
+			if (typeof item === "bigint") throw invalidJsonLd("a bigint", key);
+			if (typeof item === "number" && !Number.isFinite(item)) {
+				throw invalidJsonLd(Number.isNaN(item) ? "NaN" : String(item), key);
+			}
+			return item;
+		});
+	} catch (cause) {
+		if (cause instanceof InkerRenderError) throw cause;
+		throw new InkerRenderError(
+			"E_INKER_INVALID_JSON_LD",
+			"html.jsonLd was given a cycle, which JSON-LD cannot hold",
+			undefined,
+			{ cause },
+		);
+	}
+	if (json === undefined) throw invalidJsonLd("nothing JSON can write", "");
+	return json;
 }
 
 /**
  * `<script type="application/ld+json">` for a page's structured data — Inker's
  * own, Edge has none. The value is written with `js.stringify`'s escapes, so no
  * value can end the script, whatever it holds; the nonce, when given, goes on
- * the tag: `{{ html.jsonLd(product, cspNonce()) }}`. Nothing for no value.
+ * the tag: `{{ html.jsonLd(product, cspNonce()) }}`. Nothing for no value; a
+ * value JSON cannot hold (a function, NaN, a cycle…) is refused with
+ * E_INKER_INVALID_JSON_LD rather than written as invalid structured data.
  */
 function htmlJsonLd(value: unknown, nonce?: unknown): SafeString {
 	if (value === undefined || value === null) return new SafeString("");
@@ -488,7 +533,7 @@ function htmlJsonLd(value: unknown, nonce?: unknown): SafeString {
 			? ` nonce="${escapeAttr(nonce)}"`
 			: "";
 	return new SafeString(
-		`<script type="application/ld+json"${attribute}>${jsStringify(value).value}</script>`,
+		`<script type="application/ld+json"${attribute}>${escapeScript(jsonLdText(value))}</script>`,
 	);
 }
 
