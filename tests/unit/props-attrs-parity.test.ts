@@ -53,6 +53,53 @@ describe("$props", () => {
 		);
 		expect(await objects.render("page")).toBe('<b class="base x on"></b>');
 	});
+
+	// Edge 6.5.1 only merges when both classes are truthy, so an empty caller
+	// class wipes the component's defaults (`<b ></b>`). inker merges whenever
+	// both keys are present and lets classNames drop the empty values.
+	it.each([
+		["''"],
+		["false"],
+		["null"],
+		["undefined"],
+		["[]"],
+		["{ on: false }"],
+	])(
+		"keeps the default classes when the caller class is %s",
+		async (caller) => {
+			const t = withComponent(
+				"<b {{ $props.merge({ class: ['btn'] }).toAttrs() }}></b>",
+				`@!component('c', { class: ${caller} })`,
+			);
+			expect(await t.render("page")).toBe('<b class="btn"></b>');
+		},
+	);
+
+	it("keeps the caller classes when the default class is empty", async () => {
+		const t = withComponent(
+			"<b {{ $props.merge({ class: '' }).toAttrs() }}></b>",
+			"@!component('c', { class: ['x', false] })",
+		);
+		expect(await t.render("page")).toBe('<b class="x"></b>');
+	});
+
+	it("renders no class when both sides are empty", async () => {
+		const t = withComponent(
+			"<b {{ $props.merge({ class: false }).toAttrs() }}></b>",
+			"@!component('c', { class: '' })",
+		);
+		expect(await t.render("page")).toBe("<b ></b>");
+	});
+
+	it("merges a falsy caller class in mergeIf and mergeUnless too", async () => {
+		const t = withComponent(
+			"<b {{ $props.mergeIf(true, { class: 'btn' }).toAttrs() }}></b><i {{ $props.mergeUnless(false, { class: 'btn' }).toAttrs() }}></i>",
+			"@!component('c', { class: false })",
+		);
+		expect(await t.render("page")).toBe(
+			'<b class="btn"></b><i class="btn"></i>',
+		);
+	});
 });
 
 describe("html.attrs", () => {

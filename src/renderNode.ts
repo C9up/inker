@@ -1422,21 +1422,21 @@ function classList(value: unknown): string[] {
 /**
  * Defaults under the caller's props (caller wins), with `class` unioned —
  * defaults first — across its string, array and object forms (Edge `merge`).
+ *
+ * The union runs whenever both sides carry a `class` key, falsy or not. Edge
+ * skips it unless both are truthy, so a caller passing `class: ''` or
+ * `class: cond && 'on'` silently wiped the component's default classes.
  */
 function mergeProps(
 	values: Record<string, unknown>,
 	defaults: Record<string, unknown>,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = { ...defaults, ...values };
-	if (
-		Object.hasOwn(defaults, "class") &&
-		Object.hasOwn(values, "class") &&
-		defaults.class &&
-		values.class
-	) {
-		out.class = [
+	if (Object.hasOwn(defaults, "class") && Object.hasOwn(values, "class")) {
+		const classes = [
 			...new Set([...classList(defaults.class), ...classList(values.class)]),
-		].join(" ");
+		];
+		if (classes.length > 0) out.class = classes.join(" ");
 	}
 	return out;
 }

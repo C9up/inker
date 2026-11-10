@@ -377,6 +377,8 @@ export function htmlAttrs(attrs: unknown): SafeString {
 				: Array.isArray(val)
 					? val.map((v) => String(v)).join(" ")
 					: String(val);
+		// No class survives the conditions: no attribute, as Edge drops `''`.
+		if (key === "class" && text === "") continue;
 		parts.push(`${key}="${escapeAttr(text)}"`);
 	}
 	return new SafeString(parts.join(" "));
