@@ -8,6 +8,7 @@
  * pays for the machinery.
  */
 import { describe, expect, it } from "vitest";
+import { hasAwaitOperator } from "../../src/awaitToken.js";
 import { createTestTemplates } from "../../src/testing/index.js";
 
 const delayed = <T>(v: T): Promise<T> =>
@@ -165,5 +166,98 @@ describe("inker > the word await inside a literal", () => {
 			t.engine.renderSync("page", { p: Promise.resolve(1) }),
 		).toThrow(/cannot use `await`/);
 		t.dispose();
+	});
+});
+
+describe("inker > await only as a real token selects the async compiler", () => {
+	it.each([
+		["a regex literal", "{{ /await /.test('await ') }}", {}, "true"],
+		[
+			"a regex with a class and an escaped slash",
+			"{{ /[/]await \\/ x/.source }}",
+			{},
+			"[/]await \\/ x",
+		],
+		["a block comment", "{{ /* await x */ 1 }}", {}, "1"],
+		["a line comment", "{{ 1 // await x\n }}", {}, "1"],
+		[
+			"a property named await",
+			"{{ o.await + o?.await }}",
+			{ o: { await: 2 } },
+			"4",
+		],
+		["an object key named await", "{{ ({ await: 3 }).await }}", {}, "3"],
+		[
+			"a division, not a regex",
+			"{{ a / 2 / await_ }}",
+			{ a: 8, await_: 2 },
+			"2",
+		],
+		["a regex after a keyword", "{{ typeof /await x/ }}", {}, "object"],
+		[
+			"a nested template in a substitution",
+			["{{ `$", "{`await $", "{a}`}` }}"].join(""),
+			{ a: 1 },
+			"await 1",
+		],
+	])(
+		"renders synchronously with await in %s",
+		(_label, template, data, expected) => {
+			const t = createTestTemplates({ templates: { page: template } });
+			expect(t.engine.renderSync("page", data)).toBe(expected);
+			t.dispose();
+		},
+	);
+
+	it.each([
+		["after a regex literal", "{{ /x/.test('x') && await one() }}", "1"],
+		["after a comment", "{{ /* note */ await one() }}", "1"],
+		["after a division", "{{ 4 / 2 + await one() }}", "3"],
+		[
+			"in a nested template substitution",
+			["{{ `$", "{`n=$", "{await one()}`}` }}"].join(""),
+			"n=1",
+		],
+		["followed by a parenthesis", "{{ await (one()) }}", "1"],
+		["followed by a bracket", "{{ (await [one()])[0] }}", "1"],
+	])("still awaits %s", async (_label, template, expected) => {
+		const t = createTestTemplates({
+			templates: { page: template },
+			helpers: new Map([["one", () => delayed(1)]]),
+		});
+		expect(await t.render("page")).toBe(expected);
+		expect(() => t.engine.renderSync("page")).toThrow(/cannot use `await`/);
+		t.dispose();
+	});
+});
+
+describe("hasAwaitOperator", () => {
+	it.each([
+		["await p", true],
+		["a ? await p : b", true],
+		["x++ / 2 / await p", true],
+		["[await p]", true],
+		["'await p'", false],
+		["/* await p */ 1", false],
+		["a / await_ / b", false],
+		["x++ / await_ / 2", false],
+		["{ await: 1 }", false],
+		["{ await }", false],
+		["await => 1", false],
+		["o?.await", false],
+		["/[\\]/]await p/", false],
+		[["`$", "{'`'}await p`"].join(""), false],
+	])("%s → %s", (source, expected) => {
+		expect(hasAwaitOperator(source)).toBe(expected);
+	});
+
+	it.each([
+		["slashes", `${"/".repeat(200_000)} await`],
+		["unclosed substitutions", `${"`${".repeat(100_000)} await`],
+		["unclosed comments", `${"/*".repeat(100_000)} await`],
+	])("stays linear on %s", (_label, hostile) => {
+		const started = performance.now();
+		hasAwaitOperator(hostile);
+		expect(performance.now() - started).toBeLessThan(100);
 	});
 });

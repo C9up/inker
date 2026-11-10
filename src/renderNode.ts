@@ -1,3 +1,4 @@
+import { hasAwaitOperator } from "./awaitToken.js";
 import { classNames, htmlAttrs, INKER_GLOBALS } from "./globals.js";
 import { InkerRenderError } from "./InkerRenderError.js";
 import { LruCache } from "./lruCache.js";
@@ -354,63 +355,6 @@ export function clearCompiledExpressions(): void {
 	destructureCache.clear();
 }
 
-/** `await` as a keyword, not as part of an identifier (`awaited`, `myAwait`). */
-const AWAIT_RE = /(^|[^\w$.])await[\s(]/;
-
-/**
- * The expression's code with the text of its string and template literals
- * blanked out (a template's `${…}` substitutions are code and stay), so a
- * literal that merely contains the word `await` does not make the
- * expression async.
- */
-function codeOutsideLiterals(source: string): string {
-	let out = "";
-	// Each entry is the `{` depth at which a template literal's `${` opened.
-	const templates: number[] = [];
-	let depth = 0;
-	let quote: "'" | '"' | "`" | undefined;
-	for (let i = 0; i < source.length; i++) {
-		const ch = source.charAt(i);
-		if (quote !== undefined) {
-			if (ch === "\\") {
-				i++;
-				out += "  ";
-				continue;
-			}
-			if (quote === "`" && ch === "$" && source.charAt(i + 1) === "{") {
-				templates.push(depth);
-				depth++;
-				quote = undefined;
-				i++;
-				out += "${";
-				continue;
-			}
-			if (ch === quote) {
-				quote = undefined;
-				out += ch;
-			} else {
-				out += " ";
-			}
-			continue;
-		}
-		if (ch === "'" || ch === '"' || ch === "`") {
-			quote = ch;
-			out += ch;
-			continue;
-		}
-		if (ch === "{") depth++;
-		if (ch === "}") {
-			depth--;
-			if (templates.length > 0 && templates[templates.length - 1] === depth) {
-				templates.pop();
-				quote = "`";
-			}
-		}
-		out += ch;
-	}
-	return out;
-}
-
 const AsyncFunction: FunctionConstructor = Object.getPrototypeOf(
 	async () => {},
 ).constructor;
@@ -421,6 +365,44 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 		value !== null &&
 		typeof Reflect.get(value, "then") === "function"
 	);
+}
+
+function buildExprFunction(
+	Ctor: FunctionConstructor,
+	source: string,
+): CompiledExpr {
+	// The line break before `)` keeps a trailing `// comment` from swallowing it.
+	const compiled = new Ctor(
+		"$u",
+		"$g",
+		"$h",
+		"$s",
+		`with($u){ with($g){ with($h){ with($s){ return (${source}\n); } } } }`,
+	);
+	return (s, h) => compiled(MISSING_AS_UNDEFINED, SANDBOX_SHADOW, h, s);
+}
+
+/**
+ * The async form only for an expression that uses `await` as an operator
+ * (`hasAwaitOperator`: not in a literal, a comment or a regex). V8 has the
+ * last word: when the chosen form does not parse, the other one is tried, so
+ * a sloppy-mode `await` identifier the scanner took for the operator still
+ * compiles, and a real `await` it missed still compiles as async.
+ */
+function compileExprFunction(source: string): CompiledExpr {
+	const [first, second] = hasAwaitOperator(source)
+		? [AsyncFunction, Function]
+		: [Function, AsyncFunction];
+	try {
+		return buildExprFunction(first, source);
+	} catch (cause) {
+		if (!(cause instanceof SyntaxError)) throw cause;
+		try {
+			return buildExprFunction(second, source);
+		} catch {
+			throw cause;
+		}
+	}
 }
 
 function compileExpr(source: string): CompiledExpr {
@@ -443,18 +425,7 @@ function compileExpr(source: string): CompiledExpr {
 		// `await` is a syntax error anywhere else — and then returns a promise
 		// the walker suspends on. `with` is legal in both (a `new Function` body
 		// is non-strict), so the scope chain is identical either way.
-		const Ctor =
-			AWAIT_RE.test(source) && AWAIT_RE.test(codeOutsideLiterals(source))
-				? AsyncFunction
-				: Function;
-		const compiled = new Ctor(
-			"$u",
-			"$g",
-			"$h",
-			"$s",
-			`with($u){ with($g){ with($h){ with($s){ return (${source}); } } } }`,
-		);
-		fn = (s, h) => compiled(MISSING_AS_UNDEFINED, SANDBOX_SHADOW, h, s);
+		fn = compileExprFunction(source);
 	} catch (cause) {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_EXPRESSION",
@@ -684,7 +655,7 @@ function evalLetDestructure(
 				"$g",
 				"$h",
 				"$s",
-				`with($u){ with($g){ with($h){ with($s){ const ${pattern} = (${rhs}); return { ${names.join(", ")} }; } } } }`,
+				`with($u){ with($g){ with($h){ with($s){ const ${pattern} = (${rhs}\n); return { ${names.join(", ")} }; } } } }`,
 			);
 			// `compiled` (a `Function`) returns `any`, assignable to the declared
 			// `Record<string, unknown>` result without a cast.
