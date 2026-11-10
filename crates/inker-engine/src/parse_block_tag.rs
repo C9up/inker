@@ -8,6 +8,7 @@
 use crate::ast::{ComponentNode, EachBinding, IfCondition, LayoutNode, PartialNode};
 use crate::error::{ErrorCode, InkerError};
 use crate::identifiers::{is_prototype_pollution_key, is_reserved_binding};
+use crate::js_scan::{skip_block_comment, skip_js_token, skip_line_comment, token_prev_sig};
 use crate::parse_expression::{
     parse_expression_with_helper_count, Expression, ParseExpressionOptions,
 };
@@ -520,65 +521,33 @@ fn parse_destructured_binding(
 }
 
 /// Locate the top-level ` in ` separator inside an Edge each directive body
-/// (`<binding> in <iterable>`). Honors string literals + bracket/brace/paren
-/// nesting so `(a, b) in xs` and `x in obj.items` split correctly. Returns the
-/// (start, end) of the `in`-with-surrounding-whitespace span, or None.
+/// (`<binding> in <iterable>`): outside brackets and outside every string,
+/// template literal, regex and comment, so `(a, b) in xs` and `x in obj.items`
+/// split correctly. Returns the (start, end) of the `in`-with-surrounding-
+/// whitespace span, or None.
 fn find_top_level_in(s: &[char]) -> Option<(usize, usize)> {
-    let mut depth: i32 = 0;
-    let mut string_delim: Option<char> = None;
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        if let Some(delim) = string_delim {
-            if c == '\\' && i + 1 < s.len() {
-                i += 2;
-                continue;
-            }
-            if c == delim {
-                string_delim = None;
-            }
-            i += 1;
-            continue;
+    // `in` is bounded by whitespace on the left and by whitespace OR a
+    // delimiter (`(`/`[`) on the right, so `x in(items)` / `x in [a]` split
+    // correctly (JS keyword-then-paren).
+    let keyword_after = |c: &[char], i: usize| -> Option<usize> {
+        let mut k = i;
+        while k < c.len() && is_whitespace(c[k]) {
+            k += 1;
         }
-        if c == '"' || c == '\'' || c == '`' {
-            string_delim = Some(c);
-            i += 1;
-            continue;
-        }
-        if c == '[' || c == '(' || c == '{' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if c == ']' || c == ')' || c == '}' {
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        if depth == 0 && is_whitespace(c) {
-            let ws_start = i;
-            while i < s.len() && is_whitespace(s[i]) {
-                i += 1;
-            }
-            // `in` is bounded by whitespace on the left (the ws run that got us
-            // here) and by whitespace OR a delimiter (`(`/`[`) on the right, so
-            // `x in(items)` / `x in [a]` split correctly (JS keyword-then-paren).
-            if i + 2 < s.len()
-                && s[i] == 'i'
-                && s[i + 1] == 'n'
-                && (is_whitespace(s[i + 2]) || s[i + 2] == '(' || s[i + 2] == '[')
-            {
-                let mut j = i + 2;
-                while j < s.len() && is_whitespace(s[j]) {
-                    j += 1;
-                }
-                return Some((ws_start, j));
-            }
-            continue;
-        }
-        i += 1;
+        let bounded = k + 2 < c.len()
+            && c[k] == 'i'
+            && c[k + 1] == 'n'
+            && (is_whitespace(c[k + 2]) || c[k + 2] == '(' || c[k + 2] == '[');
+        bounded.then_some(k)
+    };
+    let ws_start = scan_top_level(s, 0, s.len(), |c, i| {
+        is_whitespace(c[i]) && keyword_after(c, i).is_some()
+    })?;
+    let mut j = keyword_after(s, ws_start)? + 2;
+    while j < s.len() && is_whitespace(s[j]) {
+        j += 1;
     }
-    None
+    Some((ws_start, j))
 }
 
 /// Validate a single each-binding identifier (reused for `Single`, and each name
@@ -990,155 +959,6 @@ fn find_assignment_operator(chars: &[char]) -> Option<(usize, usize)> {
     None
 }
 
-fn token_prev_sig(chars: &[char], i: usize, prev: char) -> char {
-    let is_comment = chars[i] == '/' && matches!(chars.get(i + 1).copied(), Some('/') | Some('*'));
-    if is_comment {
-        prev
-    } else {
-        'x'
-    }
-}
-
-/// If `chars[i]` begins a string / template literal / regex literal / comment,
-/// return the index just past that token; otherwise `None`. `prev_sig` is the
-/// last significant char before `i`, used to tell a regex literal (`= /re/`)
-/// from a division operator (`a / b`).
-fn skip_js_token(chars: &[char], i: usize, prev_sig: char) -> Option<usize> {
-    match chars[i] {
-        '\'' | '"' => Some(skip_string(chars, i)),
-        '`' => Some(skip_template(chars, i)),
-        '/' => match chars.get(i + 1).copied() {
-            Some('/') => Some(skip_line_comment(chars, i)),
-            Some('*') => Some(skip_block_comment(chars, i)),
-            _ if regex_allowed(prev_sig) => Some(skip_regex(chars, i)),
-            _ => None, // division
-        },
-        _ => None,
-    }
-}
-
-/// A `/` starts a regex literal (rather than division) when the previous
-/// significant char is not a value terminator (identifier char, `)`, `]`, `}`,
-/// `.`, or a just-closed literal — marked `'x'`).
-fn regex_allowed(prev: char) -> bool {
-    !(prev.is_alphanumeric()
-        || prev == '_'
-        || prev == '$'
-        || prev == ')'
-        || prev == ']'
-        || prev == '}'
-        || prev == '.')
-}
-
-/// Skip a `'`/`"` string starting at `i`; returns the index past the close.
-fn skip_string(chars: &[char], i: usize) -> usize {
-    let quote = chars[i];
-    let mut j = i + 1;
-    while j < chars.len() {
-        match chars[j] {
-            '\\' => j += 2,
-            c if c == quote => return j + 1,
-            _ => j += 1,
-        }
-    }
-    j
-}
-
-/// Skip a `` ` `` template literal starting at `i`, balancing nested `${…}`
-/// interpolations (which may themselves contain strings/templates/brackets).
-fn skip_template(chars: &[char], i: usize) -> usize {
-    let mut j = i + 1;
-    while j < chars.len() {
-        match chars[j] {
-            '\\' => j += 2,
-            '`' => return j + 1,
-            '$' if chars.get(j + 1).copied() == Some('{') => j = skip_braces(chars, j + 1),
-            _ => j += 1,
-        }
-    }
-    j
-}
-
-/// Skip a balanced `{…}` group starting at `i` (JS-aware for inner tokens).
-fn skip_braces(chars: &[char], i: usize) -> usize {
-    let mut depth = 0i32;
-    let mut prev_sig = '\0';
-    let mut j = i;
-    while j < chars.len() {
-        if let Some(next) = skip_js_token(chars, j, prev_sig) {
-            prev_sig = token_prev_sig(chars, j, prev_sig);
-            j = next;
-            continue;
-        }
-        let c = chars[j];
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return j + 1;
-                }
-            }
-            _ => {}
-        }
-        if !c.is_whitespace() {
-            prev_sig = c;
-        }
-        j += 1;
-    }
-    j
-}
-
-/// Skip a `//` line comment; returns the index of the terminating newline (or
-/// end of input).
-fn skip_line_comment(chars: &[char], i: usize) -> usize {
-    let mut j = i + 2;
-    while j < chars.len() && chars[j] != '\n' {
-        j += 1;
-    }
-    j
-}
-
-/// Skip a `/* … */` block comment; returns the index past `*/`.
-fn skip_block_comment(chars: &[char], i: usize) -> usize {
-    let mut j = i + 2;
-    while j + 1 < chars.len() {
-        if chars[j] == '*' && chars[j + 1] == '/' {
-            return j + 2;
-        }
-        j += 1;
-    }
-    chars.len()
-}
-
-/// Skip a `/…/flags` regex literal starting at `i`, honouring `\` escapes and
-/// `[…]` character classes (a `/` inside a class is literal).
-fn skip_regex(chars: &[char], i: usize) -> usize {
-    let mut j = i + 1;
-    let mut in_class = false;
-    while j < chars.len() {
-        match chars[j] {
-            '\\' => {
-                j += 2;
-                continue;
-            }
-            '[' => in_class = true,
-            ']' => in_class = false,
-            '/' if !in_class => {
-                j += 1;
-                while j < chars.len() && chars[j].is_alphabetic() {
-                    j += 1;
-                }
-                return j;
-            }
-            '\n' => return j, // unterminated
-            _ => {}
-        }
-        j += 1;
-    }
-    j
-}
-
 /// Trim leading/trailing ASCII/Unicode whitespace from a `[a, b)` char range.
 fn trim_range(chars: &[char], mut a: usize, mut b: usize) -> (usize, usize) {
     while a < b && chars[a].is_whitespace() {
@@ -1489,40 +1309,10 @@ fn parse_include_if_tag(
     ))
 }
 
-/// Locate the first top-level `,` in `s`, honoring string literals and
-/// bracket/brace/paren nesting. Returns its index in `s`, or None.
+/// Locate the first top-level `,` in `s`: outside brackets and outside every
+/// string, template literal (nested `${…}` included), regex and comment.
 fn find_top_level_comma(s: &[char]) -> Option<usize> {
-    let mut depth: i32 = 0;
-    let mut string_delim: Option<char> = None;
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        if let Some(delim) = string_delim {
-            if c == '\\' && i + 1 < s.len() {
-                i += 2;
-                continue;
-            }
-            if c == delim {
-                string_delim = None;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' || c == '\'' {
-            string_delim = Some(c);
-            i += 1;
-            continue;
-        }
-        if c == '[' || c == '(' || c == '{' {
-            depth += 1;
-        } else if c == ']' || c == ')' || c == '}' {
-            depth -= 1;
-        } else if c == ',' && depth == 0 {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    scan_top_level(s, 0, s.len(), |c, i| c[i] == ',')
 }
 
 fn parse_each_tag(
@@ -3063,6 +2853,64 @@ mod tests {
         assert_eq!(e.code, ErrorCode::InvalidExpression);
         let e = parse_block_tag("component '../x'", 1, 1, &opts(), 0).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
+    }
+
+    #[test]
+    fn component_name_splits_after_a_template_literal() {
+        for (source, name, props) in [
+            (
+                "component `card,${kind}`, { value: 1 }",
+                "`card,${kind}`",
+                "{ value: 1 }",
+            ),
+            (
+                "component `card,${`${a, b}`}\\``, p",
+                "`card,${`${a, b}`}\\``",
+                "p",
+            ),
+            ("component `x${'}'},`, p", "`x${'}'},`", "p"),
+            ("component /* a, b */ n, p", "/* a, b */ n", "p"),
+            (
+                "component typeof /,/ === 'x' ? a : b, p",
+                "typeof /,/ === 'x' ? a : b",
+                "p",
+            ),
+            (
+                "component a++ / 2 ? 'x' : 'y', p",
+                "a++ / 2 ? 'x' : 'y'",
+                "p",
+            ),
+        ] {
+            let (pb, _) = parse_block_tag(source, 1, 1, &opts(), 0)
+                .unwrap_or_else(|e| panic!("{source}: {}", e.message));
+            match pb {
+                ParsedBlockTag::Component(c) => {
+                    assert_eq!(c.name_source.as_deref(), Some(name), "{source}");
+                    assert_eq!(c.props_source.as_deref(), Some(props), "{source}");
+                }
+                _ => panic!("expected Component for {source}"),
+            }
+        }
+        let e = parse_block_tag("component `a,${b}`, p, q", 1, 1, &opts(), 0).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidExpression);
+    }
+
+    #[test]
+    fn each_splits_on_in_outside_template_literals() {
+        // A backtick inside a string inside a substitution is not the end of
+        // the template literal.
+        assert_eq!(
+            find_top_level_in(&"`${\"`\"} in b` in xs".chars().collect::<Vec<_>>()),
+            Some((13, 17))
+        );
+        assert_eq!(
+            find_top_level_in(&"`a in b` in xs".chars().collect::<Vec<_>>()),
+            Some((8, 12))
+        );
+        assert_eq!(
+            find_top_level_in(&"x inner".chars().collect::<Vec<_>>()),
+            None
+        );
     }
 
     #[test]

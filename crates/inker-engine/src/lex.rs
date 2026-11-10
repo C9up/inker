@@ -23,6 +23,7 @@
 //! byte-parity suite uses ASCII fixtures.
 
 use crate::error::{ErrorCode, InkerError};
+use crate::js_scan::{skip_js_token, token_prev_sig};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -496,39 +497,30 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                         }
                     }
                 }
-                // Optional balanced `( … )` argument span (string-aware + nested).
+                // Optional balanced `( … )` argument span. A `)` inside a
+                // string, a template literal (and its `${…}`), a regex or a
+                // comment does not close it.
                 let mut args = String::new();
                 if i < len && chars[i] == '(' {
                     advance(&mut cursor, '(');
                     i += 1;
                     let mut depth = 1usize;
-                    let mut string_delim: Option<char> = None;
+                    let mut prev_sig = '(';
                     let mut closed = false;
                     while i < len {
-                        let c = chars[i];
-                        if let Some(d) = string_delim {
-                            if c == '\\' && i + 1 < len {
-                                args.push(c);
-                                args.push(chars[i + 1]);
-                                advance(&mut cursor, c);
-                                advance(&mut cursor, chars[i + 1]);
-                                i += 2;
-                                continue;
+                        if let Some(next) = skip_js_token(&chars, i, prev_sig) {
+                            prev_sig = token_prev_sig(&chars, i, prev_sig);
+                            let next = next.min(len);
+                            while i < next {
+                                args.push(chars[i]);
+                                advance(&mut cursor, chars[i]);
+                                i += 1;
                             }
-                            if c == d {
-                                string_delim = None;
-                            }
-                            args.push(c);
-                            advance(&mut cursor, c);
-                            i += 1;
                             continue;
                         }
-                        if c == '"' || c == '\'' {
-                            string_delim = Some(c);
-                            args.push(c);
-                            advance(&mut cursor, c);
-                            i += 1;
-                            continue;
+                        let c = chars[i];
+                        if !c.is_whitespace() {
+                            prev_sig = c;
                         }
                         if c == '(' {
                             depth += 1;
@@ -1050,6 +1042,23 @@ mod tests {
         match &toks[0] {
             Token::BlockTag { raw, .. } => assert_eq!(raw, "layout 'main'"),
             _ => panic!("expected BlockTag"),
+        }
+    }
+
+    #[test]
+    fn block_tag_args_skip_parens_and_quotes_inside_literals() {
+        for (source, raw) in [
+            ("@include(`it's`)", "include `it's`"),
+            ("@include(`a)${b(')')}`)", "include `a)${b(')')}`"),
+            ("@if(/\\)/.test(x))", "if /\\)/.test(x)"),
+            ("@if(x /* ) */)", "if x /* ) */"),
+            ("@if((a) / b)", "if (a) / b"),
+        ] {
+            let toks = lex(source, &LexOptions::default()).unwrap();
+            match &toks[0] {
+                Token::BlockTag { raw: got, .. } => assert_eq!(got, raw, "{source}"),
+                _ => panic!("expected BlockTag for {source}"),
+            }
         }
     }
 

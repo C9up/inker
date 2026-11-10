@@ -11,6 +11,7 @@ pub mod ast;
 pub mod error;
 pub mod escape;
 pub mod identifiers;
+mod js_scan;
 pub mod lex;
 pub mod parse;
 pub mod parse_block_tag;

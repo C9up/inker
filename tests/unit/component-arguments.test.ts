@@ -147,6 +147,88 @@ describe("dynamic template names", () => {
 	});
 });
 
+// The name and the props are split on the first top-level comma, found by a
+// JavaScript-aware scan: a comma, bracket or quote inside a template literal,
+// a nested `${}` substitution, a string, a regex or a comment is not one.
+describe("splitting a component name from its props", () => {
+	// `#{` stands for a template literal's `${` in these template sources.
+	const js = (source: string): string =>
+		source.replaceAll("#{", ["$", "{"].join(""));
+
+	function card(page: string): Templates {
+		return withFiles({
+			"components/card,primary": "P{{ value }}",
+			"components/card,}x": "Q{{ value }}",
+			"components/it's": "S{{ value }}",
+			page,
+		});
+	}
+
+	it.each([
+		[
+			"a comma in a template literal name",
+			"@!component(`card,#{kind}`, { value: 1 })",
+			"P1",
+		],
+		[
+			"a nested template in the substitution",
+			"@!component(`card,#{`#{kind}`}`, { value: 2 })",
+			"P2",
+		],
+		[
+			"a call with commas in the substitution",
+			"@!component(`card,#{[kind, 'x'].join(',').split(',')[0]}`, { value: 3 })",
+			"P3",
+		],
+		[
+			"a brace in a string in the substitution",
+			"@!component(`card,#{'}'}x`, { value: 4 })",
+			"Q4",
+		],
+		[
+			"an escaped backtick",
+			"@!component(`card,\\`#{kind}`.replace('`', ''), { value: 5 })",
+			"P5",
+		],
+		["a quote in the template text", "@!component(`it's`, { value: 6 })", "S6"],
+		[
+			"a comment holding a comma",
+			"@!component(/* a, b */ `card,#{kind}`, { value: 7 })",
+			"P7",
+		],
+		[
+			"a regex holding a comma in the name",
+			"@!component(/,/.test(sep) ? `card#{sep}#{kind}` : 'x', { value: 8 })",
+			"P8",
+		],
+		[
+			"a regex holding a comma in the props",
+			"@!component('card,primary', /a,b/.test(sep) || { value: 9 })",
+			"P9",
+		],
+	])("handles %s", async (_label, source, expected) => {
+		const t = card(js(source));
+		expect(await t.render("page", { kind: "primary", sep: "," })).toBe(
+			expected,
+		);
+	});
+
+	it("splits @includeIf after a condition holding a template literal", async () => {
+		const t = withFiles({
+			"partials/x": "X",
+			page: js("@includeIf(`a,#{b}` === 'a,1', `partials/#{which}`)"),
+		});
+		expect(await t.render("page", { b: 1, which: "x" })).toBe("X");
+	});
+
+	it("still reports props after a second top-level comma", async () => {
+		const t = card(js("@!component(`card,#{kind}`, { value: 1 }, extra)"));
+		expect(await codeOf(() => t.render("page", { kind: "primary" }))).toBe(
+			"E_INKER_INVALID_EXPRESSION",
+		);
+	});
+});
+
 describe("slots with a scope argument", () => {
 	it("binds the argument the component passes to the slot", async () => {
 		const t = withFiles({
