@@ -111,8 +111,8 @@ interface PreloadClosure {
 
 /**
  * Read a template file without ever leaving `root`: open with `O_NOFOLLOW`
- * first so a later path swap cannot redirect the read (T6 + P1), validate
- * what the OS resolved, then read from the held descriptor.
+ * first so a later path swap cannot redirect the read (T6 + P1), check that
+ * the file behind that descriptor is inside the root, then read from it.
  */
 function readContainedSync(
 	absPath: string,
@@ -126,7 +126,7 @@ function readContainedSync(
 		throw wrapFsError(cause, absPath, validatedName);
 	}
 	try {
-		assertRealpathContained(absPath, root, validatedName);
+		assertOpenedFileContained(fd, absPath, root, validatedName);
 		try {
 			return fs.readFileSync(fd, "utf8");
 		} catch (cause) {
@@ -706,33 +706,84 @@ export class Processor {
 }
 
 /**
- * After the handle is open, confirm the file the OS actually resolved is still
- * inside `root`. `O_NOFOLLOW` already refused a symlinked final segment; this
- * catches an intermediate directory that is one.
+ * After the handle is open, confirm the file BEHIND IT is inside `root`.
+ * `O_NOFOLLOW` already refused a symlinked final segment; this catches an
+ * intermediate directory that is one.
  *
- * Extracted so the synchronous loader runs the SAME check — a second copy of a
- * containment rule is how the two paths drift apart.
+ * The check is bound to the descriptor, never to a second resolution of the
+ * path: a directory symlink can point outside when the file is opened and be
+ * swapped to point inside before a `realpath` runs, which then passes while
+ * the read uses the outside file already open.
+ * - Linux: `/proc/self/fd/<fd>` is the kernel's path of the opened file.
+ * - Elsewhere: the path is resolved and checked, then its inode must be the
+ *   opened one (`fstat` dev/ino), so a swap between open and check fails.
+ *   Without `openat` in Node, a second swap back between `realpath` and
+ *   `stat` is not provably excluded there; Linux has no such window.
+ *
+ * Extracted so every loader (render, renderSync, resolve) runs the SAME check
+ * — a second copy of a containment rule is how the paths drift apart.
  */
-function assertRealpathContained(
+function assertOpenedFileContained(
+	fd: number,
 	absPath: string,
 	root: string,
 	validatedName: string,
 ): void {
+	let opened: fs.Stats;
+	try {
+		opened = fs.fstatSync(fd);
+	} catch (cause) {
+		throw wrapFsError(cause, absPath, validatedName);
+	}
+	const kernelPath = openedFilePath(fd);
+	if (kernelPath !== undefined) {
+		assertResolvedInsideRoot(kernelPath, root, validatedName);
+		return;
+	}
 	let realPath: string;
+	let resolved: fs.Stats;
 	try {
 		// `.native` to match validateRoot's canonical form (same OS realpath)
 		// so 8.3-short-name / casing differences don't trip containment.
 		realPath = fs.realpathSync.native(absPath);
+		resolved = fs.statSync(realPath);
 	} catch (cause) {
 		throw wrapFsError(cause, absPath, validatedName);
 	}
-	if (realPath === absPath) return;
-	const rel = path.relative(root, realPath);
+	assertResolvedInsideRoot(realPath, root, validatedName);
+	if (resolved.dev !== opened.dev || resolved.ino !== opened.ino) {
+		throw new InkerRenderError(
+			"E_INKER_INVALID_PATH",
+			`Template path changed while it was being opened: ${absPath}`,
+			{ templatePath: absPath, templateName: validatedName },
+		);
+	}
+}
+
+/** The kernel's path of an open descriptor, where the OS exposes it. */
+function openedFilePath(fd: number): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const target = fs.readlinkSync(`/proc/self/fd/${fd}`);
+		// Anything but an absolute path (`pipe:[…]`, an unmounted /proc) is
+		// not a file location to check: fall back to the inode comparison.
+		return path.isAbsolute(target) ? target : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function assertResolvedInsideRoot(
+	resolvedPath: string,
+	root: string,
+	validatedName: string,
+): void {
+	const rel = path.relative(root, resolvedPath);
 	if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_PATH",
-			`Resolved template path escapes the templates root via symlink: ${realPath} is outside ${root}`,
-			{ templatePath: realPath, templateName: validatedName },
+			`Resolved template path escapes the templates root via symlink: ${resolvedPath} is outside ${root}`,
+			{ templatePath: resolvedPath, templateName: validatedName },
 		);
 	}
 }
@@ -2062,17 +2113,12 @@ export class Templates {
 			}
 		}
 
-		// T6 + P1: open the file with `O_NOFOLLOW` first, then validate the
-		// canonical path against root, then read from the file handle. Previous
-		// approach did two separate awaits on `absPath` (`realpath` then
-		// `readFile`) — an attacker who swaps `absPath` for a symlink between
-		// the two awaits would bypass the containment check and have the
-		// content read follow the swapped link. Holding a FD pins the inode:
-		// after `open` succeeds, subsequent path swaps cannot redirect the
-		// read. `O_NOFOLLOW` additionally rejects the final segment being a
-		// symlink at open time. The `realpath` check after open still races on
-		// intermediate directory swaps but is now belt-and-suspenders rather
-		// than the only line of defence.
+		// T6 + P1: open the file with `O_NOFOLLOW` first, then check that the
+		// file behind the handle is inside root, then read from the handle.
+		// Holding a FD pins the inode: after `open` succeeds, path swaps
+		// cannot redirect the read, and the containment check is made on that
+		// same inode (assertOpenedFileContained), not on a re-resolved path.
+		// `O_NOFOLLOW` additionally rejects the final segment being a symlink.
 		let handle: fsPromises.FileHandle;
 		try {
 			handle = await fsPromises.open(
@@ -2084,7 +2130,7 @@ export class Templates {
 		}
 		let source: string;
 		try {
-			assertRealpathContained(absPath, root, validatedName);
+			assertOpenedFileContained(handle.fd, absPath, root, validatedName);
 			try {
 				source = await handle.readFile("utf8");
 			} catch (cause) {
@@ -2149,7 +2195,7 @@ export class Templates {
 	 *
 	 * Only the four I/O calls differ — `statSync`/`openSync`/`readFileSync`/
 	 * `closeSync` against their promise forms. The containment rule
-	 * (`assertRealpathContained`) and everything after the read
+	 * (`assertOpenedFileContained`) and everything after the read
 	 * (`#parseAndCache`) are the SAME functions, so the two paths cannot drift
 	 * on the parts that matter.
 	 */
