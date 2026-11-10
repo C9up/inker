@@ -10,6 +10,8 @@
 //     per ADR-007, and passes the resolved map to `renderAst`.
 //   - `renderAst(ast, data, helpers, ctx)` — synchronous render with the
 //     pre-resolved helpers map.
+//   - `openedPath(fd)` — the path of the file behind an open descriptor on
+//     macOS / Windows, so template containment is judged on what was opened.
 //   - InkerError → napi::Error: message is `JSON.stringify(InkerNapiErrorPayload)`
 //     so the TS-side can reconstruct an `InkerRenderError` with the correct
 //     `code` / `line` / `column` / `templateName`.
@@ -23,6 +25,8 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::panic::catch_unwind;
 use std::sync::Arc;
+
+mod opened;
 
 #[derive(Serialize)]
 struct InkerNapiErrorPayload {
@@ -498,4 +502,12 @@ pub fn ast_to_json(ast: &InkerAst) -> Result<String> {
 #[napi]
 pub fn engine_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The path of the file behind an open descriptor, as the system names it
+/// now, or null where it cannot be asked from here (Linux reads procfs
+/// itself). Synchronous: one system call, on a descriptor the caller holds.
+#[napi]
+pub fn opened_path(fd: i32) -> Option<String> {
+    opened::path_of(fd)
 }

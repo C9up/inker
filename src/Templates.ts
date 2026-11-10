@@ -713,12 +713,18 @@ export class Processor {
  * The check is bound to the descriptor, never to a second resolution of the
  * path: a directory symlink can point outside when the file is opened and be
  * swapped to point inside before a `realpath` runs, which then passes while
- * the read uses the outside file already open.
+ * the read uses the outside file already open. Resolving the path and then
+ * comparing inodes is not enough either: a second swap between `realpath`
+ * and `stat` makes the checked path inside and the compared inode outside.
+ * So the system is asked where the OPENED file is:
  * - Linux: `/proc/self/fd/<fd>` is the kernel's path of the opened file.
- * - Elsewhere: the path is resolved and checked, then its inode must be the
- *   opened one (`fstat` dev/ino), so a swap between open and check fails.
- *   Without `openat` in Node, a second swap back between `realpath` and
- *   `stat` is not provably excluded there; Linux has no such window.
+ * - macOS / Windows: the engine asks the descriptor (`fcntl(F_GETPATH)`,
+ *   `GetFinalPathNameByHandleW`), in the same form `realpath.native` gives.
+ * - Only where neither can answer (Linux without a mounted /proc, a system
+ *   the engine does not know) is the path resolved and checked, then its
+ *   inode required to be the opened one (`fstat` dev/ino). That fallback
+ *   refuses a single swap, but without `openat` in Node a second swap timed
+ *   between `realpath` and `stat` is not provably excluded there.
  *
  * Extracted so every loader (render, renderSync, resolve) runs the SAME check
  * — a second copy of a containment rule is how the paths drift apart.
@@ -760,9 +766,19 @@ function assertOpenedFileContained(
 	}
 }
 
-/** The kernel's path of an open descriptor, where the OS exposes it. */
+/**
+ * The system's path of an open descriptor, where the OS exposes it: procfs
+ * on Linux, the engine elsewhere. `undefined` means "not asked", never
+ * "inside" — the caller then falls back to the inode comparison.
+ */
 function openedFilePath(fd: number): string | undefined {
-	if (process.platform !== "linux") return undefined;
+	if (process.platform !== "linux") {
+		// Only Linux is asked through `/proc`: elsewhere it is an ordinary
+		// path, and on Windows `C:\proc\self\fd\3` is a folder any local
+		// account may create and fill with a junction answering anything.
+		const located = getNative().openedPath(fd);
+		return located !== null && path.isAbsolute(located) ? located : undefined;
+	}
 	try {
 		const target = fs.readlinkSync(`/proc/self/fd/${fd}`);
 		// Anything but an absolute path (`pipe:[…]`, an unmounted /proc) is

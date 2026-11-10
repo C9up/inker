@@ -5,6 +5,7 @@ import os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { getNative } from "../../src/loadNapi.js";
 import { Templates } from "../../src/Templates.js";
 
 // `resolve()` reads a template's source, so it must stop at the templates
@@ -198,6 +199,75 @@ describe("containment is bound to the opened file", () => {
 		} finally {
 			Reflect.set(fsModule, "readlinkSync", readlink);
 			syncBuiltinESMExports();
+		}
+	});
+
+	/**
+	 * The second swap a path-then-inode check cannot see: the link points
+	 * OUTSIDE at the open, INSIDE while the path is resolved, and the inside
+	 * directory it named is then replaced by a link OUTSIDE before its inode is
+	 * compared — so the checked path is inside and the compared inode is the
+	 * opened, outside one. Only a check asked of the descriptor refuses it:
+	 * procfs on Linux, the engine on macOS and Windows.
+	 */
+	it("refuses a second swap between resolving the path and comparing inodes", async () => {
+		const { views, link, safe } = swapSetup();
+		const secret = path.join(path.dirname(views), "secret");
+		const t = new Templates({ root: views, cacheMode: "never" });
+		const realpath = fsModule.realpathSync;
+		const nativeRealpath = realpath.native;
+		let resolvedThenSwapped = false;
+		Reflect.set(realpath, "native", (...args: unknown[]) => {
+			const out: unknown = Reflect.apply(nativeRealpath, realpath, args);
+			if (!resolvedThenSwapped && String(out).endsWith("leak.inker")) {
+				resolvedThenSwapped = true;
+				fs.renameSync(safe, `${safe}-before`);
+				fs.symlinkSync(secret, safe);
+			}
+			return out;
+		});
+		try {
+			const code = await patched(
+				fsModule,
+				"openSync",
+				() => swapLink(link, safe),
+				() => codeOf(() => t.resolve("swap/leak")),
+			);
+			expect(code).toBe("E_INKER_INVALID_PATH");
+			if (
+				process.platform === "linux" ||
+				process.platform === "darwin" ||
+				process.platform === "win32"
+			) {
+				// Asked of the descriptor: the path is never resolved again.
+				expect(resolvedThenSwapped).toBe(false);
+			}
+		} finally {
+			Reflect.set(realpath, "native", nativeRealpath);
+		}
+	});
+
+	it("names an open file by its descriptor where the engine can ask", () => {
+		// What the check relies on without procfs: where the opened file is
+		// NOW, not where it was opened from.
+		const { views } = setup();
+		const fd = fs.openSync(path.join(views, "ok.inker"), "r");
+		try {
+			fs.renameSync(
+				path.join(views, "ok.inker"),
+				path.join(views, "moved.inker"),
+			);
+			const located = getNative().openedPath(fd);
+			if (process.platform === "darwin" || process.platform === "win32") {
+				expect(located).toBe(
+					fs.realpathSync.native(path.join(views, "moved.inker")),
+				);
+			} else {
+				// Linux is asked through procfs by Templates itself.
+				expect(located).toBeNull();
+			}
+		} finally {
+			fs.closeSync(fd);
 		}
 	});
 

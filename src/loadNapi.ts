@@ -40,6 +40,7 @@ const NATIVE_CALLS = [
 	"parseTemplate",
 	"parseTemplateJson",
 	"astToJson",
+	"openedPath",
 ] as const;
 
 type NativeExports = Pick<

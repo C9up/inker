@@ -117,3 +117,11 @@ export declare function astToJson(ast: InkerAst): string;
 /** Crate version — useful for the TS-side `loadNapi.ts` startup diagnostic. */
 
 export declare function engineVersion(): string;
+
+/**
+ * The path of the file behind an open descriptor, as the system names it
+ * now, or null where it cannot be asked from here (Linux reads procfs
+ * itself). Synchronous: one system call, on a descriptor the caller holds.
+ */
+
+export declare function openedPath(fd: number): string | null;
