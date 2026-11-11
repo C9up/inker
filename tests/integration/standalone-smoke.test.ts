@@ -5,7 +5,8 @@
  * Story 53.6 AC1, AC2, AC6.
  *
  * Strategy:
- *   1. `pnpm pack` the workspace inker package into a tmp tarball.
+ *   1. Pack the package into a tmp tarball (`packToTemp`: the build runs
+ *      into a staging copy, never into the repository's `dist/`).
  *   2. Seed a fresh consumer dir (under /tmp) with @c9up/inker declared as
  *      `file:<tarball>` — no ream, no rosetta. devDeps add `tsx` so the
  *      consumer can `node --import tsx` runtime-TS sources (inker is
@@ -34,17 +35,13 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	readdirSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = path.resolve(HERE, "..", "..");
+import { packToTemp } from "./__helpers__/packToTemp.js";
 
 const SMOKE_TIMEOUT_MS = 180_000;
 
@@ -91,40 +88,6 @@ function runPnpm(args: readonly string[], cwd: string): string {
 	return runChild(PNPM, args, cwd, process.platform === "win32");
 }
 
-function tarballFromPackOutput(stdout: string, tmpDir: string): string {
-	// `pnpm pack --pack-destination <dir>` prints the absolute tarball path
-	// as the last non-empty line of stdout (see ream-mcp/.../published-shape).
-	const lastLine = stdout
-		.trim()
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter(Boolean)
-		.pop();
-	const resolvedTmp = path.resolve(tmpDir);
-	if (
-		lastLine?.endsWith(".tgz") &&
-		existsSync(lastLine) &&
-		path.resolve(lastLine).startsWith(`${resolvedTmp}${path.sep}`)
-	) {
-		return lastLine;
-	}
-	// Fallback: scan the dir for a .tgz (some pnpm versions print a footer
-	// like "Total size: 12.3 kB" as the last line instead of the path).
-	// Sort deterministically so a future multi-tarball scenario does not
-	// rely on directory iteration order.
-	const tgzs = readdirSync(tmpDir)
-		.filter((f) => f.endsWith(".tgz"))
-		.sort();
-	const [firstTgz] = tgzs;
-	if (firstTgz !== undefined) {
-		const abs = path.join(tmpDir, firstTgz);
-		if (existsSync(abs)) return abs;
-	}
-	throw new Error(
-		`pnpm pack did not produce a discoverable tarball; stdout was:\n${stdout}`,
-	);
-}
-
 describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 	let tmpDir = "";
 	let consumerDir = "";
@@ -133,8 +96,7 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 		tmpDir = mkdtempSync(path.join(tmpdir(), "inker-smoke-"));
 
 		// 1. pack inker into a tarball
-		const packOut = runPnpm(["pack", "--pack-destination", tmpDir], PKG_ROOT);
-		const tarballPath = tarballFromPackOutput(packOut, tmpDir);
+		const tarballPath = packToTemp(tmpDir);
 
 		// 2. seed the consumer (NO @c9up/ream, NO @c9up/rosetta)
 		consumerDir = path.join(tmpDir, "consumer");

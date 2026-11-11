@@ -9,22 +9,35 @@
  *       `./provider`                — `import` + `types`
  *       `./services/main`           — `import` + `types`
  *       `./testing`                 — `import` + `types`
- *   - No `dist/` build precondition — inker is source-first per ADR-003;
- *     the tarball ships `src/*.ts` and the consumer's loader compiles
- *     them at import time (verified by the standalone smoke). The
- *     `browser` condition file at `./dist/index.js` is a publish-time
- *     (maintainer) concern handled outside this test.
+ *   - The tarball is the one a publish would produce: the build runs into a
+ *     staging copy under the temp dir (see `packToTemp`), never into the
+ *     repository's own `dist/`.
  *   - Asserts `README.md` and `LICENSE` are inside the tarball (AC5).
  *
  * Story 53.6 AC5.
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PKG_ROOT, packToTemp } from "./__helpers__/packToTemp.js";
+
+/** Every file under the package's own `dist/` with its mtime, or null. */
+function distSnapshot(): string[] | null {
+	const dist = path.join(PKG_ROOT, "dist");
+	if (!existsSync(dist)) return null;
+	return readdirSync(dist, { recursive: true, encoding: "utf8" })
+		.sort()
+		.map((file) => `${file}@${statSync(path.join(dist, file)).mtimeMs}`);
+}
 
 type ExportEntry = {
 	browser?: string;
@@ -66,35 +79,15 @@ function isPackJson(value: unknown): value is PackJson {
 	return isExportsMap(value.exports);
 }
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = path.resolve(HERE, "..", "..");
-
 describe("@c9up/inker published shape (AC5)", () => {
 	let tmpDir = "";
 	let tarballPath = "";
+	let distBefore: string[] | null = null;
 
 	beforeAll(() => {
 		tmpDir = mkdtempSync(path.join(tmpdir(), "inker-pack-"));
-		const isWin = process.platform === "win32";
-		const stdout = execFileSync(
-			isWin ? "pnpm.cmd" : "pnpm",
-			["pack", "--pack-destination", tmpDir],
-			// `.cmd` needs a shell since the CVE-2024-27980 fix (EINVAL otherwise).
-			{ cwd: PKG_ROOT, encoding: "utf8", shell: isWin },
-		);
-		const lastLine = stdout
-			.trim()
-			.split(/\r?\n/)
-			.map((line) => line.trim())
-			.filter(Boolean)
-			.pop();
-		if (lastLine?.endsWith(".tgz") && existsSync(lastLine)) {
-			tarballPath = lastLine;
-		} else {
-			throw new Error(
-				`pnpm pack did not produce a discoverable tarball; stdout was:\n${stdout}`,
-			);
-		}
+		distBefore = distSnapshot();
+		tarballPath = packToTemp(tmpDir);
 		// `pnpm pack` builds and archives the package: it is a minute's work on a
 		// loaded machine, and it inherits the suite's per-test timeout, which is
 		// sized for tests rather than for a build. The hook failed under load and
@@ -104,6 +97,10 @@ describe("@c9up/inker published shape (AC5)", () => {
 
 	afterAll(() => {
 		if (tmpDir !== "") rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("packs without writing into the package's own dist/", () => {
+		expect(distSnapshot()).toEqual(distBefore);
 	});
 
 	it("ships every advertised export sub-path + README + LICENSE inside the tarball", () => {
