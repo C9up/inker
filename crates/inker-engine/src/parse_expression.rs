@@ -11,21 +11,19 @@
 //!   - Binary: `==`, `!=`, `===`, `!==`, `<`, `<=`, `>`, `>=`, `&&`, `||`.
 //!   - Group: `(expr)`.
 //!
-//! Each `Call` is assigned a monotonic `id: u32` during parse via the cursor's
-//! `next_helper_id` counter — the id is the keyspace for ADR-007 helper
-//! pre-resolution at render time (the TS-side walks the `collectInvocations`
-//! tape, evaluates args, packs `Record<String(id), ResolvedHelperValue>`, and
-//! the Rust renderer dereferences by id).
+//! The tree is a check, not an artifact: the parsers call this to refuse an
+//! expression the template must not hold (an unregistered helper call in the
+//! modelled grammar, a prototype-pollution key, nesting past the depth bound)
+//! and keep only the verbatim source, which the Node renderer evaluates in V8.
 
 use crate::error::{ErrorCode, InkerError};
 use crate::identifiers::{is_prototype_pollution_key, is_reserved_binding};
 use crate::parse_path::{parse_path, PathSegment};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::Serialize;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Eq,
     NotEq,
@@ -56,7 +54,7 @@ impl BinaryOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
     /// `await expr`. The Node renderer evaluates the expression's verbatim
@@ -65,8 +63,7 @@ pub enum UnaryOp {
     Await,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
     String(String),
     Number(f64),
@@ -75,15 +72,14 @@ pub enum LiteralValue {
     Undefined,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectEntry {
     pub key: String,
     pub value: Expression,
     pub shorthand: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     Literal {
         value: LiteralValue,
@@ -100,7 +96,6 @@ pub enum Expression {
     Call {
         name: String,
         args: Vec<Expression>,
-        id: u32,
         source: String,
         line: u32,
         column: u32,
@@ -184,33 +179,6 @@ impl Expression {
             | Expression::Raw { column, .. } => *column,
         }
     }
-
-    /// Walk the expression tree depth-first and collect every Call site
-    /// (used by ADR-007 pre-resolution at render time).
-    pub fn collect_call_sites<'a>(&'a self, out: &mut Vec<&'a Expression>) {
-        match self {
-            Expression::Call { args, .. } => {
-                out.push(self);
-                for a in args {
-                    a.collect_call_sites(out);
-                }
-            }
-            Expression::Object { entries, .. } => {
-                for e in entries {
-                    e.value.collect_call_sites(out);
-                }
-            }
-            Expression::Unary { operand, .. } => operand.collect_call_sites(out),
-            Expression::Binary { left, right, .. } => {
-                left.collect_call_sites(out);
-                right.collect_call_sites(out);
-            }
-            Expression::Group { expression, .. } => expression.collect_call_sites(out),
-            // `Raw` is helper-free by construction (only emitted when the source
-            // contains no registered helper call), so it has no call sites.
-            Expression::Literal { .. } | Expression::Path { .. } | Expression::Raw { .. } => {}
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -249,7 +217,6 @@ struct Cursor<'a> {
     template_path: Option<String>,
     helpers: &'a HashSet<String>,
     depth: u32,
-    next_helper_id: u32,
 }
 
 fn make_cursor<'a>(
@@ -267,7 +234,6 @@ fn make_cursor<'a>(
         template_path: options.template_path.clone(),
         helpers: &options.helpers,
         depth: 0,
-        next_helper_id: 0,
     }
 }
 
@@ -689,13 +655,10 @@ fn parse_primary_inner(cursor: &mut Cursor) -> Result<Expression, InkerError> {
             }
             cursor.pos += 1;
             let args = parse_call_args(cursor)?;
-            let id = cursor.next_helper_id;
-            cursor.next_helper_id += 1;
             let src: String = cursor.chars[start..cursor.pos].iter().collect();
             return Ok(Expression::Call {
                 name,
                 args,
-                id,
                 source: src,
                 line: start_line,
                 column: start_column,
@@ -1156,8 +1119,7 @@ fn raw_fallback(
 }
 
 /// Top-level entry. Parses an entire expression and asserts no trailing
-/// content. Also returns the helper-callsite counter so the caller can fold it
-/// into the parent AST's `helper_count`.
+/// content.
 pub fn parse_expression(
     source: &str,
     line: u32,
@@ -1192,40 +1154,6 @@ pub fn parse_expression(
         Ok(expr)
     })();
     strict.or_else(|e| raw_fallback(source, line, column, e))
-}
-
-/// Parse and ALSO return the helper-callsite count so it can be folded into
-/// the parent `InkerAst`.
-pub fn parse_expression_with_helper_count(
-    source: &str,
-    line: u32,
-    column: u32,
-    options: &ParseExpressionOptions,
-    start_id: u32,
-) -> Result<(Expression, u32), InkerError> {
-    if source.is_empty() {
-        return parse_expression(source, line, column, options).map(|e| (e, start_id));
-    }
-    let strict: Result<(Expression, u32), InkerError> = (|| {
-        let mut cursor = make_cursor(source, line, column, options);
-        cursor.next_helper_id = start_id;
-        skip_whitespace(&mut cursor);
-        let expr = parse_or(&mut cursor)?;
-        skip_whitespace(&mut cursor);
-        if cursor.pos < cursor.chars.len() {
-            let tail: String = cursor.chars[cursor.pos..].iter().collect();
-            let pos = cursor.pos;
-            return Err(fail_parse(
-                &cursor,
-                format!("trailing content after expression: '{tail}'"),
-                pos,
-            ));
-        }
-        Ok((expr, cursor.next_helper_id))
-    })();
-    // A `Raw` fallback contains no helper calls, so the helper-id counter is
-    // unchanged (stays `start_id`).
-    strict.or_else(|e| raw_fallback(source, line, column, e).map(|expr| (expr, start_id)))
 }
 
 #[cfg(test)]
@@ -1300,10 +1228,9 @@ mod tests {
         let opts = opts_with(&["upper"]);
         let e = parse_expression("upper('a')", 1, 1, &opts).unwrap();
         match e {
-            Expression::Call { name, args, id, .. } => {
+            Expression::Call { name, args, .. } => {
                 assert_eq!(name, "upper");
                 assert_eq!(args.len(), 1);
-                assert_eq!(id, 0);
             }
             _ => panic!("expected call"),
         }
@@ -1405,39 +1332,5 @@ mod tests {
         // restricted grammar rejected them, they now fall back to a `Raw` node.
         let e = parse_expression("[1, 2]", 1, 1, &opts_no_helpers()).unwrap();
         assert!(matches!(e, Expression::Raw { .. }));
-    }
-
-    #[test]
-    fn helper_id_assigns_inner_first_for_pre_resolve_correctness() {
-        // ADR-007 pre-resolve evaluates helper call sites in array order. Inner
-        // calls MUST resolve before outer ones so the outer's `evalArg` can
-        // consume the already-resolved inner value via id lookup. Assignment
-        // happens AFTER parse_call_args returns, so inner=0, outer=1 — the
-        // reverse would break nested-helper rendering.
-        let opts = opts_with(&["a", "b"]);
-        let e = parse_expression("a(b())", 1, 1, &opts).unwrap();
-        match e {
-            Expression::Call {
-                id: outer_id, args, ..
-            } => {
-                assert_eq!(outer_id, 1, "outer call assigned AFTER inner resolves");
-                match &args[0] {
-                    Expression::Call { id, .. } => {
-                        assert_eq!(*id, 0, "inner call assigned first (pre-resolve order)");
-                    }
-                    _ => panic!("expected inner call"),
-                }
-            }
-            _ => panic!("expected call"),
-        }
-    }
-
-    #[test]
-    fn collect_call_sites_visits_nested() {
-        let opts = opts_with(&["a", "b"]);
-        let e = parse_expression("a(b())", 1, 1, &opts).unwrap();
-        let mut sites: Vec<&Expression> = Vec::new();
-        e.collect_call_sites(&mut sites);
-        assert_eq!(sites.len(), 2);
     }
 }

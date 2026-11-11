@@ -7,7 +7,7 @@ import type { Stacks } from "./stacks.js";
 
 /**
  * Node-side renderer (62-2 pivot away from the embedded QuickJS VM). Walks the
- * JSON AST produced by the Rust `parseTemplateJson` and evaluates each
+ * JSON AST the Rust `astToJson` serialises and evaluates each
  * expression's verbatim `source` in Node's own V8 — with the registered helpers
  * and the render scope in lexical scope — exactly like Adonis Edge (one runtime,
  * helpers are plain functions in scope, callable anywhere including inside arrow

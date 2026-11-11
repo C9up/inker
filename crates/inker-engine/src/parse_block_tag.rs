@@ -11,9 +11,7 @@ use crate::identifiers::{is_prototype_pollution_key, is_reserved_binding};
 use crate::js_scan::{
     skip_block_comment, skip_js_token, skip_line_comment, token_prev_sig, TooDeep,
 };
-use crate::parse_expression::{
-    parse_expression_with_helper_count, Expression, ParseExpressionOptions,
-};
+use crate::parse_expression::{parse_expression, ParseExpressionOptions};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -371,8 +369,7 @@ fn parse_if_tag(
     template_path: Option<&str>,
     after_keyword: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
-) -> Result<(IfCondition, u32), InkerError> {
+) -> Result<IfCondition, InkerError> {
     let i = skip_whitespace(chars, after_keyword);
     if i >= chars.len() {
         return Err(fail_invalid_expression(
@@ -395,15 +392,10 @@ fn parse_if_tag(
         template_path: template_path.map(|s| s.to_string()),
         helpers: helpers.clone(),
     };
-    let (expression, next_id) =
-        parse_expression_with_helper_count(&expr_source, line, column, &options, helper_id_start)?;
-    Ok((
-        IfCondition {
-            expression,
-            source: expr_source,
-        },
-        next_id,
-    ))
+    parse_expression(&expr_source, line, column, &options)?;
+    Ok(IfCondition {
+        source: expr_source,
+    })
 }
 
 fn read_binding_name(
@@ -634,11 +626,11 @@ fn parse_indexed_binding(
     })
 }
 
-/// Parsed `@let` payload: `(name-or-verbatim-pattern, RHS expression, verbatim
+/// Parsed `@let` payload: `(name-or-verbatim-pattern, verbatim
 /// RHS source, is_destructure, bound names, next helper id)`. `names` is empty
 /// for a simple `@let(x = …)` and carries the extracted+validated identifiers
 /// for a destructuring `@let({ a, b } = …)`.
-type ParsedLet = (String, Expression, String, bool, Vec<String>, u32);
+type ParsedLet = (String, String, bool, Vec<String>);
 
 #[allow(clippy::too_many_arguments)]
 fn parse_let_tag(
@@ -648,22 +640,13 @@ fn parse_let_tag(
     template_path: Option<&str>,
     after_keyword: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
 ) -> Result<ParsedLet, InkerError> {
     let pattern_start = skip_whitespace(chars, after_keyword);
     // Destructuring binding — `@let({ a, b } = obj)` / `@let([x, ...rest] = pair)`
     // (Edge parity, 62-2). The pattern is the leading balanced `{…}`/`[…]` group;
     // Rust only balances brackets, the Node renderer owns the JS destructuring.
     if matches!(chars.get(pattern_start).copied(), Some('{') | Some('[')) {
-        return parse_let_destructure(
-            chars,
-            line,
-            column,
-            template_path,
-            pattern_start,
-            helpers,
-            helper_id_start,
-        );
+        return parse_let_destructure(chars, line, column, template_path, pattern_start, helpers);
     }
     let mut i = pattern_start;
     let start = i;
@@ -734,9 +717,8 @@ fn parse_let_tag(
         template_path: template_path.map(|s| s.to_string()),
         helpers: helpers.clone(),
     };
-    let (expression, next_id) =
-        parse_expression_with_helper_count(&expr_source, line, column, &options, helper_id_start)?;
-    Ok((name, expression, expr_source, false, Vec::new(), next_id))
+    parse_expression(&expr_source, line, column, &options)?;
+    Ok((name, expr_source, false, Vec::new()))
 }
 
 /// Parse a destructuring `@let` — `@let({ a, b } = obj)` / `@let([x, ...rest] =
@@ -757,7 +739,6 @@ fn parse_let_destructure(
     template_path: Option<&str>,
     pattern_start: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
 ) -> Result<ParsedLet, InkerError> {
     let (pattern_raw, after) =
         slice_balanced_pattern(chars, pattern_start, line, column, template_path)?;
@@ -795,9 +776,8 @@ fn parse_let_destructure(
         template_path: template_path.map(|s| s.to_string()),
         helpers: helpers.clone(),
     };
-    let (expression, next_id) =
-        parse_expression_with_helper_count(&expr_source, line, column, &options, helper_id_start)?;
-    Ok((pattern, expression, expr_source, true, names, next_id))
+    parse_expression(&expr_source, line, column, &options)?;
+    Ok((pattern, expr_source, true, names))
 }
 
 /// Slice the leading balanced `{…}` or `[…]` group starting at `start`. JS-aware
@@ -1287,8 +1267,7 @@ fn parse_include_if_tag(
     template_path: Option<&str>,
     after_keyword: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
-) -> Result<(IfCondition, PartialNode, u32), InkerError> {
+) -> Result<(IfCondition, PartialNode), InkerError> {
     let start = skip_whitespace(chars, after_keyword);
     if start >= chars.len() {
         return Err(fail_invalid_expression(
@@ -1324,21 +1303,18 @@ fn parse_include_if_tag(
         template_path: template_path.map(|s| s.to_string()),
         helpers: helpers.clone(),
     };
-    let (expression, next_id) =
-        parse_expression_with_helper_count(&cond_source, line, column, &options, helper_id_start)?;
+    parse_expression(&cond_source, line, column, &options)?;
 
-    let (name, name_source, next_id) = parse_template_name(
+    let (name, name_source) = parse_template_name(
         &body[comma + 1..],
         "includeIf",
         line,
         column,
         template_path,
         helpers,
-        next_id,
     )?;
     Ok((
         IfCondition {
-            expression,
             source: cond_source,
         },
         PartialNode {
@@ -1348,7 +1324,6 @@ fn parse_include_if_tag(
             line,
             column,
         },
-        next_id,
     ))
 }
 
@@ -1365,8 +1340,7 @@ fn parse_each_tag(
     template_path: Option<&str>,
     after_keyword: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
-) -> Result<(Expression, String, EachBinding, u32), InkerError> {
+) -> Result<(String, EachBinding), InkerError> {
     let start = skip_whitespace(chars, after_keyword);
     if start >= chars.len() {
         return Err(fail_invalid_expression(
@@ -1422,13 +1396,7 @@ fn parse_each_tag(
         template_path: template_path.map(|s| s.to_string()),
         helpers: helpers.clone(),
     };
-    let (iterable, next_id) = parse_expression_with_helper_count(
-        &iterable_source,
-        line,
-        column,
-        &options,
-        helper_id_start,
-    )?;
+    parse_expression(&iterable_source, line, column, &options)?;
 
     // `(value, index)` → Indexed; `[k, v]` → Destructured (array-of-pairs /
     // object entries); a bare identifier → Single.
@@ -1457,7 +1425,7 @@ fn parse_each_tag(
         EachBinding::Single(binding_src)
     };
 
-    Ok((iterable, iterable_source, binding, next_id))
+    Ok((iterable_source, binding))
 }
 
 /// A template-name argument: a string literal is validated now; any other
@@ -1470,8 +1438,7 @@ fn parse_template_name(
     column: u32,
     template_path: Option<&str>,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
-) -> Result<(String, Option<String>, u32), InkerError> {
+) -> Result<(String, Option<String>), InkerError> {
     let text: String = source.iter().collect::<String>().trim().to_string();
     if text.is_empty() {
         return Err(fail_parse(
@@ -1486,18 +1453,17 @@ fn parse_template_name(
         if let Ok((name, next)) = read_quoted_string(&chars, 0, line, column, template_path) {
             if skip_whitespace(&chars, next) >= chars.len() {
                 validate_path_name(&name, line, column, template_path)?;
-                return Ok((name, None, helper_id_start));
+                return Ok((name, None));
             }
         }
     }
-    let (_, next_id) = parse_expression_with_helper_count(
+    parse_expression(
         &text,
         line,
         column,
         &expression_options(template_path, helpers),
-        helper_id_start,
     )?;
-    Ok((String::new(), Some(text), next_id))
+    Ok((String::new(), Some(text)))
 }
 
 fn expression_options(
@@ -1525,8 +1491,7 @@ fn parse_component_tag(
     template_path: Option<&str>,
     after_keyword: usize,
     helpers: &HashSet<String>,
-    helper_id_start: u32,
-) -> Result<(ComponentNode, u32), InkerError> {
+) -> Result<ComponentNode, InkerError> {
     let rest = &chars[after_keyword..];
     let start = skip_whitespace(rest, 0);
     if start >= rest.len() {
@@ -1554,15 +1519,8 @@ fn parse_component_tag(
             None => (rest, None),
         },
     };
-    let (name, name_source, mut next_id) = parse_template_name(
-        name_part,
-        "component",
-        line,
-        column,
-        template_path,
-        helpers,
-        helper_id_start,
-    )?;
+    let (name, name_source) =
+        parse_template_name(name_part, "component", line, column, template_path, helpers)?;
     let props_source = match props_part {
         None => None,
         Some(props) => {
@@ -1589,31 +1547,26 @@ fn parse_component_tag(
                     template_path,
                 ));
             }
-            let (_, end_id) = parse_expression_with_helper_count(
+            parse_expression(
                 &text,
                 line,
                 column,
                 &expression_options(template_path, helpers),
-                next_id,
             )?;
-            next_id = end_id;
             Some(text)
         }
     };
 
-    Ok((
-        ComponentNode {
-            name,
-            name_source,
-            props_source,
-            body_nodes: Vec::new(),
-            named_slots: Vec::new(),
-            raw: raw.to_string(),
-            line,
-            column,
-        },
-        next_id,
-    ))
+    Ok(ComponentNode {
+        name,
+        name_source,
+        props_source,
+        body_nodes: Vec::new(),
+        named_slots: Vec::new(),
+        raw: raw.to_string(),
+        line,
+        column,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1726,7 +1679,6 @@ pub enum ParsedBlockTag {
         column: u32,
     },
     OpenEach {
-        iterable: Expression,
         iterable_source: String,
         binding: EachBinding,
         line: u32,
@@ -1748,7 +1700,6 @@ pub enum ParsedBlockTag {
     },
     Let {
         name: String,
-        expression: Expression,
         source: String,
         destructure: bool,
         names: Vec<String>,
@@ -1793,15 +1744,15 @@ pub struct ParseBlockTagOptions {
     pub component_tags: HashMap<String, String>,
 }
 
-/// Returns the parsed block tag AND the updated helper-id counter (the parser
-/// consumes ids monotonically across the entire template).
+/// Parse one block tag. Its expressions are checked by the expression parser
+/// (helper names, prototype-pollution keys, nesting depth) and kept as their
+/// verbatim source, which the Node renderer evaluates in V8.
 pub fn parse_block_tag(
     raw: &str,
     line: u32,
     column: u32,
     options: &ParseBlockTagOptions,
-    helper_id_start: u32,
-) -> Result<(ParsedBlockTag, u32), InkerError> {
+) -> Result<ParsedBlockTag, InkerError> {
     let template_path = options.template_path.as_deref();
     let helpers = &options.helpers;
     let chars: Vec<char> = raw.chars().collect();
@@ -1869,7 +1820,7 @@ pub fn parse_block_tag(
                 format!("component '{component_name}', {args}")
             };
             let synth_chars: Vec<char> = synthetic.chars().collect();
-            let (mut node, next_id) = parse_component_tag(
+            let mut node = parse_component_tag(
                 raw,
                 &synth_chars,
                 line,
@@ -1877,18 +1828,14 @@ pub fn parse_block_tag(
                 template_path,
                 "component".len(),
                 helpers,
-                helper_id_start,
             )?;
             // Keep the ORIGINAL source on the node so diagnostics quote what the
             // author wrote (`@button(...)`), not the rewrite.
             node.raw = raw.to_string();
-            return Ok((
-                ParsedBlockTag::ComponentTag {
-                    node,
-                    self_closed: explicit_self_close,
-                },
-                next_id,
-            ));
+            return Ok(ParsedBlockTag::ComponentTag {
+                node,
+                self_closed: explicit_self_close,
+            });
         }
         if let Some(closes_name) = keyword.strip_prefix("end") {
             if options.component_tags.contains_key(closes_name) {
@@ -1905,10 +1852,7 @@ pub fn parse_block_tag(
                         template_path,
                     ));
                 }
-                return Ok((
-                    ParsedBlockTag::CloseComponent { line, column },
-                    helper_id_start,
-                ));
+                return Ok(ParsedBlockTag::CloseComponent { line, column });
             }
         }
         // `@end<name>` closes a custom tag registered with `block: true`. Checked
@@ -1929,14 +1873,11 @@ pub fn parse_block_tag(
                         template_path,
                     ));
                 }
-                return Ok((
-                    ParsedBlockTag::Close {
-                        closes: BlockClosesKind::CustomTag(closes_name.to_string()),
-                        line,
-                        column,
-                    },
-                    helper_id_start,
-                ));
+                return Ok(ParsedBlockTag::Close {
+                    closes: BlockClosesKind::CustomTag(closes_name.to_string()),
+                    line,
+                    column,
+                });
             }
         }
         if options.custom_tags.contains(keyword.as_str()) {
@@ -1944,25 +1885,19 @@ pub fn parse_block_tag(
             let args_source: String = chars[i..].iter().collect::<String>().trim().to_string();
             // A `block: true` tag opens a frame unless `@!name` closed it inline.
             if options.custom_block_tags.contains(keyword.as_str()) && !explicit_self_close {
-                return Ok((
-                    ParsedBlockTag::OpenCustomTag {
-                        name: keyword,
-                        args_source,
-                        line,
-                        column,
-                    },
-                    helper_id_start,
-                ));
-            }
-            return Ok((
-                ParsedBlockTag::CustomTag {
+                return Ok(ParsedBlockTag::OpenCustomTag {
                     name: keyword,
                     args_source,
                     line,
                     column,
-                },
-                helper_id_start,
-            ));
+                });
+            }
+            return Ok(ParsedBlockTag::CustomTag {
+                name: keyword,
+                args_source,
+                line,
+                column,
+            });
         }
         return Err(fail_unknown_directive(
             &keyword,
@@ -1973,25 +1908,21 @@ pub fn parse_block_tag(
     }
 
     if keyword == "include" {
-        let (name, name_source, next_id) = parse_template_name(
+        let (name, name_source) = parse_template_name(
             &chars[after_keyword..],
             "include",
             line,
             column,
             template_path,
             helpers,
-            helper_id_start,
         )?;
-        return Ok((
-            ParsedBlockTag::Partial(PartialNode {
-                name,
-                name_source,
-                raw: raw.to_string(),
-                line,
-                column,
-            }),
-            next_id,
-        ));
+        return Ok(ParsedBlockTag::Partial(PartialNode {
+            name,
+            name_source,
+            raw: raw.to_string(),
+            line,
+            column,
+        }));
     }
 
     if keyword == "layout" {
@@ -2008,69 +1939,36 @@ pub fn parse_block_tag(
             LayoutOrInclude::Layout(n) => ParsedBlockTag::Layout(n),
             LayoutOrInclude::Partial(n) => ParsedBlockTag::Partial(n),
         };
-        return Ok((pb, helper_id_start));
+        return Ok(pb);
     }
 
     if keyword == "if" {
-        let (condition, next_id) = parse_if_tag(
-            &chars,
+        let condition = parse_if_tag(&chars, line, column, template_path, after_keyword, helpers)?;
+        return Ok(ParsedBlockTag::OpenIf {
+            condition,
             line,
             column,
-            template_path,
-            after_keyword,
-            helpers,
-            helper_id_start,
-        )?;
-        return Ok((
-            ParsedBlockTag::OpenIf {
-                condition,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        });
     }
 
     if keyword == "elseif" {
-        let (condition, next_id) = parse_if_tag(
-            &chars,
+        let condition = parse_if_tag(&chars, line, column, template_path, after_keyword, helpers)?;
+        return Ok(ParsedBlockTag::ElseIf {
+            condition,
             line,
             column,
-            template_path,
-            after_keyword,
-            helpers,
-            helper_id_start,
-        )?;
-        return Ok((
-            ParsedBlockTag::ElseIf {
-                condition,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        });
     }
 
     if keyword == "each" {
-        let (iterable, iterable_source, binding, next_id) = parse_each_tag(
-            &chars,
+        let (iterable_source, binding) =
+            parse_each_tag(&chars, line, column, template_path, after_keyword, helpers)?;
+        return Ok(ParsedBlockTag::OpenEach {
+            iterable_source,
+            binding,
             line,
             column,
-            template_path,
-            after_keyword,
-            helpers,
-            helper_id_start,
-        )?;
-        return Ok((
-            ParsedBlockTag::OpenEach {
-                iterable,
-                iterable_source,
-                binding,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        });
     }
 
     if keyword == "unless" {
@@ -2090,23 +1988,12 @@ pub fn parse_block_tag(
             ));
         }
         let negated: Vec<char> = format!("!({args})").chars().collect();
-        let (condition, next_id) = parse_if_tag(
-            &negated,
+        let condition = parse_if_tag(&negated, line, column, template_path, 0, helpers)?;
+        return Ok(ParsedBlockTag::OpenIf {
+            condition,
             line,
             column,
-            template_path,
-            0,
-            helpers,
-            helper_id_start,
-        )?;
-        return Ok((
-            ParsedBlockTag::OpenIf {
-                condition,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        });
     }
 
     if keyword == "endunless" {
@@ -2123,14 +2010,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Close {
-                closes: BlockClosesKind::If,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Close {
+            closes: BlockClosesKind::If,
+            line,
+            column,
+        });
     }
 
     if keyword == "endif" {
@@ -2147,14 +2031,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Close {
-                closes: BlockClosesKind::If,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Close {
+            closes: BlockClosesKind::If,
+            line,
+            column,
+        });
     }
 
     if keyword == "endeach" {
@@ -2171,14 +2052,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Close {
-                closes: BlockClosesKind::Each,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Close {
+            closes: BlockClosesKind::Each,
+            line,
+            column,
+        });
     }
 
     if keyword == "else" {
@@ -2194,23 +2072,13 @@ pub fn parse_block_tag(
                 .map(|c| is_whitespace(*c))
                 .unwrap_or(false)
         {
-            let (condition, next_id) = parse_if_tag(
-                &chars,
+            let condition =
+                parse_if_tag(&chars, line, column, template_path, after_else + 2, helpers)?;
+            return Ok(ParsedBlockTag::ElseIf {
+                condition,
                 line,
                 column,
-                template_path,
-                after_else + 2,
-                helpers,
-                helper_id_start,
-            )?;
-            return Ok((
-                ParsedBlockTag::ElseIf {
-                    condition,
-                    line,
-                    column,
-                },
-                next_id,
-            ));
+            });
         }
         let trailing: String = chars[after_keyword..]
             .iter()
@@ -2227,35 +2095,24 @@ pub fn parse_block_tag(
 				template_path,
 			));
         }
-        return Ok((ParsedBlockTag::Else { line, column }, helper_id_start));
+        return Ok(ParsedBlockTag::Else { line, column });
     }
 
     if keyword == "let" {
-        let (name, expression, source, destructure, names, next_id) = parse_let_tag(
-            &chars,
+        let (name, source, destructure, names) =
+            parse_let_tag(&chars, line, column, template_path, after_keyword, helpers)?;
+        return Ok(ParsedBlockTag::Let {
+            name,
+            source,
+            destructure,
+            names,
             line,
             column,
-            template_path,
-            after_keyword,
-            helpers,
-            helper_id_start,
-        )?;
-        return Ok((
-            ParsedBlockTag::Let {
-                name,
-                expression,
-                source,
-                destructure,
-                names,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        });
     }
 
     if keyword == "includeIf" {
-        let (condition, partial, next_id) = parse_include_if_tag(
+        let (condition, partial) = parse_include_if_tag(
             raw,
             &chars,
             line,
@@ -2263,17 +2120,13 @@ pub fn parse_block_tag(
             template_path,
             after_keyword,
             helpers,
-            helper_id_start,
         )?;
-        return Ok((
-            ParsedBlockTag::IncludeIf {
-                condition,
-                partial,
-                line,
-                column,
-            },
-            next_id,
-        ));
+        return Ok(ParsedBlockTag::IncludeIf {
+            condition,
+            partial,
+            line,
+            column,
+        });
     }
 
     if keyword == "slot" {
@@ -2328,15 +2181,12 @@ pub fn parse_block_tag(
                 }
             }
         }
-        return Ok((
-            ParsedBlockTag::OpenSlot {
-                name,
-                scope,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::OpenSlot {
+            name,
+            scope,
+            line,
+            column,
+        });
     }
 
     if keyword == "endslot" {
@@ -2353,7 +2203,7 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((ParsedBlockTag::CloseSlot { line, column }, helper_id_start));
+        return Ok(ParsedBlockTag::CloseSlot { line, column });
     }
 
     if keyword == "section" {
@@ -2385,10 +2235,7 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::OpenSection { name, line, column },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::OpenSection { name, line, column });
     }
 
     if keyword == "endsection" {
@@ -2405,14 +2252,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Close {
-                closes: BlockClosesKind::Section,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Close {
+            closes: BlockClosesKind::Section,
+            line,
+            column,
+        });
     }
 
     if keyword == "super" {
@@ -2429,7 +2273,7 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((ParsedBlockTag::Super { line, column }, helper_id_start));
+        return Ok(ParsedBlockTag::Super { line, column });
     }
 
     if keyword == "eval" {
@@ -2443,14 +2287,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Eval {
-                source,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Eval {
+            source,
+            line,
+            column,
+        });
     }
 
     // `@dump(expr)` prints; `@dd(expr)` prints and stops the render. Adonis
@@ -2458,15 +2299,12 @@ pub fn parse_block_tag(
     if keyword == "dump" || keyword == "dd" {
         let source =
             read_required_expression(&chars, after_keyword, &keyword, line, column, template_path)?;
-        return Ok((
-            ParsedBlockTag::Dump {
-                source,
-                die: keyword == "dd",
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Dump {
+            source,
+            die: keyword == "dd",
+            line,
+            column,
+        });
     }
 
     if keyword == "assign" {
@@ -2543,28 +2381,22 @@ pub fn parse_block_tag(
         // rejoined by the renderer, which needs them apart to write a bare
         // identifier back into the frame that OWNS it (a member path mutates in
         // place and needs no write-back).
-        return Ok((
-            ParsedBlockTag::Assign {
-                target: format!("{target} {operator}"),
-                source: value,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Assign {
+            target: format!("{target} {operator}"),
+            source: value,
+            line,
+            column,
+        });
     }
 
     if keyword == "inject" {
         let source =
             read_required_expression(&chars, after_keyword, "inject", line, column, template_path)?;
-        return Ok((
-            ParsedBlockTag::Inject {
-                source,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Inject {
+            source,
+            line,
+            column,
+        });
     }
 
     if keyword == "debugger" {
@@ -2581,7 +2413,7 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((ParsedBlockTag::Debugger { line, column }, helper_id_start));
+        return Ok(ParsedBlockTag::Debugger { line, column });
     }
 
     if keyword == "newError" {
@@ -2593,41 +2425,32 @@ pub fn parse_block_tag(
             column,
             template_path,
         )?;
-        return Ok((
-            ParsedBlockTag::NewError {
-                source,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::NewError {
+            source,
+            line,
+            column,
+        });
     }
 
     if keyword == "stack" {
         let source =
             read_required_expression(&chars, after_keyword, "stack", line, column, template_path)?;
-        return Ok((
-            ParsedBlockTag::Stack {
-                source,
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::Stack {
+            source,
+            line,
+            column,
+        });
     }
 
     if keyword == "pushTo" || keyword == "pushOnceTo" {
         let source =
             read_required_expression(&chars, after_keyword, &keyword, line, column, template_path)?;
-        return Ok((
-            ParsedBlockTag::OpenPushTo {
-                source,
-                once: keyword == "pushOnceTo",
-                line,
-                column,
-            },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::OpenPushTo {
+            source,
+            once: keyword == "pushOnceTo",
+            line,
+            column,
+        });
     }
 
     if keyword == "endpushTo" || keyword == "endpushOnceTo" {
@@ -2644,18 +2467,15 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::Close {
-                closes: if keyword == "endpushTo" {
-                    BlockClosesKind::PushTo
-                } else {
-                    BlockClosesKind::PushOnceTo
-                },
-                line,
-                column,
+        return Ok(ParsedBlockTag::Close {
+            closes: if keyword == "endpushTo" {
+                BlockClosesKind::PushTo
+            } else {
+                BlockClosesKind::PushOnceTo
             },
-            helper_id_start,
-        ));
+            line,
+            column,
+        });
     }
 
     if keyword == "endcomponent" {
@@ -2672,14 +2492,11 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        return Ok((
-            ParsedBlockTag::CloseComponent { line, column },
-            helper_id_start,
-        ));
+        return Ok(ParsedBlockTag::CloseComponent { line, column });
     }
 
     if keyword == "component" {
-        let (node, next_id) = parse_component_tag(
+        let node = parse_component_tag(
             raw,
             &chars,
             line,
@@ -2687,9 +2504,8 @@ pub fn parse_block_tag(
             template_path,
             after_keyword,
             helpers,
-            helper_id_start,
         )?;
-        return Ok((ParsedBlockTag::Component(node), next_id));
+        return Ok(ParsedBlockTag::Component(node));
     }
 
     Err(fail_unknown_directive(
@@ -2724,7 +2540,7 @@ mod tests {
             format!("component 'c', {deep}"),
             format!("let {{ a = {deep} }} = o"),
         ] {
-            let e = parse_block_tag(&raw, 1, 1, &opts(), 0).unwrap_err();
+            let e = parse_block_tag(&raw, 1, 1, &opts()).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidExpression, "{}", &raw[..12]);
             assert!(e.message.contains("maximum depth"), "got: {}", e.message);
         }
@@ -2734,9 +2550,9 @@ mod tests {
     fn a_let_pattern_nested_to_the_cap_binds_its_names() {
         let n = MAX_PATTERN_DEPTH;
         let raw = format!("let {}o{} = data", "{x:".repeat(n), "}".repeat(n));
-        assert!(parse_block_tag(&raw, 1, 1, &opts(), 0).is_ok());
+        assert!(parse_block_tag(&raw, 1, 1, &opts()).is_ok());
         let arrays = format!("let {}o{} = data", "[".repeat(n), "]".repeat(n));
-        assert!(parse_block_tag(&arrays, 1, 1, &opts(), 0).is_ok());
+        assert!(parse_block_tag(&arrays, 1, 1, &opts()).is_ok());
     }
 
     #[test]
@@ -2748,7 +2564,7 @@ mod tests {
                 format!("let {}o{} = data", "[".repeat(n), "]".repeat(n)),
                 format!("let {}o{} = data", "[...".repeat(n), "]".repeat(n)),
             ] {
-                let e = parse_block_tag(&raw, 1, 1, &opts(), 0).unwrap_err();
+                let e = parse_block_tag(&raw, 1, 1, &opts()).unwrap_err();
                 assert_eq!(e.code, ErrorCode::InvalidExpression);
                 assert!(e.message.contains("maximum depth"), "got: {}", e.message);
             }
@@ -2757,7 +2573,7 @@ mod tests {
 
     #[test]
     fn layout_directive() {
-        let (pb, _) = parse_block_tag("layout 'main'", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("layout 'main'", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Layout(n) => assert_eq!(n.name, "main"),
             _ => panic!("expected Layout"),
@@ -2766,7 +2582,7 @@ mod tests {
 
     #[test]
     fn include_directive() {
-        let (pb, _) = parse_block_tag("include 'partials/header'", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("include 'partials/header'", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Partial(n) => assert_eq!(n.name, "partials/header"),
             _ => panic!("expected Partial"),
@@ -2775,7 +2591,7 @@ mod tests {
 
     #[test]
     fn if_open() {
-        let (pb, _) = parse_block_tag("if active", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("if active", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::OpenIf { condition, .. } => {
                 assert_eq!(condition.source, "active");
@@ -2786,7 +2602,7 @@ mod tests {
 
     #[test]
     fn endif() {
-        let (pb, _) = parse_block_tag("endif", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("endif", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Close {
                 closes: BlockClosesKind::If,
@@ -2798,7 +2614,7 @@ mod tests {
 
     #[test]
     fn each_single_binding() {
-        let (pb, _) = parse_block_tag("each item in items", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("each item in items", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::OpenEach {
                 binding,
@@ -2814,7 +2630,7 @@ mod tests {
 
     #[test]
     fn each_destructured_binding() {
-        let (pb, _) = parse_block_tag("each [k, v] in map", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("each [k, v] in map", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::OpenEach { binding, .. } => {
                 assert_eq!(binding, EachBinding::Destructured(["k".into(), "v".into()]));
@@ -2825,7 +2641,7 @@ mod tests {
 
     #[test]
     fn endeach() {
-        let (pb, _) = parse_block_tag("endeach", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("endeach", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Close {
                 closes: BlockClosesKind::Each,
@@ -2837,28 +2653,28 @@ mod tests {
 
     #[test]
     fn else_tag() {
-        let (pb, _) = parse_block_tag("else", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("else", 1, 1, &opts()).unwrap();
         assert!(matches!(pb, ParsedBlockTag::Else { .. }));
     }
 
     #[test]
     fn unknown_directive_rejected() {
-        let e = parse_block_tag("for x in y", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("for x in y", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::UnknownDirective);
     }
 
     #[test]
     fn rejected_directive_lists_hint() {
         // `block` is still reserved/unsupported; `section` is now supported (62-3).
-        let e = parse_block_tag("block", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("block", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::UnknownDirective);
     }
 
     #[test]
     fn section_and_super_parse() {
-        let (pb, _) = parse_block_tag("section 'scripts'", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("section 'scripts'", 1, 1, &opts()).unwrap();
         assert!(matches!(pb, ParsedBlockTag::OpenSection { .. }));
-        let (close, _) = parse_block_tag("endsection", 1, 1, &opts(), 0).unwrap();
+        let close = parse_block_tag("endsection", 1, 1, &opts()).unwrap();
         assert!(matches!(
             close,
             ParsedBlockTag::Close {
@@ -2866,37 +2682,37 @@ mod tests {
                 ..
             }
         ));
-        let (sup, _) = parse_block_tag("super", 1, 1, &opts(), 0).unwrap();
+        let sup = parse_block_tag("super", 1, 1, &opts()).unwrap();
         assert!(matches!(sup, ParsedBlockTag::Super { .. }));
     }
 
     #[test]
     fn each_single_binding_proto_pollution_rejected() {
-        let e = parse_block_tag("each __proto__ in items", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("each __proto__ in items", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn each_destructured_binding_proto_pollution_rejected() {
-        let e = parse_block_tag("each [__proto__, v] in items", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("each [__proto__, v] in items", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn path_traversal_rejected() {
-        let e = parse_block_tag("layout '../etc/passwd'", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("layout '../etc/passwd'", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
     #[test]
     fn absolute_path_rejected() {
-        let e = parse_block_tag("layout '/etc/passwd'", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("layout '/etc/passwd'", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
     #[test]
     fn windows_drive_letter_rejected() {
-        let e = parse_block_tag("layout 'C:foo'", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("layout 'C:foo'", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
@@ -2904,12 +2720,11 @@ mod tests {
     fn component_with_object_args() {
         let mut o = opts();
         // active is not a helper — it's a path.
-        let (pb, _) = parse_block_tag(
+        let pb = parse_block_tag(
             "component 'button' { label: title, disabled: active }",
             1,
             1,
             &o,
-            0,
         )
         .unwrap();
         o.helpers.clear();
@@ -2927,12 +2742,11 @@ mod tests {
 
     #[test]
     fn component_props_and_name_are_any_expression() {
-        let (pb, _) = parse_block_tag(
+        let pb = parse_block_tag(
             "component comp, { ...attrs, 'aria-label': x }",
             1,
             1,
             &opts(),
-            0,
         )
         .unwrap();
         match pb {
@@ -2946,9 +2760,9 @@ mod tests {
             }
             _ => panic!("expected Component"),
         }
-        let e = parse_block_tag("component 'x', { __proto__: 1 }", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("component 'x', { __proto__: 1 }", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
-        let e = parse_block_tag("component '../x'", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("component '../x'", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
@@ -2978,7 +2792,7 @@ mod tests {
                 "p",
             ),
         ] {
-            let (pb, _) = parse_block_tag(source, 1, 1, &opts(), 0)
+            let pb = parse_block_tag(source, 1, 1, &opts())
                 .unwrap_or_else(|e| panic!("{source}: {}", e.message));
             match pb {
                 ParsedBlockTag::Component(c) => {
@@ -2988,7 +2802,7 @@ mod tests {
                 _ => panic!("expected Component for {source}"),
             }
         }
-        let e = parse_block_tag("component `a,${b}`, p, q", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("component `a,${b}`, p, q", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
@@ -3012,7 +2826,7 @@ mod tests {
 
     #[test]
     fn include_takes_a_dynamic_name() {
-        let (pb, _) = parse_block_tag("include which", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("include which", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Partial(p) => assert_eq!(p.name_source.as_deref(), Some("which")),
             _ => panic!("expected Partial"),
@@ -3021,39 +2835,35 @@ mod tests {
 
     #[test]
     fn slot_takes_a_scope_binding() {
-        let (pb, _) = parse_block_tag("slot 'row', item", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("slot 'row', item", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::OpenSlot { scope, .. } => assert_eq!(scope.as_deref(), Some("item")),
             _ => panic!("expected OpenSlot"),
         }
-        assert!(parse_block_tag("slot 'row', __proto__", 1, 1, &opts(), 0).is_err());
-        assert!(parse_block_tag("slot 'row', a b", 1, 1, &opts(), 0).is_err());
+        assert!(parse_block_tag("slot 'row', __proto__", 1, 1, &opts()).is_err());
+        assert!(parse_block_tag("slot 'row', a b", 1, 1, &opts()).is_err());
     }
 
     #[test]
     fn each_with_helper_call_in_iterable() {
         let mut o = opts();
         o.helpers.insert("sorted".into());
-        let (pb, next_id) = parse_block_tag("each item in sorted(items)", 1, 1, &o, 5).unwrap();
+        let pb = parse_block_tag("each item in sorted(items)", 1, 1, &o).unwrap();
         match pb {
             ParsedBlockTag::OpenEach { .. } => {}
             _ => panic!("expected OpenEach"),
         }
-        assert_eq!(
-            next_id, 6,
-            "helper id assigned starting from 5, advanced to 6"
-        );
     }
 
     #[test]
     fn destructured_binding_duplicate_rejected() {
-        let e = parse_block_tag("each [k, k] in map", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("each [k, k] in map", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn let_simple_binding_is_not_destructure() {
-        let (pb, _) = parse_block_tag("let n = i + 1", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("let n = i + 1", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Let {
                 name,
@@ -3074,7 +2884,7 @@ mod tests {
 
     #[test]
     fn let_object_destructure() {
-        let (pb, _) = parse_block_tag("let { name, email } = user", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("let { name, email } = user", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Let {
                 name,
@@ -3092,8 +2902,7 @@ mod tests {
 
     #[test]
     fn let_array_destructure_with_rest() {
-        let (pb, _) =
-            parse_block_tag("let [first, second, ...rest] = items", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("let [first, second, ...rest] = items", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Let {
                 name,
@@ -3113,7 +2922,7 @@ mod tests {
     fn let_destructure_nested_default_keeps_inner_equals() {
         // The top-level `=` splits pattern/rhs; an inner default `= 1` stays inside
         // the balanced pattern (a bracket-depth question, not a JS-semantics one).
-        let (pb, _) = parse_block_tag("let { a = 1, b } = obj", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("let { a = 1, b } = obj", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Let {
                 name,
@@ -3131,18 +2940,18 @@ mod tests {
 
     #[test]
     fn let_destructure_missing_equals_rejected() {
-        let e = parse_block_tag("let { a, b } obj", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("let { a, b } obj", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
     #[test]
     fn let_destructure_empty_rhs_rejected() {
-        let e = parse_block_tag("let { a, b } =", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("let { a, b } =", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     fn let_names(src: &str) -> Vec<String> {
-        match parse_block_tag(src, 1, 1, &opts(), 0).unwrap().0 {
+        match parse_block_tag(src, 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Let { names, .. } => names,
             _ => panic!("expected Let"),
         }
@@ -3172,8 +2981,7 @@ mod tests {
         // skips the regex literal (review 62-2: closes the lexer blind spot).
         assert_eq!(let_names("let { a = /x,y/, b } = obj"), ["a", "b"]);
         // bracket inside a regex default must not fool the pattern balancer.
-        let (pb, _) =
-            parse_block_tag("let { a = /}/.test(s), b } = obj", 1, 1, &opts(), 0).unwrap();
+        let pb = parse_block_tag("let { a = /}/.test(s), b } = obj", 1, 1, &opts()).unwrap();
         match pb {
             ParsedBlockTag::Let { name, names, .. } => {
                 assert_eq!(name, "{ a = /}/.test(s), b }");
@@ -3192,20 +3000,20 @@ mod tests {
 
     #[test]
     fn let_destructure_rejects_proto_binding() {
-        let e = parse_block_tag("let { __proto__ } = payload", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("let { __proto__ } = payload", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn let_destructure_rejects_reserved_binding() {
         // `this` is a reserved binding name (parity with the simple `@let` path).
-        let e = parse_block_tag("let { this } = o", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("let { this } = o", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn let_destructure_empty_pattern_binds_nothing_rejected() {
-        let e = parse_block_tag("let {} = obj", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("let {} = obj", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
@@ -3213,7 +3021,7 @@ mod tests {
     // barrel (the earlier pass worked from memory and missed four of these) ----
 
     fn assign_parts(raw: &str) -> (String, String) {
-        match parse_block_tag(raw, 1, 1, &opts(), 0).unwrap().0 {
+        match parse_block_tag(raw, 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Assign { target, source, .. } => (target, source),
             other => panic!("expected Assign, got {other:?}"),
         }
@@ -3258,32 +3066,32 @@ mod tests {
 
     #[test]
     fn assign_rejects_a_non_assignment() {
-        let e = parse_block_tag("assign a === b", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("assign a === b", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn assign_rejects_a_non_identifier_target() {
-        let e = parse_block_tag("assign 'a' = 1", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("assign 'a' = 1", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn assign_rejects_an_empty_value() {
-        let e = parse_block_tag("assign x =", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("assign x =", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidExpression);
     }
 
     #[test]
     fn dump_and_dd_differ_only_by_die() {
-        match parse_block_tag("dump user", 1, 1, &opts(), 0).unwrap().0 {
+        match parse_block_tag("dump user", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Dump { die, source, .. } => {
                 assert!(!die);
                 assert_eq!(source, "user");
             }
             other => panic!("expected Dump, got {other:?}"),
         }
-        match parse_block_tag("dd user", 1, 1, &opts(), 0).unwrap().0 {
+        match parse_block_tag("dd user", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Dump { die, .. } => assert!(die),
             other => panic!("expected Dump, got {other:?}"),
         }
@@ -3292,35 +3100,26 @@ mod tests {
     #[test]
     fn debugger_takes_no_arguments() {
         assert!(matches!(
-            parse_block_tag("debugger", 1, 1, &opts(), 0).unwrap().0,
+            parse_block_tag("debugger", 1, 1, &opts()).unwrap(),
             ParsedBlockTag::Debugger { .. }
         ));
-        let e = parse_block_tag("debugger x", 1, 1, &opts(), 0).unwrap_err();
+        let e = parse_block_tag("debugger x", 1, 1, &opts()).unwrap_err();
         assert_eq!(e.code, ErrorCode::ParseError);
     }
 
     #[test]
     fn inject_new_error_and_stack_capture_their_expression() {
-        match parse_block_tag("inject { a: 1 }", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("inject { a: 1 }", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Inject { source, .. } => assert_eq!(source, "{ a: 1 }"),
             other => panic!("expected Inject, got {other:?}"),
         }
-        match parse_block_tag("newError 'boom', f, 1, 2", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("newError 'boom', f, 1, 2", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::NewError { source, .. } => {
                 assert_eq!(source, "'boom', f, 1, 2");
             }
             other => panic!("expected NewError, got {other:?}"),
         }
-        match parse_block_tag("stack 'scripts'", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("stack 'scripts'", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Stack { source, .. } => assert_eq!(source, "'scripts'"),
             other => panic!("expected Stack, got {other:?}"),
         }
@@ -3328,20 +3127,14 @@ mod tests {
 
     #[test]
     fn push_tags_carry_the_once_flag() {
-        match parse_block_tag("pushTo 'scripts'", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("pushTo 'scripts'", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::OpenPushTo { once, source, .. } => {
                 assert!(!once);
                 assert_eq!(source, "'scripts'");
             }
             other => panic!("expected OpenPushTo, got {other:?}"),
         }
-        match parse_block_tag("pushOnceTo 'scripts'", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("pushOnceTo 'scripts'", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::OpenPushTo { once, .. } => assert!(once),
             other => panic!("expected OpenPushTo, got {other:?}"),
         }
@@ -3349,16 +3142,13 @@ mod tests {
 
     #[test]
     fn push_close_tags_are_not_interchangeable() {
-        match parse_block_tag("endpushTo", 1, 1, &opts(), 0).unwrap().0 {
+        match parse_block_tag("endpushTo", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Close { closes, .. } => {
                 assert_eq!(closes, BlockClosesKind::PushTo);
             }
             other => panic!("expected Close, got {other:?}"),
         }
-        match parse_block_tag("endpushOnceTo", 1, 1, &opts(), 0)
-            .unwrap()
-            .0
-        {
+        match parse_block_tag("endpushOnceTo", 1, 1, &opts()).unwrap() {
             ParsedBlockTag::Close { closes, .. } => {
                 assert_eq!(closes, BlockClosesKind::PushOnceTo);
             }
@@ -3369,7 +3159,7 @@ mod tests {
     #[test]
     fn the_new_tags_all_require_an_expression() {
         for kw in ["inject", "newError", "stack", "pushTo", "pushOnceTo", "dd"] {
-            let e = parse_block_tag(kw, 1, 1, &opts(), 0).unwrap_err();
+            let e = parse_block_tag(kw, 1, 1, &opts()).unwrap_err();
             assert_eq!(
                 e.code,
                 ErrorCode::InvalidExpression,

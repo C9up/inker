@@ -3,8 +3,7 @@
 //! Consumes the `Vec<Token>` from `lex::lex`, dispatches block tags through
 //! `parse_block_tag::parse_block_tag`, balances `@if()` / `@each()` /
 //! `@else` / `@endif` / `@endeach` via a frame stack, and
-//! assembles the final `InkerAst`. Also collects every helper call-site for
-//! the ADR-007 TS-side pre-resolve walk (AC6).
+//! assembles the final `InkerAst`.
 
 use crate::ast::{
     ComponentNode, EachBinding, IfCondition, InkerNode, LayoutNode, NamedSlot, SlotNode,
@@ -14,31 +13,13 @@ use crate::lex::Token;
 use crate::parse_block_tag::{
     parse_block_tag, BlockClosesKind, ParseBlockTagOptions, ParsedBlockTag,
 };
-use crate::parse_expression::{
-    parse_expression_with_helper_count, Expression, ParseExpressionOptions,
-};
+use crate::parse_expression::{parse_expression, ParseExpressionOptions};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InkerAst {
     pub nodes: Vec<InkerNode>,
     pub layout: Option<LayoutNode>,
-    pub helper_call_sites: Vec<HelperCallSite>,
-    pub helper_count: u32,
-}
-
-/// One Call expression in the AST. The TS-side `Templates#render` walks this
-/// list, evaluates `args` against the runtime data tree, invokes
-/// `helpers.get(name)(...evaluatedArgs)`, packs the result by `id`, and ships
-/// the packed map to `render_ast`. The Rust renderer then does O(1) lookup by
-/// id — no V8 callback, no ThreadsafeFunction.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HelperCallSite {
-    pub id: u32,
-    pub name: String,
-    pub args: Vec<Expression>,
-    pub line: u32,
-    pub column: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -96,7 +77,6 @@ enum BlockFrame {
     Each {
         line: u32,
         column: u32,
-        iterable: Expression,
         iterable_source: String,
         binding: EachBinding,
         body_nodes: Vec<InkerNode>,
@@ -366,123 +346,6 @@ fn make_err(
     e
 }
 
-fn collect_helpers_in_expr(expr: &Expression, out: &mut Vec<HelperCallSite>) {
-    match expr {
-        Expression::Call {
-            name,
-            args,
-            id,
-            line,
-            column,
-            ..
-        } => {
-            // Children first (matches the inner-first id assignment so the
-            // collected order is by id ascending).
-            for a in args {
-                collect_helpers_in_expr(a, out);
-            }
-            out.push(HelperCallSite {
-                id: *id,
-                name: name.clone(),
-                args: args.clone(),
-                line: *line,
-                column: *column,
-            });
-        }
-        Expression::Object { entries, .. } => {
-            for e in entries {
-                collect_helpers_in_expr(&e.value, out);
-            }
-        }
-        Expression::Unary { operand, .. } => collect_helpers_in_expr(operand, out),
-        Expression::Binary { left, right, .. } => {
-            collect_helpers_in_expr(left, out);
-            collect_helpers_in_expr(right, out);
-        }
-        Expression::Group { expression, .. } => collect_helpers_in_expr(expression, out),
-        // `Raw` is helper-free by construction (see `parse_expression::raw_fallback`).
-        Expression::Literal { .. } | Expression::Path { .. } | Expression::Raw { .. } => {}
-    }
-}
-
-fn collect_helpers_in_node(node: &InkerNode, out: &mut Vec<HelperCallSite>) {
-    match node {
-        InkerNode::Interpolation { expression, .. } => {
-            collect_helpers_in_expr(expression, out);
-        }
-        InkerNode::If {
-            condition,
-            then_nodes,
-            else_nodes,
-            ..
-        } => {
-            collect_helpers_in_expr(&condition.expression, out);
-            for n in then_nodes {
-                collect_helpers_in_node(n, out);
-            }
-            if let Some(en) = else_nodes {
-                for n in en {
-                    collect_helpers_in_node(n, out);
-                }
-            }
-        }
-        InkerNode::Each {
-            iterable,
-            body_nodes,
-            else_nodes,
-            ..
-        } => {
-            collect_helpers_in_expr(iterable, out);
-            for n in body_nodes {
-                collect_helpers_in_node(n, out);
-            }
-            if let Some(en) = else_nodes {
-                for n in en {
-                    collect_helpers_in_node(n, out);
-                }
-            }
-        }
-        InkerNode::Component(c) => {
-            for n in &c.body_nodes {
-                collect_helpers_in_node(n, out);
-            }
-            for slot in &c.named_slots {
-                for n in &slot.nodes {
-                    collect_helpers_in_node(n, out);
-                }
-            }
-        }
-        InkerNode::Let { expression, .. } => {
-            collect_helpers_in_expr(expression, out);
-        }
-        InkerNode::Section { body_nodes, .. } | InkerNode::PushTo { body_nodes, .. } => {
-            for n in body_nodes {
-                collect_helpers_in_node(n, out);
-            }
-        }
-        // The remaining nodes carry a verbatim `source` the Node renderer
-        // evaluates in V8 (helpers already in lexical scope), so they have no
-        // parsed `Expression` to walk for call sites.
-        InkerNode::Text { .. }
-        | InkerNode::Layout(_)
-        | InkerNode::Partial(_)
-        | InkerNode::Slot(_)
-        | InkerNode::Super { .. }
-        | InkerNode::Eval { .. }
-        | InkerNode::Dump { .. }
-        | InkerNode::Assign { .. }
-        | InkerNode::Inject { .. }
-        | InkerNode::Debugger { .. }
-        | InkerNode::NewError { .. }
-        | InkerNode::Stack { .. } => {}
-        InkerNode::CustomTag { body_nodes, .. } => {
-            for n in body_nodes {
-                collect_helpers_in_node(n, out);
-            }
-        }
-    }
-}
-
 pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, InkerError> {
     let template_path = options.template_path.as_deref();
     let mut root_nodes: Vec<InkerNode> = Vec::new();
@@ -490,7 +353,6 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
     let mut seen_layout: Option<(u32, u32)> = None;
     let mut layout: Option<LayoutNode> = None;
     let mut seen_non_whitespace_content = false;
-    let mut helper_id_counter: u32 = 0;
 
     for (token_index, token) in tokens.iter().enumerate() {
         if let Some(err) = depth_error(&open_blocks, template_path) {
@@ -525,16 +387,8 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     template_path: template_path.map(|s| s.to_string()),
                     helpers: options.helpers.clone(),
                 };
-                let (expr, next_id) = parse_expression_with_helper_count(
-                    expression,
-                    *expr_line,
-                    *expr_column,
-                    &opts,
-                    helper_id_counter,
-                )?;
-                helper_id_counter = next_id;
+                parse_expression(expression, *expr_line, *expr_column, &opts)?;
                 let node = InkerNode::Interpolation {
-                    expression: expr,
                     escape: is_escaped,
                     source: expression.clone(),
                     line: *line,
@@ -606,9 +460,7 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     custom_block_tags: options.custom_block_tags.clone(),
                     component_tags: options.component_tags.clone(),
                 };
-                let (parsed, next_id) =
-                    parse_block_tag(raw, *line, *column, &bt_opts, helper_id_counter)?;
-                helper_id_counter = next_id;
+                let parsed = parse_block_tag(raw, *line, *column, &bt_opts)?;
 
                 match parsed {
                     ParsedBlockTag::Layout(layout_node) => {
@@ -876,7 +728,6 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                     }
                     ParsedBlockTag::Let {
                         name,
-                        expression,
                         source,
                         destructure,
                         names,
@@ -886,7 +737,6 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                         push_node(
                             InkerNode::Let {
                                 name,
-                                expression,
                                 source,
                                 destructure,
                                 names,
@@ -996,7 +846,6 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                         }
                     }
                     ParsedBlockTag::OpenEach {
-                        iterable,
                         iterable_source,
                         binding,
                         line: pl,
@@ -1005,7 +854,6 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                         open_blocks.push(BlockFrame::Each {
                             line: pl,
                             column: pc,
-                            iterable,
                             iterable_source,
                             binding,
                             body_nodes: Vec::new(),
@@ -1412,14 +1260,12 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
                             BlockFrame::Each {
                                 line,
                                 column,
-                                iterable,
                                 iterable_source,
                                 binding,
                                 body_nodes,
                                 else_nodes,
                                 ..
                             } => InkerNode::Each {
-                                iterable,
                                 iterable_source,
                                 binding,
                                 body_nodes,
@@ -1490,19 +1336,9 @@ pub fn parse(tokens: &[Token], options: &ParseOptions) -> Result<InkerAst, Inker
         ));
     }
 
-    // Collect helper call-sites — walk the assembled tree.
-    let mut helper_call_sites: Vec<HelperCallSite> = Vec::new();
-    for node in &root_nodes {
-        collect_helpers_in_node(node, &mut helper_call_sites);
-    }
-    // Stable sort by id keeps the TS-side pre-resolve walking inner-first.
-    helper_call_sites.sort_by_key(|s| s.id);
-
     Ok(InkerAst {
         nodes: root_nodes,
         layout,
-        helper_call_sites,
-        helper_count: helper_id_counter,
     })
 }
 
@@ -1546,7 +1382,6 @@ mod tests {
         assert_eq!(ast.nodes.len(), 1);
         assert!(matches!(ast.nodes[0], InkerNode::Text { .. }));
         assert!(ast.layout.is_none());
-        assert_eq!(ast.helper_count, 0);
     }
 
     #[test]
@@ -1654,48 +1489,6 @@ mod tests {
     fn duplicate_layout_errors() {
         let e = parse_str("@layout('main')@layout('other')").unwrap_err();
         assert_eq!(e.code, ErrorCode::DuplicateLayout);
-    }
-
-    #[test]
-    fn helper_call_site_collected() {
-        let tokens = lex("{{ upper(name) }}", &LexOptions::default()).unwrap();
-        let opts = ParseOptions {
-            template_path: None,
-            helpers: {
-                let mut s = HashSet::new();
-                s.insert("upper".to_string());
-                s
-            },
-            custom_tags: HashSet::new(),
-            custom_block_tags: HashSet::new(),
-            component_tags: HashMap::new(),
-        };
-        let ast = parse(&tokens, &opts).unwrap();
-        assert_eq!(ast.helper_call_sites.len(), 1);
-        assert_eq!(ast.helper_call_sites[0].name, "upper");
-        assert_eq!(ast.helper_call_sites[0].id, 0);
-        assert_eq!(ast.helper_count, 1);
-    }
-
-    #[test]
-    fn nested_helpers_inner_first_id_order() {
-        let tokens = lex("{{ a(b()) }}", &LexOptions::default()).unwrap();
-        let mut helpers = HashSet::new();
-        helpers.insert("a".to_string());
-        helpers.insert("b".to_string());
-        let opts = ParseOptions {
-            template_path: None,
-            helpers,
-            custom_tags: HashSet::new(),
-            custom_block_tags: HashSet::new(),
-            component_tags: HashMap::new(),
-        };
-        let ast = parse(&tokens, &opts).unwrap();
-        assert_eq!(ast.helper_call_sites.len(), 2);
-        assert_eq!(ast.helper_call_sites[0].id, 0); // b() first (inner)
-        assert_eq!(ast.helper_call_sites[0].name, "b");
-        assert_eq!(ast.helper_call_sites[1].id, 1); // a() second (outer)
-        assert_eq!(ast.helper_call_sites[1].name, "a");
     }
 
     #[test]

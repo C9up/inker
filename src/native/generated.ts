@@ -90,23 +90,6 @@ export declare function parseTemplate(
 ): InkerAst;
 
 /**
- * Parse a template and return its AST as a walkable JSON string (nodes +
- * layout). This is the artifact the Node-side renderer consumes: Rust does the
- * CPU-bound lex/parse, Node evaluates expressions in V8 and renders (Edge
- * model — 62-2 pivot away from the embedded QuickJS VM). Each node carries the
- * verbatim `source` of its expressions, which the Node renderer evaluates.
- */
-
-export declare function parseTemplateJson(
-	source: string,
-	helpersSet: Array<string>,
-	customTagsSet: Array<string>,
-	customBlockTagsSet: Array<string>,
-	componentTagsJson: string,
-	noNewlineTagsSet: Array<string>,
-): string;
-
-/**
  * Serialize an already-parsed AST handle to a walkable JSON string (nodes +
  * layout) for the Node-side renderer (62-2 pivot). Reuses the cached parse —
  * no re-parse — so `Templates` keeps its disk/cache/compose machinery intact.

@@ -10,10 +10,8 @@
 use crate::error::{ErrorCode, InkerError};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
     Key(String),
     Index(u64),

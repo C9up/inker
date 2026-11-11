@@ -8,10 +8,23 @@ import {
 } from "../../src/renderNode.js";
 import { SafeString } from "../../src/SafeString.js";
 
-// The Node renderer consumes the JSON AST from the Rust `parseTemplateJson`
-// export, loaded through the platform-aware loader (never a hardcoded
+// The Node renderer consumes the JSON AST the Rust `astToJson` export
+// serialises, loaded through the platform-aware loader (never a hardcoded
 // `index.<suffix>.node` path — that broke every non-linux-x64 CI leg).
 const native = getNative();
+
+function parseNodes(
+	source: string,
+	helpers: readonly string[],
+	tags: readonly string[],
+): InkerNodeJson[] {
+	const ast: { nodes: InkerNodeJson[] } = JSON.parse(
+		native.astToJson(
+			native.parseTemplate(source, [...helpers], [...tags], [], "", []),
+		),
+	);
+	return ast.nodes;
+}
 
 function render(
 	source: string,
@@ -19,20 +32,27 @@ function render(
 	helpers: HelperMap = new Map(),
 	tags: TagMap = new Map(),
 ): string {
-	const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-		native.parseTemplateJson(
-			source,
-			[...helpers.keys()],
-			[...tags.keys()],
-			[],
-			"",
-			[],
-		),
-	);
-	return renderNodeTree(ast.nodes, data, helpers, { tags });
+	const nodes = parseNodes(source, [...helpers.keys()], [...tags.keys()]);
+	return renderNodeTree(nodes, data, helpers, { tags });
 }
 
 describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
+	it("serialises each expression as its source alone, without a parsed tree", () => {
+		const json = native.astToJson(
+			native.parseTemplate(
+				"{{ upper(user.name) }}@if(a && b)x@endif@each(i in xs)y@endeach@let(z = { k: 1 })",
+				["upper"],
+				[],
+				[],
+				"",
+				[],
+			),
+		);
+		expect(json).not.toMatch(/"(expression|iterable|kind|args|path)"/);
+		expect(json).toContain('"source":"upper(user.name)"');
+		expect(json).toContain('"iterable_source":"xs"');
+	});
+
 	it("text + escaped interpolation", () => {
 		expect(render("Hi {{ name }}", { name: "<b>&'" })).toBe(
 			"Hi &lt;b&gt;&amp;&#39;",
@@ -132,17 +152,8 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 				},
 			],
 		]);
-		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-			native.parseTemplateJson(
-				"@eval(rec('a'))kept@eval(rec('b'))",
-				["rec"],
-				[],
-				[],
-				"",
-				[],
-			),
-		);
-		expect(renderNodeTree(ast.nodes, {}, helpers)).toBe("kept");
+		const nodes = parseNodes("@eval(rec('a'))kept@eval(rec('b'))", ["rec"], []);
+		expect(renderNodeTree(nodes, {}, helpers)).toBe("kept");
 		expect(calls).toEqual(["a", "b"]);
 	});
 
@@ -214,11 +225,9 @@ describe("Node renderer (62-2 pivot — eval in V8, no QuickJS)", () => {
 
 	it("an unregistered @tag at render time → typed error", () => {
 		// Parsed as a custom tag (name passed to the parser) but no tag wired.
-		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-			native.parseTemplateJson("@svg('x')", [], ["svg"], [], "", []),
-		);
+		const nodes = parseNodes("@svg('x')", [], ["svg"]);
 		expect(() =>
-			renderNodeTree(ast.nodes, {}, new Map(), { tags: new Map() }),
+			renderNodeTree(nodes, {}, new Map(), { tags: new Map() }),
 		).toThrowError(/E_INKER_UNKNOWN_TAG|no tag registered/);
 	});
 

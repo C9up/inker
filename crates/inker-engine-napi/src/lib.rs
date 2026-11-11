@@ -1,15 +1,11 @@
 // PATTERN: copy-and-rename for 55.2/55.3/55.4 — Rust hot-path packages.
 //
 // NAPI boundary for `inker-engine`. Exposes:
-//   - `parseTemplate(source, helpers)` → opaque `InkerAst` handle (Arc-backed).
+//   - `parseTemplate(source, helpers, …)` → opaque `InkerAst` handle (Arc-backed).
 //   - `InkerAst#composeInfo` getter — partials / components / layout metadata
 //     consumed by the TS-side compose walk.
-//   - `collectInvocations(ast, data, ctx)` — returns an ordered tape of
-//     `{ id, name, args }` with each arg already resolved against runtime data.
-//     The TS-side invokes each entry's helper (sync), packs `{ value, is_safe }`
-//     per ADR-007, and passes the resolved map to `renderAst`.
-//   - `renderAst(ast, data, helpers, ctx)` — synchronous render with the
-//     pre-resolved helpers map.
+//   - `astToJson(ast)` — the node tree the Node renderer walks, each expression
+//     as its verbatim source (the renderer evaluates it in V8).
 //   - `openedPath(fd)` — the path of the file behind an open descriptor on
 //     macOS / Windows, so template containment is judged on what was opened.
 //   - InkerError → napi::Error: message is `JSON.stringify(InkerNapiErrorPayload)`
@@ -421,70 +417,6 @@ pub fn parse_template(
         let ast = engine_parse(&toks, &opts)?;
         Ok(InkerAst {
             inner: Arc::new(ast),
-        })
-    })
-}
-
-/// Parse a template and return its AST as a walkable JSON string (nodes +
-/// layout). This is the artifact the Node-side renderer consumes: Rust does the
-/// CPU-bound lex/parse, Node evaluates expressions in V8 and renders (Edge
-/// model — 62-2 pivot away from the embedded QuickJS VM). Each node carries the
-/// verbatim `source` of its expressions, which the Node renderer evaluates.
-#[napi]
-pub fn parse_template_json(
-    source: String,
-    helpers_set: Vec<String>,
-    custom_tags_set: Vec<String>,
-    custom_block_tags_set: Vec<String>,
-    component_tags_json: String,
-    no_newline_tags_set: Vec<String>,
-) -> Result<String> {
-    wrap(move || {
-        let component_tags: std::collections::HashMap<String, String> =
-            if component_tags_json.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                serde_json::from_str(&component_tags_json).map_err(|e| {
-                    inker_engine::error::InkerError::new(
-                        inker_engine::error::ErrorCode::ParseError,
-                        format!("invalid component_tags JSON: {e}"),
-                    )
-                })?
-            };
-        let mut custom_tags: HashSet<String> = custom_tags_set.into_iter().collect();
-        let mut custom_block_tags: HashSet<String> = custom_block_tags_set.into_iter().collect();
-        // A component tag lexes exactly like a registered block tag — `@button`,
-        // `@endbutton`, `@!button`. Only the PARSER distinguishes them, turning
-        // them into component invocations instead of custom-tag nodes.
-        for name in component_tags.keys() {
-            custom_tags.insert(name.clone());
-            custom_block_tags.insert(name.clone());
-        }
-        let lex_opts = inker_engine::lex::LexOptions {
-            template_path: None,
-            custom_tags: custom_tags.clone(),
-            custom_block_tags: custom_block_tags.clone(),
-            no_newline_tags: no_newline_tags_set.into_iter().collect(),
-        };
-        let toks = inker_engine::lex::lex(&source, &lex_opts)?;
-        let mut helpers: HashSet<String> = HashSet::new();
-        for h in helpers_set {
-            helpers.insert(h);
-        }
-        let opts = ParseOptions {
-            template_path: None,
-            helpers,
-            custom_tags,
-            custom_block_tags,
-            component_tags,
-        };
-        let ast = engine_parse(&toks, &opts)?;
-        let json = serde_json::json!({ "nodes": ast.nodes, "layout": ast.layout });
-        serde_json::to_string(&json).map_err(|e| {
-            inker_engine::error::InkerError::new(
-                inker_engine::error::ErrorCode::ParseError,
-                format!("AST serialization failed: {e}"),
-            )
         })
     })
 }

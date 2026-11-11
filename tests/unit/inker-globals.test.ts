@@ -8,12 +8,18 @@ import { type InkerNodeJson, renderNodeTree } from "../../src/renderNode.js";
 // `index.<suffix>.node` per OS/arch) — never a hardcoded platform path.
 const native = getNative();
 
-function render(source: string, data: Record<string, unknown> = {}): string {
+function parseNodes(source: string): InkerNodeJson[] {
 	// Declare the global names so bare `{{ camelCase(x) }}` calls parse.
 	const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-		native.parseTemplateJson(source, [...INKER_GLOBAL_NAMES], [], [], "", []),
+		native.astToJson(
+			native.parseTemplate(source, [...INKER_GLOBAL_NAMES], [], [], "", []),
+		),
 	);
-	return renderNodeTree(ast.nodes, data, new Map());
+	return ast.nodes;
+}
+
+function render(source: string, data: Record<string, unknown> = {}): string {
+	return renderNodeTree(parseNodes(source), data, new Map());
 }
 
 describe("Edge-core globals (62-7)", () => {
@@ -388,18 +394,8 @@ describe("Edge-core globals (62-7)", () => {
 	});
 
 	it("a registered helper can override a global", () => {
-		const ast: { nodes: InkerNodeJson[] } = JSON.parse(
-			native.parseTemplateJson(
-				"{{ truncate('x') }}",
-				[...INKER_GLOBAL_NAMES],
-				[],
-				[],
-				"",
-				[],
-			),
-		);
 		const out = renderNodeTree(
-			ast.nodes,
+			parseNodes("{{ truncate('x') }}"),
 			{},
 			new Map([["truncate", () => "OVERRIDDEN"]]),
 		);

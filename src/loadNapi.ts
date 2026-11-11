@@ -36,12 +36,7 @@ export type NapiInkerAst = import("./native/generated.js").InkerAst;
  * guard checks the same calls at load: a declaration says what the Rust
  * promises, not what a stale binary shipped.
  */
-const NATIVE_CALLS = [
-	"parseTemplate",
-	"parseTemplateJson",
-	"astToJson",
-	"openedPath",
-] as const;
+const NATIVE_CALLS = ["parseTemplate", "astToJson", "openedPath"] as const;
 
 type NativeExports = Pick<
 	typeof import("./native/generated.js"),

@@ -3,7 +3,6 @@
 //! own module to break the otherwise-cyclic dependency between block-tag
 //! parsing and the top-level parser.
 
-use crate::parse_expression::Expression;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -13,7 +12,6 @@ pub enum InkerNode {
         value: String,
     },
     Interpolation {
-        expression: Expression,
         escape: bool,
         source: String,
         line: u32,
@@ -30,7 +28,6 @@ pub enum InkerNode {
         column: u32,
     },
     Each {
-        iterable: Expression,
         iterable_source: String,
         binding: EachBinding,
         body_nodes: Vec<InkerNode>,
@@ -49,7 +46,6 @@ pub enum InkerNode {
     /// `@let` path); the Node side folds them into the scope.
     Let {
         name: String,
-        expression: Expression,
         source: String,
         destructure: bool,
         names: Vec<String>,
@@ -179,7 +175,6 @@ pub struct SlotNode {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IfCondition {
-    pub expression: Expression,
     pub source: String,
 }
 
