@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+	type InkerErrorContext,
+	InkerRenderError,
+} from "./InkerRenderError.js";
 
 /**
  * Named output stacks — the store behind `@stack`, `@pushTo` and `@pushOnceTo`
@@ -46,12 +50,15 @@ export class Stacks {
 	/**
 	 * Create a stack placeholder and return the token to emit. Two `@stack` tags
 	 * with the same name are an authoring mistake — the second would silently
-	 * never be filled — so it throws rather than degrading.
+	 * never be filled — so it throws rather than degrading, with `context`
+	 * (the second tag's position) on the error.
 	 */
-	create(name: string): string {
+	create(name: string, context?: InkerErrorContext): string {
 		if (this.#placeholders.has(name)) {
-			throw new Error(
+			throw new InkerRenderError(
+				"E_INKER_INVALID_EXPRESSION",
 				`@stack('${name}') is declared twice — a stack can only be output once per render`,
+				context,
 			);
 		}
 		const token = `<!--inker-stack:${this.#salt}:${name}-->`;

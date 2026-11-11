@@ -304,10 +304,19 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 		).toBe("[hello world]");
 	});
 
-	it("rejects the same stack being output twice", () => {
-		expect(() => engine().renderString("@stack('s')@stack('s')")).toThrow(
-			/declared twice/,
-		);
+	it("rejects the same stack being output twice with a typed, positioned error", () => {
+		let caught: unknown;
+		try {
+			engine().renderString("@stack('s')\n  @stack('s')");
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toMatchObject({
+			code: "E_INKER_INVALID_EXPRESSION",
+			message: expect.stringMatching(/declared twice/),
+			context: { line: 2, column: 3 },
+		});
 	});
 
 	it("drops content pushed to a stack that is never output", () => {

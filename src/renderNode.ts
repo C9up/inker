@@ -1169,7 +1169,13 @@ function* renderNode(
 					{ line: node.line, column: node.column },
 				);
 			}
-			out.push(requireStacks(ctx, "@stack", node).create(name));
+			out.push(
+				requireStacks(ctx, "@stack", node).create(name, {
+					templateName: ctx.templateName,
+					line: node.line,
+					column: node.column,
+				}),
+			);
 			return;
 		}
 		case "PushTo": {
