@@ -116,6 +116,42 @@ describe("block nesting depth", () => {
 		expect(templates.renderString(nested(MAX_BLOCK_DEPTH))).toBe("x");
 	});
 
+	it("refuses a @let pattern nesting 60,000 deep without dying", () => {
+		// The destructuring name walk recursed once per nested pattern and
+		// overflowed the native stack (SIGSEGV).
+		const binary = path.join(PKG_ROOT, `index.${nativeBinarySuffix()}.node`);
+		const script = `
+			const native = require(${JSON.stringify(binary)});
+			const src = "@let(" + "{x:".repeat(60000) + "o" + "}".repeat(60000) + " = data)";
+			try {
+				native.parseTemplate(src, [], [], [], "", []);
+				console.log("PARSED");
+			} catch (e) {
+				console.log(JSON.parse(e.message).code);
+			}
+		`;
+		const child = spawnSync(process.execPath, ["-e", script], {
+			encoding: "utf8",
+		});
+		expect(child.signal).toBeNull();
+		expect(child.status).toBe(0);
+		expect(child.stdout.trim()).toBe("E_INKER_INVALID_EXPRESSION");
+	});
+
+	it("caps @let pattern nesting at the block depth", () => {
+		const pattern = (depth: number): string =>
+			`@let(${"{x:".repeat(depth)}o${"}".repeat(depth)} = data){{ o }}`;
+		let data: unknown = "deep";
+		for (let i = 0; i < MAX_BLOCK_DEPTH; i++) data = { x: data };
+		const templates = engine();
+		expect(
+			codeOf(() => templates.renderString(pattern(MAX_BLOCK_DEPTH + 1))),
+		).toBe("E_INKER_INVALID_EXPRESSION");
+		expect(templates.renderString(pattern(MAX_BLOCK_DEPTH), { data })).toBe(
+			"deep",
+		);
+	});
+
 	it("maps a stack overflow during the render to a typed error", () => {
 		// A helper that recurses forever overflows the V8 stack inside the walk.
 		const templates = new Templates({

@@ -1079,6 +1079,7 @@ fn collect_let_names(
         pattern,
         0,
         pattern.len(),
+        0,
         &mut out,
         line,
         column,
@@ -1095,12 +1096,21 @@ fn collect_let_names(
     Ok(out)
 }
 
+/// How deep `{…}`/`[…]` destructuring patterns may nest in a `@let` — the
+/// same bound the block and expression parsers apply.
+const MAX_PATTERN_DEPTH: usize = crate::parse::MAX_BLOCK_DEPTH;
+
 /// Recurse over a binding target `[a, b)` (identifier, nested `{…}`/`[…]`
 /// pattern, or a `target = default`), pushing each bound identifier into `out`.
+/// `depth` counts the patterns enclosing the target: the walk costs one native
+/// frame per level, and an unbounded pattern overflowed the thread's stack and
+/// killed the process, so nesting past [`MAX_PATTERN_DEPTH`] is refused.
+#[allow(clippy::too_many_arguments)]
 fn collect_pattern_names(
     chars: &[char],
     a: usize,
     b: usize,
+    depth: usize,
     out: &mut Vec<String>,
     line: u32,
     column: u32,
@@ -1118,9 +1128,21 @@ fn collect_pattern_names(
     }
     let first = chars[a];
     let last = chars[b - 1];
+    let is_pattern = (first == '{' && last == '}') || (first == '[' && last == ']');
+    let depth = depth + usize::from(is_pattern);
+    if depth > MAX_PATTERN_DEPTH {
+        return Err(fail_invalid_expression(
+            format!(
+                "let destructuring pattern nests beyond the maximum depth of {MAX_PATTERN_DEPTH} — flatten the pattern"
+            ),
+            line,
+            column,
+            template_path,
+        ));
+    }
     if first == '{' && last == '}' {
         for (sa, sb) in split_top_level(chars, a + 1, b - 1).map_err(deep)? {
-            collect_object_entry(chars, sa, sb, out, line, column, template_path)?;
+            collect_object_entry(chars, sa, sb, depth, out, line, column, template_path)?;
         }
         return Ok(());
     }
@@ -1134,7 +1156,7 @@ fn collect_pattern_names(
                 } else {
                     ea
                 };
-            collect_pattern_names(chars, ea, eb, out, line, column, template_path)?;
+            collect_pattern_names(chars, ea, eb, depth, out, line, column, template_path)?;
         }
         return Ok(());
     }
@@ -1142,11 +1164,13 @@ fn collect_pattern_names(
 }
 
 /// Handle one `{…}` entry: rest (`...target`), rename (`key: target`), or a
-/// shorthand / defaulted key.
+/// shorthand / defaulted key. `depth` is the enclosing pattern's.
+#[allow(clippy::too_many_arguments)]
 fn collect_object_entry(
     chars: &[char],
     a: usize,
     b: usize,
+    depth: usize,
     out: &mut Vec<String>,
     line: u32,
     column: u32,
@@ -1157,7 +1181,7 @@ fn collect_object_entry(
         return Ok(()); // trailing comma
     }
     if b - a >= 3 && chars[a] == '.' && chars[a + 1] == '.' && chars[a + 2] == '.' {
-        return collect_pattern_names(chars, a + 3, b, out, line, column, template_path);
+        return collect_pattern_names(chars, a + 3, b, depth, out, line, column, template_path);
     }
     let deep = |_| fail_too_deep(line, column, template_path);
     let colon = scan_top_level(chars, a, b, |c, i| c[i] == ':').map_err(deep)?;
@@ -1165,9 +1189,9 @@ fn collect_object_entry(
     // `key: target` binds the target; `key` / `key = default` binds the key.
     match colon {
         Some(c) if eq.is_none_or(|e| c < e) => {
-            collect_pattern_names(chars, c + 1, b, out, line, column, template_path)
+            collect_pattern_names(chars, c + 1, b, depth, out, line, column, template_path)
         }
-        _ => collect_pattern_names(chars, a, b, out, line, column, template_path),
+        _ => collect_pattern_names(chars, a, b, depth, out, line, column, template_path),
     }
 }
 
@@ -2703,6 +2727,31 @@ mod tests {
             let e = parse_block_tag(&raw, 1, 1, &opts(), 0).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidExpression, "{}", &raw[..12]);
             assert!(e.message.contains("maximum depth"), "got: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn a_let_pattern_nested_to_the_cap_binds_its_names() {
+        let n = MAX_PATTERN_DEPTH;
+        let raw = format!("let {}o{} = data", "{x:".repeat(n), "}".repeat(n));
+        assert!(parse_block_tag(&raw, 1, 1, &opts(), 0).is_ok());
+        let arrays = format!("let {}o{} = data", "[".repeat(n), "]".repeat(n));
+        assert!(parse_block_tag(&arrays, 1, 1, &opts(), 0).is_ok());
+    }
+
+    #[test]
+    fn a_let_pattern_nested_past_the_cap_is_refused() {
+        // 60,000 levels overflowed the native stack in the name walk (SIGSEGV).
+        for n in [MAX_PATTERN_DEPTH + 1, 60_000] {
+            for raw in [
+                format!("let {}o{} = data", "{x:".repeat(n), "}".repeat(n)),
+                format!("let {}o{} = data", "[".repeat(n), "]".repeat(n)),
+                format!("let {}o{} = data", "[...".repeat(n), "]".repeat(n)),
+            ] {
+                let e = parse_block_tag(&raw, 1, 1, &opts(), 0).unwrap_err();
+                assert_eq!(e.code, ErrorCode::InvalidExpression);
+                assert!(e.message.contains("maximum depth"), "got: {}", e.message);
+            }
         }
     }
 
