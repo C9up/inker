@@ -13,7 +13,7 @@ const templates = new Templates({ root: "/abs/path/to/templates" });
 const html = await templates.render("invoice", { customer: { name: "Alice" }, total: 42 });
 ```
 
-Interpolation is `{{ expr }}` (HTML-escaped) or `{{{ expr }}}` (raw). The `expr` is a member-access path (`customer.name`, `items[0].title`, `items["weird key"]`); arithmetic, calls, ternaries, and template literals go through registered helpers.
+Interpolation is `{{ expr }}` (HTML-escaped) or `{{{ expr }}}` (raw). The `expr` between the braces is a full JavaScript expression — member access, arithmetic, calls, ternaries, template literals, arrow functions — evaluated in V8 with the registered helpers and globals in scope. That reach is why a template is code, never user input: see [Templates are code, not input](#templates-are-code-not-input).
 
 ## Strict by default
 
@@ -34,7 +34,7 @@ The coverage gate (v8 provider) is wired in `vitest.config.ts` with thresholds a
 
 ## Native binary
 
-The lex / parse / render hot path runs in Rust via napi-rs (Story 55.1). The TypeScript surface (`Templates`, `InkerProvider`, `SafeString`, `InkerRenderError`) is unchanged — the engine is loaded transparently from a prebuilt `.node` binary.
+The lexer and parser run in Rust via napi-rs; rendering, expressions included, runs in V8. The TypeScript surface (`Templates`, `InkerProvider`, `SafeString`, `InkerRenderError`) is unchanged — the engine is loaded transparently from a prebuilt `.node` binary.
 
 - **Build locally:** `pnpm --filter @c9up/inker build:napi` compiles the `inker-engine-napi` crate (release) and copies `index.<platform>.node` into the package root. The 5-platform NAPI CI matrix (`linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64`, `darwin-arm64`, `win32-x64-msvc`) builds these on native runners.
 - **No JS fallback.** If the binary is missing or fails to load, every render throws `E_INKER_NAPI_REQUIRED` with an actionable hint pointing at `pnpm --filter @c9up/inker build:napi`. Run that after a fresh checkout or a platform change.
