@@ -198,6 +198,23 @@ describe("Edge-core globals (62-7)", () => {
 		);
 	});
 
+	it("js.stringify and html.jsonLd escape the U+2028 and U+2029 line terminators", () => {
+		// Valid in a JSON string, but a line terminator to a JavaScript parser:
+		// left raw, either breaks the literal it sits in.
+		const v = { a: "x\u2028y\u2029z" };
+		const escaped = '{"a":"x\\u2028y\\u2029z"}';
+		const stringified = render("{{{ js.stringify(v) }}}", { v });
+		expect(stringified).toBe(escaped);
+		const jsonLd = render("{{ html.jsonLd(v) }}", { v });
+		expect(jsonLd).toBe(
+			`<script type="application/ld+json">${escaped}</script>`,
+		);
+		for (const out of [stringified, jsonLd]) {
+			expect(out).not.toMatch(/[\u2028\u2029]/);
+		}
+		expect(JSON.parse(stringified)).toEqual(v);
+	});
+
 	it("html.jsonLd writes a JSON-LD script no value can end", () => {
 		const product = {
 			"@context": "https://schema.org",
