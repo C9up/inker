@@ -2611,6 +2611,63 @@ export default Templates;
  * then the data passed to the render call. The merge happens here, so the
  * engine needs no notion of who is rendering.
  */
+/** An object literal's shape: plain prototype, or none. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null) return false;
+	const proto: unknown = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Deep-merge `source` into `target`, the way a renderer's `share` combines
+ * what a middleware and a controller each contribute: plain objects merge key
+ * by key, arrays index by index, anything else (a Date, a class instance, a
+ * function) is shared by reference, and an `undefined` never erases a value
+ * already there. Every merged object or array is a copy, so the caller's
+ * objects are never written to. Own keys only, and the prototype-pollution
+ * keys are dropped. `seen` maps a source object already merged to its copy,
+ * so a cycle in the data closes on itself instead of recursing forever.
+ */
+function mergeShared(
+	target: Record<string, unknown>,
+	source: Readonly<Record<string, unknown>>,
+	seen: WeakMap<object, unknown>,
+): void {
+	for (const key of Object.keys(source)) {
+		if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+		const value = source[key];
+		if (value === undefined && Object.hasOwn(target, key)) continue;
+		target[key] = mergeSharedValue(target[key], value, seen);
+	}
+}
+
+function mergeSharedValue(
+	existing: unknown,
+	value: unknown,
+	seen: WeakMap<object, unknown>,
+): unknown {
+	if (typeof value !== "object" || value === null) return value;
+	if (seen.has(value)) return seen.get(value);
+	if (Array.isArray(value)) {
+		const merged: unknown[] = Array.isArray(existing) ? existing : [];
+		seen.set(value, merged);
+		value.forEach((item: unknown, index) => {
+			if (item === undefined && index < merged.length) return;
+			merged[index] = mergeSharedValue(merged[index], item, seen);
+		});
+		return merged;
+	}
+	if (isPlainObject(value)) {
+		const merged: Record<string, unknown> = isPlainObject(existing)
+			? existing
+			: {};
+		seen.set(value, merged);
+		mergeShared(merged, value, seen);
+		return merged;
+	}
+	return value;
+}
+
 export class TemplateRenderer {
 	readonly #templates: Templates;
 	readonly #shared: Record<string, unknown> = Object.create(null);
@@ -2619,7 +2676,11 @@ export class TemplateRenderer {
 		this.#templates = templates;
 	}
 
-	/** Merge `data` into this renderer's shared state (Edge `share`). Chainable. */
+	/**
+	 * Merge `data` into this renderer's shared state (Edge `share`), deeply:
+	 * `share({ meta: { title } })` then `share({ meta: { description } })`
+	 * leaves both in `meta`. Chainable.
+	 */
 	share(data: Readonly<Record<string, unknown>>): this {
 		if (typeof data !== "object" || data === null || Array.isArray(data)) {
 			throw new InkerRenderError(
@@ -2627,10 +2688,7 @@ export class TemplateRenderer {
 				`share() expects an object; got ${data === null ? "null" : typeof data}`,
 			);
 		}
-		// Object.assign copies own enumerable keys only, onto a null-prototype
-		// bag — a `__proto__` key lands as an own property instead of walking up
-		// the prototype chain.
-		Object.assign(this.#shared, data);
+		mergeShared(this.#shared, data, new WeakMap());
 		return this;
 	}
 
@@ -2680,8 +2738,9 @@ export class TemplateRenderer {
 
 	/**
 	 * A second renderer carrying a COPY of this one's shared state (Edge
-	 * `clone`). Used to branch — a nested render that needs one extra value
-	 * without that value leaking back into the renderer it came from.
+	 * `clone`), nested objects included. Used to branch — a nested render that
+	 * needs one extra value without that value leaking back into the renderer
+	 * it came from.
 	 */
 	clone(): TemplateRenderer {
 		return new TemplateRenderer(this.#templates).share(this.#shared);

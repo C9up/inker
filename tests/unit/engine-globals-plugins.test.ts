@@ -115,6 +115,43 @@ describe("inker > Templates#createRenderer", () => {
 		expect(r.renderString("{{ who }}", { who: "local" })).toBe("local");
 	});
 
+	it("deep-merges what successive share() calls contribute", () => {
+		const t = engine();
+		const fromMiddleware = { meta: { title: "t" }, tags: ["a", "b"] };
+		const r = t
+			.createRenderer()
+			.share(fromMiddleware)
+			.share({ meta: { description: "d" }, tags: ["c"] })
+			.share({ meta: { title: undefined } });
+		expect(
+			r.renderString(
+				"{{ meta.title }}|{{ meta.description }}|{{ tags.join() }}",
+			),
+		).toBe("t|d|c,b");
+		// The caller's objects were copied, never written to.
+		expect(fromMiddleware).toEqual({ meta: { title: "t" }, tags: ["a", "b"] });
+	});
+
+	it("shares a non-plain object by reference and drops prototype keys", () => {
+		const t = engine();
+		const when = new Date(0);
+		const hostile: Record<string, unknown> = JSON.parse(
+			'{"meta":{"__proto__":{"polluted":true},"constructor":{"x":1},"ok":1}}',
+		);
+		const r = t.createRenderer().share({ when }).share(hostile);
+		expect(r.getState().when).toBe(when);
+		expect(r.renderString("{{ meta.ok }}|{{ meta.polluted }}")).toBe("1|");
+		expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
+	});
+
+	it("merges cyclic data without recursing forever", () => {
+		const t = engine();
+		const node: Record<string, unknown> = { name: "n" };
+		node.self = node;
+		const r = t.createRenderer().share({ node });
+		expect(r.renderString("{{ node.self.self.name }}")).toBe("n");
+	});
+
 	it("rejects a non-object passed to share()", () => {
 		const t = engine();
 		expect(() => t.createRenderer().share(null as never)).toThrow(
@@ -158,6 +195,13 @@ describe("inker > engine API completed against edge.js 6.5.1", () => {
 		const copy = base.clone().share({ b: "2" });
 		expect(copy.renderString("{{ a }}{{ b }}")).toBe("12");
 		expect(base.renderString("{{ a }}{{ typeof b }}")).toBe("1undefined");
+	});
+
+	it("clone copies nested shared objects too", () => {
+		const t = engine();
+		const base = t.createRenderer().share({ meta: { title: "t" } });
+		base.clone().share({ meta: { title: "changed" } });
+		expect(base.renderString("{{ meta.title }}")).toBe("t");
 	});
 
 	it("clone does not re-run the onRender callbacks", () => {
