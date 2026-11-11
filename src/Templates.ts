@@ -697,7 +697,7 @@ export class Processor {
 		// never fires would be a silent no-op — so it is loud instead.
 		throw new InkerRenderError(
 			"E_INKER_INVALID_PATH",
-			`processor.process — unknown stage '${String(stage)}'. Inker supports 'raw' and 'output'. Edge's 'compiled' stage has no equivalent: no JavaScript is emitted, templates parse to an AST. Its 'tag' stage has none either: parsing happens in Rust, so a JS handler cannot mutate a token mid-parse — and its canonical use, exposing components as tags, is built in (see listComponents).`,
+			`processor.process — unknown stage '${String(stage)}'. Inker supports 'raw' and 'output'. A 'compiled' stage has no equivalent: no JavaScript is emitted, templates parse to an AST. A 'tag' stage has none either: parsing happens in Rust, so a JS handler cannot mutate a token mid-parse — and its canonical use, exposing components as tags, is built in (see listComponents).`,
 		);
 	}
 
