@@ -84,6 +84,38 @@ describe("block nesting depth", () => {
 		);
 	});
 
+	it("refuses a tag argument nesting template literals 200,000 deep without dying", () => {
+		// The lexer's argument scan recursed once per `${` and overflowed the
+		// native stack (SIGSEGV) before any parser bound ran.
+		const binary = path.join(PKG_ROOT, `index.${nativeBinarySuffix()}.node`);
+		const script = `
+			const native = require(${JSON.stringify(binary)});
+			const src = "@if(" + "\`\${".repeat(200000) + "1" + "}\`".repeat(200000) + ")x@endif";
+			try {
+				native.parseTemplate(src, [], [], [], "", []);
+				console.log("PARSED");
+			} catch (e) {
+				console.log(JSON.parse(e.message).code);
+			}
+		`;
+		const child = spawnSync(process.execPath, ["-e", script], {
+			encoding: "utf8",
+		});
+		expect(child.signal).toBeNull();
+		expect(child.status).toBe(0);
+		expect(child.stdout.trim()).toBe("E_INKER_INVALID_EXPRESSION");
+	});
+
+	it("caps template-literal nesting in a tag argument at the block depth", () => {
+		const nested = (depth: number): string =>
+			`@if(${"`${".repeat(depth)}1${"}`".repeat(depth)})x@endif`;
+		const templates = engine();
+		expect(
+			codeOf(() => templates.renderString(nested(MAX_BLOCK_DEPTH + 1))),
+		).toBe("E_INKER_INVALID_EXPRESSION");
+		expect(templates.renderString(nested(MAX_BLOCK_DEPTH))).toBe("x");
+	});
+
 	it("maps a stack overflow during the render to a typed error", () => {
 		// A helper that recurses forever overflows the V8 stack inside the walk.
 		const templates = new Templates({

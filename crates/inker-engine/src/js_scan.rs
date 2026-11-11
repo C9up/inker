@@ -43,15 +43,47 @@ pub(crate) fn token_prev_sig(chars: &[char], i: usize, prev: char) -> char {
     }
 }
 
+/// How deep template literals may nest through `${…}` substitutions before the
+/// scan gives up — the same bound the block and expression parsers apply
+/// (`MAX_BLOCK_DEPTH` in parse.rs, `MAX_EXPRESSION_DEPTH` in
+/// parse_expression.rs).
+pub(crate) const MAX_TEMPLATE_DEPTH: usize = crate::parse::MAX_BLOCK_DEPTH;
+
+/// A template literal nested through `${…}` deeper than [`MAX_TEMPLATE_DEPTH`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TooDeep;
+
+impl TooDeep {
+    /// The message every caller reports, so the bound reads the same wherever
+    /// the scan hits it.
+    pub(crate) fn message() -> String {
+        format!(
+            "template literals nest beyond the maximum depth of {MAX_TEMPLATE_DEPTH} — flatten the expression or move logic to a helper"
+        )
+    }
+}
+
 /// If `chars[i]` begins a string / template literal / regex literal / comment,
 /// return the index just past that token; otherwise `None`. `prev_sig` is the
 /// last significant char before `i` (see [`token_prev_sig`]), used with the
 /// text before `i` to tell a regex literal (`= /re/`) from a division
-/// (`a / b`).
-pub(crate) fn skip_js_token(chars: &[char], i: usize, prev_sig: char) -> Option<usize> {
+/// (`a / b`). A template literal nested past [`MAX_TEMPLATE_DEPTH`] is
+/// [`TooDeep`].
+pub(crate) fn skip_js_token(
+    chars: &[char],
+    i: usize,
+    prev_sig: char,
+) -> Result<Option<usize>, TooDeep> {
+    if chars[i] == '`' {
+        return skip_template(chars, i).map(Some);
+    }
+    Ok(skip_flat_token(chars, i, prev_sig))
+}
+
+/// The tokens that cannot nest: strings, comments and regex literals.
+fn skip_flat_token(chars: &[char], i: usize, prev_sig: char) -> Option<usize> {
     match chars[i] {
         '\'' | '"' => Some(skip_string(chars, i)),
-        '`' => Some(skip_template(chars, i)),
         '/' => match chars.get(i + 1).copied() {
             Some('/') => Some(skip_line_comment(chars, i)),
             Some('*') => Some(skip_block_comment(chars, i)),
@@ -120,49 +152,86 @@ pub(crate) fn skip_string(chars: &[char], i: usize) -> usize {
     j.min(chars.len())
 }
 
-/// Skip a `` ` `` template literal starting at `i`, balancing nested `${…}`
-/// substitutions (which may themselves contain strings/templates/brackets).
-pub(crate) fn skip_template(chars: &[char], i: usize) -> usize {
-    let mut j = i + 1;
-    while j < chars.len() {
-        match chars[j] {
-            '\\' => j += 2,
-            '`' => return j + 1,
-            '$' if chars.get(j + 1).copied() == Some('{') => j = skip_braces(chars, j + 1),
-            _ => j += 1,
-        }
-    }
-    j.min(chars.len())
+/// One open construct of the template-literal scan: the literal's text, or a
+/// `${…}` substitution with its own bracket depth and regex-vs-division state.
+enum Frame {
+    Template,
+    Substitution { braces: u32, prev_sig: char },
 }
 
-/// Skip a balanced `{…}` group starting at `i` (JS-aware for inner tokens).
-fn skip_braces(chars: &[char], i: usize) -> usize {
-    let mut depth = 0i32;
-    let mut prev_sig = '\0';
-    let mut j = i;
+/// Skip a `` ` `` template literal starting at `i`, balancing nested `${…}`
+/// substitutions (which may themselves contain strings/templates/brackets).
+///
+/// Iterative over an explicit stack: a template nested through `${` once per
+/// level used to cost one native frame per level, and a few hundred thousand
+/// levels in a tag argument overflowed the thread's stack and killed the
+/// process. Nesting past [`MAX_TEMPLATE_DEPTH`] is refused instead.
+fn skip_template(chars: &[char], i: usize) -> Result<usize, TooDeep> {
+    let mut stack = vec![Frame::Template];
+    let mut templates = 1usize;
+    let mut j = i + 1;
     while j < chars.len() {
-        if let Some(next) = skip_js_token(chars, j, prev_sig) {
-            prev_sig = token_prev_sig(chars, j, prev_sig);
-            j = next;
-            continue;
-        }
-        let c = chars[j];
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return j + 1;
+        let Some(top) = stack.last_mut() else {
+            break;
+        };
+        match top {
+            Frame::Template => match chars[j] {
+                '\\' => j += 2,
+                '`' => {
+                    stack.pop();
+                    templates -= 1;
+                    j += 1;
+                    if stack.is_empty() {
+                        return Ok(j);
+                    }
                 }
+                '$' if chars.get(j + 1).copied() == Some('{') => {
+                    stack.push(Frame::Substitution {
+                        braces: 1,
+                        prev_sig: '{',
+                    });
+                    j += 2;
+                }
+                _ => j += 1,
+            },
+            Frame::Substitution { braces, prev_sig } => {
+                let c = chars[j];
+                if c == '`' {
+                    // A template is a value for the regex-vs-division choice.
+                    *prev_sig = 'x';
+                    templates += 1;
+                    if templates > MAX_TEMPLATE_DEPTH {
+                        return Err(TooDeep);
+                    }
+                    stack.push(Frame::Template);
+                    j += 1;
+                    continue;
+                }
+                if let Some(next) = skip_flat_token(chars, j, *prev_sig) {
+                    *prev_sig = token_prev_sig(chars, j, *prev_sig);
+                    j = next;
+                    continue;
+                }
+                match c {
+                    '{' => *braces += 1,
+                    '}' => {
+                        *braces -= 1;
+                        if *braces == 0 {
+                            stack.pop();
+                            j += 1;
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                if !c.is_whitespace() {
+                    *prev_sig = c;
+                }
+                j += 1;
             }
-            _ => {}
         }
-        if !c.is_whitespace() {
-            prev_sig = c;
-        }
-        j += 1;
     }
-    j
+    Ok(j.min(chars.len()))
 }
 
 /// Skip a `//` line comment; returns the index of the terminating newline (or
@@ -221,7 +290,11 @@ mod tests {
 
     fn token_end(source: &str, at: usize, prev: char) -> Option<usize> {
         let chars: Vec<char> = source.chars().collect();
-        skip_js_token(&chars, at, prev)
+        skip_js_token(&chars, at, prev).unwrap_or(None)
+    }
+
+    fn nested_templates(depth: usize) -> String {
+        format!("{}1{}", "`${".repeat(depth), "}`".repeat(depth))
     }
 
     #[test]
@@ -247,5 +320,30 @@ mod tests {
         assert_eq!(token_end("`abc", 0, '\0'), Some(4));
         assert_eq!(token_end("'ab\\", 0, '\0'), Some(4));
         assert_eq!(token_end("`${", 0, '\0'), Some(3));
+    }
+
+    #[test]
+    fn a_template_nested_to_the_bound_is_one_token() {
+        let s = nested_templates(MAX_TEMPLATE_DEPTH);
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(skip_js_token(&chars, 0, '\0'), Ok(Some(chars.len())));
+    }
+
+    #[test]
+    fn a_template_nested_past_the_bound_is_refused_without_recursing() {
+        // 200 000 levels overflowed the thread's stack when every `${` cost a
+        // native frame; the scan now stops at the bound.
+        for depth in [MAX_TEMPLATE_DEPTH + 1, 200_000] {
+            let s = nested_templates(depth);
+            let chars: Vec<char> = s.chars().collect();
+            assert_eq!(skip_js_token(&chars, 0, '\0'), Err(TooDeep));
+        }
+    }
+
+    #[test]
+    fn sibling_templates_do_not_add_up_to_the_bound() {
+        let s = format!("`{}`", "${`a`}".repeat(MAX_TEMPLATE_DEPTH * 4));
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(skip_js_token(&chars, 0, '\0'), Ok(Some(chars.len())));
     }
 }

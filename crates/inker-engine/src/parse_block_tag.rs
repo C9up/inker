@@ -8,7 +8,9 @@
 use crate::ast::{ComponentNode, EachBinding, IfCondition, LayoutNode, PartialNode};
 use crate::error::{ErrorCode, InkerError};
 use crate::identifiers::{is_prototype_pollution_key, is_reserved_binding};
-use crate::js_scan::{skip_block_comment, skip_js_token, skip_line_comment, token_prev_sig};
+use crate::js_scan::{
+    skip_block_comment, skip_js_token, skip_line_comment, token_prev_sig, TooDeep,
+};
 use crate::parse_expression::{
     parse_expression_with_helper_count, Expression, ParseExpressionOptions,
 };
@@ -100,6 +102,12 @@ fn fail_parse(
         e = e.with_template(t.to_string());
     }
     e
+}
+
+/// The typed error for a tag argument whose template literals nest past
+/// [`crate::js_scan::MAX_TEMPLATE_DEPTH`].
+fn fail_too_deep(line: u32, column: u32, template_path: Option<&str>) -> InkerError {
+    fail_invalid_expression(TooDeep::message(), line, column, template_path)
 }
 
 fn fail_invalid_expression(
@@ -525,7 +533,7 @@ fn parse_destructured_binding(
 /// template literal, regex and comment, so `(a, b) in xs` and `x in obj.items`
 /// split correctly. Returns the (start, end) of the `in`-with-surrounding-
 /// whitespace span, or None.
-fn find_top_level_in(s: &[char]) -> Option<(usize, usize)> {
+fn find_top_level_in(s: &[char]) -> Result<Option<(usize, usize)>, TooDeep> {
     // `in` is bounded by whitespace on the left and by whitespace OR a
     // delimiter (`(`/`[`) on the right, so `x in(items)` / `x in [a]` split
     // correctly (JS keyword-then-paren).
@@ -540,14 +548,20 @@ fn find_top_level_in(s: &[char]) -> Option<(usize, usize)> {
             && (is_whitespace(c[k + 2]) || c[k + 2] == '(' || c[k + 2] == '[');
         bounded.then_some(k)
     };
-    let ws_start = scan_top_level(s, 0, s.len(), |c, i| {
+    let Some(ws_start) = scan_top_level(s, 0, s.len(), |c, i| {
         is_whitespace(c[i]) && keyword_after(c, i).is_some()
-    })?;
-    let mut j = keyword_after(s, ws_start)? + 2;
+    })?
+    else {
+        return Ok(None);
+    };
+    let Some(keyword) = keyword_after(s, ws_start) else {
+        return Ok(None);
+    };
+    let mut j = keyword + 2;
     while j < s.len() && is_whitespace(s[j]) {
         j += 1;
     }
-    Some((ws_start, j))
+    Ok(Some((ws_start, j)))
 }
 
 /// Validate a single each-binding identifier (reused for `Single`, and each name
@@ -814,7 +828,9 @@ fn slice_balanced_pattern(
     let mut prev_sig = '\0';
     let mut i = start;
     while i < chars.len() {
-        if let Some(next) = skip_js_token(chars, i, prev_sig) {
+        let token = skip_js_token(chars, i, prev_sig)
+            .map_err(|_| fail_too_deep(line, column, template_path))?;
+        if let Some(next) = token {
             prev_sig = token_prev_sig(chars, i, prev_sig);
             i = next;
             continue;
@@ -923,13 +939,13 @@ fn matches_at(chars: &[char], i: usize, op: &str) -> bool {
 /// Returns `(start, end)` of the operator. JS-aware (strings, template
 /// literals, regexes, comments) and bracket-depth aware, so `=` inside a
 /// default value, an object literal, or a string never mis-splits.
-fn find_assignment_operator(chars: &[char]) -> Option<(usize, usize)> {
+fn find_assignment_operator(chars: &[char]) -> Result<Option<(usize, usize)>, TooDeep> {
     let mut depth: i32 = 0;
     let mut prev_sig = '\0';
     let mut i = 0;
     while i < chars.len() {
         let sig = token_prev_sig(chars, i, prev_sig);
-        if let Some(next) = skip_js_token(chars, i, sig) {
+        if let Some(next) = skip_js_token(chars, i, sig)? {
             prev_sig = 'x';
             i = next;
             continue;
@@ -948,7 +964,7 @@ fn find_assignment_operator(chars: &[char]) -> Option<(usize, usize)> {
                 continue;
             }
             if let Some(op) = ASSIGN_OPS.iter().find(|op| matches_at(chars, i, op)) {
-                return Some((i, i + op.chars().count()));
+                return Ok(Some((i, i + op.chars().count())));
             }
         }
         if !is_whitespace(c) {
@@ -956,7 +972,7 @@ fn find_assignment_operator(chars: &[char]) -> Option<(usize, usize)> {
         }
         i += 1;
     }
-    None
+    Ok(None)
 }
 
 /// Trim leading/trailing ASCII/Unicode whitespace from a `[a, b)` char range.
@@ -977,12 +993,12 @@ fn scan_top_level<F: Fn(&[char], usize) -> bool>(
     a: usize,
     b: usize,
     pred: F,
-) -> Option<usize> {
+) -> Result<Option<usize>, TooDeep> {
     let mut depth = 0i32;
     let mut prev_sig = '\0';
     let mut i = a;
     while i < b {
-        if let Some(next) = skip_js_token(chars, i, prev_sig) {
+        if let Some(next) = skip_js_token(chars, i, prev_sig)? {
             prev_sig = token_prev_sig(chars, i, prev_sig);
             i = next.min(b);
             continue;
@@ -991,7 +1007,7 @@ fn scan_top_level<F: Fn(&[char], usize) -> bool>(
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
-            _ if depth == 0 && pred(chars, i) => return Some(i),
+            _ if depth == 0 && pred(chars, i) => return Ok(Some(i)),
             _ => {}
         }
         if !ch.is_whitespace() {
@@ -999,20 +1015,20 @@ fn scan_top_level<F: Fn(&[char], usize) -> bool>(
         }
         i += 1;
     }
-    None
+    Ok(None)
 }
 
 /// Split `[a, b)` into top-level comma-separated spans (nested brackets /
 /// strings / templates / regex / comments respected). Holes / trailing commas
 /// surface as empty spans.
-fn split_top_level(chars: &[char], a: usize, b: usize) -> Vec<(usize, usize)> {
+fn split_top_level(chars: &[char], a: usize, b: usize) -> Result<Vec<(usize, usize)>, TooDeep> {
     let mut spans = Vec::new();
     let mut depth = 0i32;
     let mut prev_sig = '\0';
     let mut start = a;
     let mut i = a;
     while i < b {
-        if let Some(next) = skip_js_token(chars, i, prev_sig) {
+        if let Some(next) = skip_js_token(chars, i, prev_sig)? {
             prev_sig = token_prev_sig(chars, i, prev_sig);
             i = next.min(b);
             continue;
@@ -1033,12 +1049,12 @@ fn split_top_level(chars: &[char], a: usize, b: usize) -> Vec<(usize, usize)> {
         i += 1;
     }
     spans.push((start, b));
-    spans
+    Ok(spans)
 }
 
 /// Index of a top-level default-assignment `=` in `[a, b)` (a lone `=`, not
 /// `==`/`===`/`!=`/`<=`/`>=`/`=>`), or `None`.
-fn find_default_eq(chars: &[char], a: usize, b: usize) -> Option<usize> {
+fn find_default_eq(chars: &[char], a: usize, b: usize) -> Result<Option<usize>, TooDeep> {
     scan_top_level(chars, a, b, |c, i| {
         c[i] == '='
             && c.get(i + 1).copied() != Some('=')
@@ -1092,7 +1108,8 @@ fn collect_pattern_names(
 ) -> Result<(), InkerError> {
     let (a, b) = trim_range(chars, a, b);
     // A `target = default` binds only the target side.
-    let (a, b) = match find_default_eq(chars, a, b) {
+    let deep = |_| fail_too_deep(line, column, template_path);
+    let (a, b) = match find_default_eq(chars, a, b).map_err(deep)? {
         Some(eq) => trim_range(chars, a, eq),
         None => (a, b),
     };
@@ -1102,13 +1119,13 @@ fn collect_pattern_names(
     let first = chars[a];
     let last = chars[b - 1];
     if first == '{' && last == '}' {
-        for (sa, sb) in split_top_level(chars, a + 1, b - 1) {
+        for (sa, sb) in split_top_level(chars, a + 1, b - 1).map_err(deep)? {
             collect_object_entry(chars, sa, sb, out, line, column, template_path)?;
         }
         return Ok(());
     }
     if first == '[' && last == ']' {
-        for (sa, sb) in split_top_level(chars, a + 1, b - 1) {
+        for (sa, sb) in split_top_level(chars, a + 1, b - 1).map_err(deep)? {
             let (ea, eb) = trim_range(chars, sa, sb);
             let ea =
                 if eb - ea >= 3 && chars[ea] == '.' && chars[ea + 1] == '.' && chars[ea + 2] == '.'
@@ -1142,8 +1159,9 @@ fn collect_object_entry(
     if b - a >= 3 && chars[a] == '.' && chars[a + 1] == '.' && chars[a + 2] == '.' {
         return collect_pattern_names(chars, a + 3, b, out, line, column, template_path);
     }
-    let colon = scan_top_level(chars, a, b, |c, i| c[i] == ':');
-    let eq = find_default_eq(chars, a, b);
+    let deep = |_| fail_too_deep(line, column, template_path);
+    let colon = scan_top_level(chars, a, b, |c, i| c[i] == ':').map_err(deep)?;
+    let eq = find_default_eq(chars, a, b).map_err(deep)?;
     // `key: target` binds the target; `key` / `key = default` binds the key.
     match colon {
         Some(c) if eq.is_none_or(|e| c < e) => {
@@ -1257,17 +1275,18 @@ fn parse_include_if_tag(
         ));
     }
     let body = &chars[start..];
-    let comma = match find_top_level_comma(body) {
-        Some(c) => c,
-        None => {
-            return Err(fail_invalid_expression(
+    let comma =
+        match find_top_level_comma(body).map_err(|_| fail_too_deep(line, column, template_path))? {
+            Some(c) => c,
+            None => {
+                return Err(fail_invalid_expression(
 				"includeIf directive requires a comma between the condition and the quoted template name",
 				line,
 				column,
 				template_path,
 			));
-        }
-    };
+            }
+        };
     let cond_source: String = body[..comma].iter().collect::<String>().trim().to_string();
     if cond_source.is_empty() {
         return Err(fail_invalid_expression(
@@ -1311,7 +1330,7 @@ fn parse_include_if_tag(
 
 /// Locate the first top-level `,` in `s`: outside brackets and outside every
 /// string, template literal (nested `${…}` included), regex and comment.
-fn find_top_level_comma(s: &[char]) -> Option<usize> {
+fn find_top_level_comma(s: &[char]) -> Result<Option<usize>, TooDeep> {
     scan_top_level(s, 0, s.len(), |c, i| c[i] == ',')
 }
 
@@ -1335,17 +1354,18 @@ fn parse_each_tag(
     }
 
     let body = &chars[start..];
-    let in_match = match find_top_level_in(body) {
-        Some(m) => m,
-        None => {
-            return Err(fail_invalid_expression(
-                "each directive requires '<binding> in <iterable>' — missing 'in' keyword",
-                line,
-                column,
-                template_path,
-            ));
-        }
-    };
+    let in_match =
+        match find_top_level_in(body).map_err(|_| fail_too_deep(line, column, template_path))? {
+            Some(m) => m,
+            None => {
+                return Err(fail_invalid_expression(
+                    "each directive requires '<binding> in <iterable>' — missing 'in' keyword",
+                    line,
+                    column,
+                    template_path,
+                ));
+            }
+        };
 
     let binding_src: String = body[..in_match.0]
         .iter()
@@ -1503,7 +1523,9 @@ fn parse_component_tag(
     }
     let (name_part, props_part) = match split {
         Some((name_end, props_start)) => (&rest[..name_end], Some(&rest[props_start..])),
-        None => match find_top_level_comma(rest) {
+        None => match find_top_level_comma(rest)
+            .map_err(|_| fail_too_deep(line, column, template_path))?
+        {
             Some(comma) => (&rest[..comma], Some(&rest[comma + 1..])),
             None => (rest, None),
         },
@@ -1520,7 +1542,9 @@ fn parse_component_tag(
     let props_source = match props_part {
         None => None,
         Some(props) => {
-            if let Some(extra) = find_top_level_comma(props) {
+            if let Some(extra) = find_top_level_comma(props)
+                .map_err(|_| fail_too_deep(line, column, template_path))?
+            {
                 let trailing: String = props[extra..].iter().collect::<String>();
                 return Err(fail_invalid_expression(
                     format!(
@@ -2433,16 +2457,18 @@ pub fn parse_block_tag(
                 template_path,
             ));
         }
-        let (op_start, op_end) = find_assignment_operator(&arg).ok_or_else(|| {
-            fail_invalid_expression(
-                format!(
+        let (op_start, op_end) = find_assignment_operator(&arg)
+            .map_err(|_| fail_too_deep(line, column, template_path))?
+            .ok_or_else(|| {
+                fail_invalid_expression(
+                    format!(
 					"assign directive requires an assignment, got '{arg_trimmed}' — use `@assign(x = value)`"
 				),
-                line,
-                column,
-                template_path,
-            )
-        })?;
+                    line,
+                    column,
+                    template_path,
+                )
+            })?;
         let target: String = arg[..op_start]
             .iter()
             .collect::<String>()
@@ -2656,6 +2682,28 @@ mod tests {
 
     fn opts() -> ParseBlockTagOptions {
         ParseBlockTagOptions::default()
+    }
+
+    #[test]
+    fn every_argument_scan_refuses_template_literals_nested_past_the_cap() {
+        // The tag parsers scan their argument again; called directly (without
+        // the lexer in front) they must refuse the nesting too.
+        let deep = format!(
+            "{}1{}",
+            "`${".repeat(crate::js_scan::MAX_TEMPLATE_DEPTH + 1),
+            "}`".repeat(crate::js_scan::MAX_TEMPLATE_DEPTH + 1)
+        );
+        for raw in [
+            format!("each ({deep}) in xs"),
+            format!("assign x[{deep}] = 1"),
+            format!("includeIf {deep}, 'p'"),
+            format!("component 'c', {deep}"),
+            format!("let {{ a = {deep} }} = o"),
+        ] {
+            let e = parse_block_tag(&raw, 1, 1, &opts(), 0).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidExpression, "{}", &raw[..12]);
+            assert!(e.message.contains("maximum depth"), "got: {}", e.message);
+        }
     }
 
     #[test]
@@ -2901,15 +2949,15 @@ mod tests {
         // the template literal.
         assert_eq!(
             find_top_level_in(&"`${\"`\"} in b` in xs".chars().collect::<Vec<_>>()),
-            Some((13, 17))
+            Ok(Some((13, 17)))
         );
         assert_eq!(
             find_top_level_in(&"`a in b` in xs".chars().collect::<Vec<_>>()),
-            Some((8, 12))
+            Ok(Some((8, 12)))
         );
         assert_eq!(
             find_top_level_in(&"x inner".chars().collect::<Vec<_>>()),
-            None
+            Ok(None)
         );
     }
 

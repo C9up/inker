@@ -23,7 +23,7 @@
 //! byte-parity suite uses ASCII fixtures.
 
 use crate::error::{ErrorCode, InkerError};
-use crate::js_scan::{skip_js_token, token_prev_sig};
+use crate::js_scan::{skip_js_token, token_prev_sig, TooDeep};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -508,7 +508,22 @@ pub fn lex(source: &str, options: &LexOptions) -> Result<Vec<Token>, InkerError>
                     let mut prev_sig = '(';
                     let mut closed = false;
                     while i < len {
-                        if let Some(next) = skip_js_token(&chars, i, prev_sig) {
+                        let token = skip_js_token(&chars, i, prev_sig).map_err(|_| {
+                            make_err(
+                                ErrorCode::InvalidExpression,
+                                format!(
+                                    "'@{}(' at line {}, column {}: {}",
+                                    word,
+                                    open_line,
+                                    open_column,
+                                    TooDeep::message()
+                                ),
+                                open_line,
+                                open_column,
+                                options,
+                            )
+                        })?;
+                        if let Some(next) = token {
                             prev_sig = token_prev_sig(&chars, i, prev_sig);
                             let next = next.min(len);
                             while i < next {

@@ -1813,6 +1813,28 @@ mod tests {
         assert_eq!(unclosed.code, ErrorCode::ParseError);
     }
 
+    fn nested_templates(depth: usize) -> String {
+        format!("{}1{}", "`${".repeat(depth), "}`".repeat(depth))
+    }
+
+    #[test]
+    fn a_tag_argument_nesting_template_literals_to_the_cap_parses() {
+        let src = format!("@if({})x@endif", nested_templates(MAX_BLOCK_DEPTH));
+        assert!(parse_str(&src).is_ok());
+    }
+
+    #[test]
+    fn a_tag_argument_nesting_template_literals_past_the_cap_is_refused() {
+        // 200,000 levels used to overflow the native stack in the lexer's
+        // argument scan (SIGSEGV), before any parser bound ran.
+        for depth in [MAX_BLOCK_DEPTH + 1, 200_000] {
+            let src = format!("@if({})x@endif", nested_templates(depth));
+            let e = lex(&src, &LexOptions::default()).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidExpression);
+            assert!(e.message.contains("maximum depth"), "got: {}", e.message);
+        }
+    }
+
     #[test]
     fn elseif_chains_count_toward_the_depth_cap() {
         // Each `@elseif` folds into one more nested `If` node.
