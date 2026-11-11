@@ -546,6 +546,24 @@ describe("buildCanonicalHelpers", () => {
 		expect(result).toBe("/users.show/7?signature=stub");
 	});
 
+	it("route() and signedRoute() are the template names of the same builders", () => {
+		const { als, helpers } = setup();
+		const route = helpers.get("route");
+		const signedRoute = helpers.get("signedRoute");
+		expect(runInCtx(als, ctx(), () => route?.("posts.show", { id: 3 }))).toBe(
+			"/posts.show/3",
+		);
+		expect(
+			runInCtx(als, ctx(), () => signedRoute?.("posts.show", { id: 3 })),
+		).toBe("/posts.show/3?signature=stub");
+		expect(() => runInCtx(als, ctx(), () => route?.(1))).toThrow(
+			/route\(\) requires a string route name/,
+		);
+		expect(() => runInCtx(als, ctx(), () => signedRoute?.(1))).toThrow(
+			/signedRoute\(\) requires a string route name/,
+		);
+	});
+
 	it("url() propagates router throws (unknown name)", () => {
 		const { als, helpers } = setup({
 			routerMakeUrl: (name) => {

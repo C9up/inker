@@ -693,8 +693,11 @@ export function buildCanonicalHelpers(
 		return typeof nonce === "string" ? nonce : "";
 	});
 
-	// AdonisJS v7 URL builder parity: `urlFor` (v7; `makeUrl` is deprecated) and
-	// `signedUrlFor` (HMAC-signed). `url` is kept as a legacy alias of `urlFor`.
+	// The URL builders. `urlFor` / `signedUrlFor` are the router's own method
+	// names; `route` / `signedRoute` are the names the framework's template
+	// provider has always given the same two builders, so a migrated template
+	// (`{{ route('posts.show', { id }) }}`) keeps working. `url` is a legacy
+	// alias of `urlFor`.
 	const buildUrl = (label: string, args: readonly unknown[]): string => {
 		const [name, params] = args;
 		if (typeof name !== "string") {
@@ -704,22 +707,26 @@ export function buildCanonicalHelpers(
 		}
 		return router.urlFor(name, coerceUrlParams(params));
 	};
-	helpers.set("url", (...args: readonly unknown[]): string =>
-		buildUrl("url", args),
-	);
-	helpers.set("urlFor", (...args: readonly unknown[]): string =>
-		buildUrl("urlFor", args),
-	);
-	helpers.set("signedUrlFor", (...args: readonly unknown[]): string => {
+	const buildSignedUrl = (label: string, args: readonly unknown[]): string => {
 		const [name, params, options] = args;
 		if (typeof name !== "string") {
 			throw new Error(
-				`[inker] signedUrlFor() requires a string route name; got ${typeof name}.`,
+				`[inker] ${label}() requires a string route name; got ${typeof name}.`,
 			);
 		}
 		const opts = isPlainRecord(options) ? options : undefined;
 		return router.makeSignedUrl(name, coerceUrlParams(params), opts);
-	});
+	};
+	for (const label of ["url", "urlFor", "route"]) {
+		helpers.set(label, (...args: readonly unknown[]): string =>
+			buildUrl(label, args),
+		);
+	}
+	for (const label of ["signedUrlFor", "signedRoute"]) {
+		helpers.set(label, (...args: readonly unknown[]): string =>
+			buildSignedUrl(label, args),
+		);
+	}
 
 	// ---- the globals Adonis's edge provider shares, so a migrated template
 	// keeps working unchanged (`{{ config('app.name') }}`, `@each(r in routes())`).
