@@ -11,6 +11,7 @@ import {
 } from "./identifierGuards.js";
 import {
 	getNative,
+	type NapiComposeInfo,
 	type NapiInkerAst,
 	type NapiNodeRef,
 	napiThrowToInker,
@@ -83,18 +84,36 @@ const WINDOWS_RESERVED: ReadonlySet<string> = new Set([
 	"lpt9",
 ]);
 
+/**
+ * A parsed template as the composer and the walker use it: its composition
+ * metadata and its node list, both read off the native handle once, when the
+ * source is parsed. The cache holds this, not the handle, so a cached template
+ * costs no native call and no JSON round trip per render.
+ */
+interface ParsedTemplate {
+	readonly info: NapiComposeInfo;
+	readonly nodes: readonly InkerNodeJson[];
+}
+
+function parsedTemplate(handle: NapiInkerAst): ParsedTemplate {
+	const parsed: { nodes: readonly InkerNodeJson[] } = JSON.parse(
+		getNative().astToJson(handle),
+	);
+	return { info: handle.composeInfo, nodes: parsed.nodes };
+}
+
 interface CacheEntry {
-	ast: NapiInkerAst;
+	ast: ParsedTemplate;
 	mtimeMs: number;
 }
 
 interface ComposedTemplate {
-	bodyAst: NapiInkerAst;
-	layoutAst?: NapiInkerAst;
+	bodyAst: ParsedTemplate;
+	layoutAst?: ParsedTemplate;
 	layoutName?: string;
 	layoutAbsPath?: string;
-	partialAsts: Map<string, NapiInkerAst>;
-	componentAsts: Map<string, NapiInkerAst>;
+	partialAsts: Map<string, ParsedTemplate>;
+	componentAsts: Map<string, ParsedTemplate>;
 	/** Referenced partials whose file does not exist, keyed like `partialAsts`. */
 	missingPartials: Map<string, InkerRenderError>;
 	/** Referenced components whose file does not exist. */
@@ -103,8 +122,8 @@ interface ComposedTemplate {
 
 /** What the static preload collects: every reachable template, loaded once. */
 interface PreloadClosure {
-	readonly partialAsts: Map<string, NapiInkerAst>;
-	readonly componentAsts: Map<string, NapiInkerAst>;
+	readonly partialAsts: Map<string, ParsedTemplate>;
+	readonly componentAsts: Map<string, ParsedTemplate>;
 	readonly missingPartials: Map<string, InkerRenderError>;
 	readonly missingComponents: Map<string, InkerRenderError>;
 }
@@ -822,7 +841,7 @@ interface LoadRequest {
 // The composition only ever asks for loads, but it is delegated to from the
 // render stream, so it must accept that stream's answer type; `askedForAst`
 // narrows at each site.
-type ComposeStep<T> = Generator<LoadRequest, T, NapiInkerAst | string>;
+type ComposeStep<T> = Generator<LoadRequest, T, ParsedTemplate | string>;
 
 /** One sub-render the composition needs: a node list plus its scope. */
 interface RenderRequest {
@@ -842,10 +861,10 @@ type RenderSteps = Generator<
 	// load is answered with an AST, a sub-render with HTML. The union is
 	// narrowed at each `yield` site by `askedForAst` / `askedForHtml`, which
 	// also assert the driver answered the request it was given.
-	NapiInkerAst | string
+	ParsedTemplate | string
 >;
 
-function askedForAst(answer: NapiInkerAst | string): NapiInkerAst {
+function askedForAst(answer: ParsedTemplate | string): ParsedTemplate {
 	if (typeof answer === "string") {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_PATH",
@@ -855,7 +874,7 @@ function askedForAst(answer: NapiInkerAst | string): NapiInkerAst {
 	return answer;
 }
 
-function askedForHtml(answer: NapiInkerAst | string): string {
+function askedForHtml(answer: ParsedTemplate | string): string {
 	if (typeof answer !== "string") {
 		throw new InkerRenderError(
 			"E_INKER_INVALID_PATH",
@@ -950,7 +969,7 @@ export class Templates {
 		executed: boolean;
 	}[] = [];
 	readonly #cache: Map<string, CacheEntry> = new Map();
-	readonly #inflight: Map<string, Promise<NapiInkerAst>> = new Map();
+	readonly #inflight: Map<string, Promise<ParsedTemplate>> = new Map();
 	// T7: monotonic counter bumped by clearCache(). #loadAstUncached snapshots
 	// it before doing async I/O and refuses to write back to the cache if the
 	// generation moved during the load — prevents a pre-clear in-flight load
@@ -1375,7 +1394,7 @@ export class Templates {
 			}
 			// A failed load is handed back to the composition, which decides
 			// whether it is fatal (a missing partial is not, until it renders).
-			let ast: NapiInkerAst;
+			let ast: ParsedTemplate;
 			try {
 				ast = await this.#loadAst(
 					req.absPath,
@@ -1420,7 +1439,7 @@ export class Templates {
 				);
 				continue;
 			}
-			let ast: NapiInkerAst;
+			let ast: ParsedTemplate;
 			try {
 				ast = this.#loadAstSync(
 					req.absPath,
@@ -1465,19 +1484,18 @@ export class Templates {
 			new Set([absPath]),
 		);
 
-		// Node renderer (62-2 pivot): convert the loaded AST handles to JSON node
-		// lists and evaluate every expression in Node's own V8 with the helpers in
-		// scope (Edge model — no tape, no QuickJS, no FFI).
+		// The walker evaluates every expression in Node's own V8 with the helpers
+		// in scope, over the node lists parsed when each template was loaded.
 		const partials = new Map<string, readonly InkerNodeJson[]>();
-		for (const [key, handle] of composed.partialAsts) {
-			partials.set(key, this.#astNodes(handle));
+		for (const [key, parsed] of composed.partialAsts) {
+			partials.set(key, parsed.nodes);
 		}
 		const components = new Map<string, readonly InkerNodeJson[]>();
-		for (const [key, handle] of composed.componentAsts) {
-			components.set(key, this.#astNodes(handle));
+		for (const [key, parsed] of composed.componentAsts) {
+			components.set(key, parsed.nodes);
 		}
 
-		const childNodes = this.#astNodes(composed.bodyAst);
+		const childNodes = composed.bodyAst.nodes;
 		// ONE stack store for the whole composition: `@pushTo` in the body (or in
 		// a partial, or a component) must reach a `@stack` the layout renders
 		// last. Placeholders are substituted once everything has rendered.
@@ -1516,7 +1534,7 @@ export class Templates {
 			yield { nodes: childBody, state, ctx: baseCtx },
 		);
 
-		const layoutNodes = this.#astNodes(composed.layoutAst);
+		const layoutNodes = composed.layoutAst.nodes;
 		const { sections: layoutDefaults } = collectSections(layoutNodes);
 		// The layout's own nodes (its section defaults included) belong to the
 		// layout file, not to the page that named it.
@@ -1582,8 +1600,8 @@ export class Templates {
 			);
 			// Keyed the way the walker looks it up.
 			const key = templateFileKey(name);
-			const accept = (ast: NapiInkerAst): readonly InkerNodeJson[] => {
-				const info = ast.composeInfo;
+			const accept = (ast: ParsedTemplate): readonly InkerNodeJson[] => {
+				const info = ast.info;
 				if (info.hasLayout) {
 					throw new InkerRenderError(
 						"E_INKER_LAYOUT_IN_PARTIAL",
@@ -1599,7 +1617,7 @@ export class Templates {
 						{ templateName: validated, line: slot.line, column: slot.column },
 					);
 				}
-				const nodes = this.#astNodes(ast);
+				const nodes = ast.nodes;
 				(isComponent ? components : partials).set(key, nodes);
 				return nodes;
 			};
@@ -1609,12 +1627,24 @@ export class Templates {
 		};
 	}
 
-	/** Convert a parsed AST handle to its JSON node list (62-2 Node renderer). */
-	#astNodes(handle: NapiInkerAst): readonly InkerNodeJson[] {
-		const parsed: { nodes: readonly InkerNodeJson[] } = JSON.parse(
-			getNative().astToJson(handle),
+	/** Parse a source with this engine's helpers and tags. */
+	#parseHandle(source: string): NapiInkerAst {
+		return callNative(() =>
+			getNative().parseTemplate(
+				source,
+				this.#parseNames(),
+				[...this.#tags.keys()],
+				this.#blockTagNames(),
+				this.#componentTagsJson(),
+				this.#noNewLineTagNames(),
+			),
 		);
-		return parsed.nodes;
+	}
+
+	/** Parse a source into what the composer and the walker read. */
+	#parse(source: string): ParsedTemplate {
+		const handle = this.#parseHandle(source);
+		return callNative(() => parsedTemplate(handle));
 	}
 
 	renderString(
@@ -1639,22 +1669,12 @@ export class Templates {
 		const normalisedSource = source.includes("﻿")
 			? source.replace(/﻿/g, "")
 			: source;
-		const native = getNative();
 		// `raw` processors also apply to inline sources — the stage is about the
 		// source text, not about where it came from.
 		const processedSource = this.#applyRaw(normalisedSource);
-		const ast = callNative(() =>
-			native.parseTemplate(
-				processedSource,
-				this.#parseNames(),
-				[...this.#tags.keys()],
-				this.#blockTagNames(),
-				this.#componentTagsJson(),
-				this.#noNewLineTagNames(),
-			),
-		);
+		const ast = this.#parse(processedSource);
 
-		const info = ast.composeInfo;
+		const info = ast.info;
 		// The Rust parser separates a leading `@layout()` into `ast.layout`
 		// (not a body node), so `firstDiskNode` won't surface it — check
 		// `hasLayout` explicitly to preserve the renderString disk-required guard.
@@ -1699,7 +1719,7 @@ export class Templates {
 		return this.#applyOutput(
 			stacks.fillPlaceholders(
 				trimTopBottomNewLines(
-					renderNodeTree(this.#astNodes(ast), state, this.#renderHelpers(), {
+					renderNodeTree(ast.nodes, state, this.#renderHelpers(), {
 						tags: this.#tags,
 						stacks,
 						sharedState,
@@ -1954,16 +1974,7 @@ export class Templates {
 			? source.replace(/\ufeff/g, "")
 			: source;
 		try {
-			callNative(() =>
-				getNative().parseTemplate(
-					this.#applyRaw(normalised),
-					this.#parseNames(),
-					[...this.#tags.keys()],
-					this.#blockTagNames(),
-					this.#componentTagsJson(),
-					this.#noNewLineTagNames(),
-				),
-			);
+			this.#parseHandle(this.#applyRaw(normalised));
 		} catch (err) {
 			// A string has no path of its own, so the caller's label is the only
 			// thing that tells a reader WHICH template failed.
@@ -2049,7 +2060,7 @@ export class Templates {
 		validatedName: string,
 		root: string,
 		memoryKey: string,
-	): Promise<NapiInkerAst> {
+	): Promise<ParsedTemplate> {
 		// Key the cache/inflight maps by the resolving disk's root AND the
 		// absolute path, not the path alone. Two disks with overlapping roots
 		// can resolve the SAME absPath; keying by path alone would let disk A's
@@ -2062,16 +2073,7 @@ export class Templates {
 		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) {
 			const source = this.#applyRaw(inMemory);
-			return callNative(() =>
-				getNative().parseTemplate(
-					source,
-					this.#parseNames(),
-					[...this.#tags.keys()],
-					this.#blockTagNames(),
-					this.#componentTagsJson(),
-					this.#noNewLineTagNames(),
-				),
-			);
+			return this.#parse(source);
 		}
 
 		const cacheKey = `${root}\u0000${absPath}`;
@@ -2091,7 +2093,7 @@ export class Templates {
 		absPath: string,
 		validatedName: string,
 		root: string,
-	): Promise<NapiInkerAst> {
+	): Promise<ParsedTemplate> {
 		// T7: snapshot the cache generation. If clearCache() runs while this
 		// load is in flight, the snapshot will diverge from #cacheGeneration
 		// at write-back time, and we'll skip the cache.set() to avoid
@@ -2176,7 +2178,7 @@ export class Templates {
 		cacheKey: string,
 		currentMtime: number,
 		loadGeneration: number,
-	): NapiInkerAst {
+	): ParsedTemplate {
 		// T4: strip leading UTF-8 BOM if present. Windows editors (Notepad)
 		// commonly insert it; lex sees it as a Text token, defeating the
 		// "first non-stripped node must be Layout" composition rule and
@@ -2186,16 +2188,7 @@ export class Templates {
 		// `raw` processors see the file's source before it is parsed.
 		source = this.#applyRaw(source, absPath);
 
-		const ast = callNative(() =>
-			getNative().parseTemplate(
-				source,
-				this.#parseNames(),
-				[...this.#tags.keys()],
-				this.#blockTagNames(),
-				this.#componentTagsJson(),
-				this.#noNewLineTagNames(),
-			),
-		);
+		const ast = this.#parse(source);
 
 		// T7: only populate the cache if the generation is unchanged. If
 		// clearCache() was called during the await chain above, the new
@@ -2219,7 +2212,7 @@ export class Templates {
 		absPath: string,
 		validatedName: string,
 		root: string,
-	): NapiInkerAst {
+	): ParsedTemplate {
 		const loadGeneration = this.#cacheGeneration;
 		const cacheKey = `${root}\u0000${absPath}`;
 		const cached = this.#cache.get(cacheKey);
@@ -2266,26 +2259,17 @@ export class Templates {
 		validatedName: string,
 		root: string,
 		memoryKey: string,
-	): NapiInkerAst {
+	): ParsedTemplate {
 		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) {
 			const source = this.#applyRaw(inMemory);
-			return callNative(() =>
-				getNative().parseTemplate(
-					source,
-					this.#parseNames(),
-					[...this.#tags.keys()],
-					this.#blockTagNames(),
-					this.#componentTagsJson(),
-					this.#noNewLineTagNames(),
-				),
-			);
+			return this.#parse(source);
 		}
 		return this.#loadAstUncachedSync(absPath, validatedName, root);
 	}
 
 	*#compose(
-		entryAst: NapiInkerAst,
+		entryAst: ParsedTemplate,
 		entryName: string,
 		entryAbsPath: string,
 		includeStack: Set<string>,
@@ -2303,7 +2287,7 @@ export class Templates {
 		// rejected at parse time (parseTemplate throws E_INKER_DUPLICATE_LAYOUT /
 		// E_INKER_INVALID_LAYOUT_POSITION), so no body-side dup-layout check is
 		// needed here.
-		const entryInfo = entryAst.composeInfo;
+		const entryInfo = entryAst.info;
 		const hasLayout = entryInfo.hasLayout;
 		const bodyAst = entryAst;
 
@@ -2370,7 +2354,7 @@ export class Templates {
 		}
 
 		includeStack.add(layoutAbsPath);
-		let layoutAst: NapiInkerAst;
+		let layoutAst: ParsedTemplate;
 		try {
 			layoutAst = askedForAst(
 				yield loadRequest(
@@ -2386,7 +2370,7 @@ export class Templates {
 		}
 
 		try {
-			const layoutInfo = layoutAst.composeInfo;
+			const layoutInfo = layoutAst.info;
 
 			// Nested-layout rejection.
 			if (layoutInfo.hasLayout) {
@@ -2472,7 +2456,7 @@ export class Templates {
 				memoryKey: partialMemoryKey,
 			} = this.#resolveTemplateFile(node.name);
 
-			let partialAst: NapiInkerAst;
+			let partialAst: ParsedTemplate;
 			try {
 				partialAst = askedForAst(
 					yield loadRequest(
@@ -2488,7 +2472,7 @@ export class Templates {
 				continue;
 			}
 
-			const info = partialAst.composeInfo;
+			const info = partialAst.info;
 			// Layout-in-partial rejection.
 			if (info.hasLayout) {
 				throw new InkerRenderError(
@@ -2548,7 +2532,7 @@ export class Templates {
 				memoryKey: componentMemoryKey,
 			} = this.#resolveTemplateFile(node.name, "components/");
 
-			let componentAst: NapiInkerAst;
+			let componentAst: ParsedTemplate;
 			try {
 				componentAst = askedForAst(
 					yield loadRequest(
@@ -2564,7 +2548,7 @@ export class Templates {
 				continue;
 			}
 
-			const info = componentAst.composeInfo;
+			const info = componentAst.info;
 			// Layout-in-component rejection (reuse E_INKER_LAYOUT_IN_PARTIAL
 			// per AC5: same axis "layout in non-entry file").
 			if (info.hasLayout) {
