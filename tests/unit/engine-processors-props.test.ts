@@ -112,6 +112,27 @@ describe("inker > Edge-shaped render aliases", () => {
 		const t = new Templates({ root, cacheMode: "never" });
 		await expect(t.renderRaw("{{ name }}", { name: "x" })).resolves.toBe("x");
 	});
+
+	it("renderRaw names the caller's template in its errors and $filename", async () => {
+		const t = new Templates({ root, cacheMode: "never" });
+		await expect(
+			t.renderRaw("{{ $filename }}", {}, "emails/welcome"),
+		).resolves.toBe("emails/welcome");
+		for (const source of ["{{ a.b.c }}", "@if(", "@newError('boom')"]) {
+			const failures = [
+				t.renderRaw(source, {}, "emails/welcome"),
+				Promise.resolve().then(() =>
+					t.renderRawSync(source, {}, "emails/welcome"),
+				),
+				t.createRenderer().renderRaw(source, {}, "emails/welcome"),
+			];
+			for (const failure of failures) {
+				await expect(failure).rejects.toMatchObject({
+					context: { templateName: "emails/welcome" },
+				});
+			}
+		}
+	});
 });
 
 describe("inker > registerTemplate", () => {

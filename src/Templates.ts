@@ -1198,7 +1198,8 @@ export class Templates {
 	 * `loader.listComponents`). A `components/button.inker` becomes `@button`,
 	 * `components/form/input.inker` becomes `@form.input`, and an `index`
 	 * segment drops out so `components/form/index.inker` is `@form`. Names are
-	 * camel-cased, and a non-default disk prefixes its own name.
+	 * camel-cased, and a non-default disk prefixes its own name. A template
+	 * registered from memory under `components/` counts like a file.
 	 */
 	listComponents(): {
 		diskName: string;
@@ -1219,18 +1220,32 @@ export class Templates {
 		root: string,
 	): { componentName: string; tagName: string }[] {
 		const dir = path.join(root, "components");
-		let files: string[];
+		// Relative paths under `components/`, without the extension. A template
+		// registered from memory under `components/` is a component too, and
+		// wins over a file of the same name exactly as it does when rendered.
+		// NAMED DEVIATION: Edge makes EVERY pre-registered template a component
+		// tag, named after its full key; inker's `@component()` resolves under
+		// `components/`, so only a registered `components/…` template is one a
+		// tag can reach, and it gets the same tag a file there would.
+		const rels = new Set<string>();
+		const memoryPrefix = `${diskName}::components/`;
+		for (const key of this.#inMemory.keys()) {
+			if (key.startsWith(memoryPrefix))
+				rels.add(key.slice(memoryPrefix.length));
+		}
 		try {
-			files = fs
-				.readdirSync(dir, { recursive: true, encoding: "utf8" })
-				.filter((f) => f.endsWith(TEMPLATE_EXT));
+			for (const file of fs.readdirSync(dir, {
+				recursive: true,
+				encoding: "utf8",
+			})) {
+				if (!file.endsWith(TEMPLATE_EXT)) continue;
+				rels.add(file.slice(0, -TEMPLATE_EXT.length).split(path.sep).join("/"));
+			}
 		} catch {
 			// No components directory on this disk — not an error.
-			return [];
 		}
 		const out: { componentName: string; tagName: string }[] = [];
-		for (const file of files) {
-			const rel = file.slice(0, -TEMPLATE_EXT.length).split(path.sep).join("/");
+		for (const rel of rels) {
 			const segments = rel.split("/");
 			const tag = segments
 				// A trailing `index` names its directory: `form/index` → `form`.
@@ -1658,6 +1673,23 @@ export class Templates {
 		source: string,
 		data: Readonly<Record<string, unknown>>,
 		shared: Readonly<Record<string, unknown>>,
+		templatePath?: string,
+	): string {
+		if (templatePath === undefined) {
+			return this.#renderSource(source, data, shared);
+		}
+		try {
+			return this.#renderSource(source, data, shared, templatePath);
+		} catch (err) {
+			throw labelledError(err, templatePath);
+		}
+	}
+
+	#renderSource(
+		source: string,
+		data: Readonly<Record<string, unknown>>,
+		shared: Readonly<Record<string, unknown>>,
+		templatePath?: string,
 	): string {
 		this.#executePlugins();
 		// T4 + P15: strip ALL U+FEFF (BOM) characters, not just a leading one.
@@ -1723,6 +1755,7 @@ export class Templates {
 						tags: this.#tags,
 						stacks,
 						sharedState,
+						templateName: templatePath,
 					}),
 				),
 			),
@@ -1924,12 +1957,14 @@ export class Templates {
 		renderString(
 			source: string,
 			data: Readonly<Record<string, unknown>>,
+			templatePath?: string,
 		): string;
 	} {
 		return {
 			render: (name, data) => this.#render(name, data, shared),
 			renderSync: (name, data) => this.#renderSync(name, data, shared),
-			renderString: (source, data) => this.#renderString(source, data, shared),
+			renderString: (source, data, templatePath) =>
+				this.#renderString(source, data, shared, templatePath),
 		};
 	}
 
@@ -1976,16 +2011,7 @@ export class Templates {
 		try {
 			this.#parseHandle(this.#applyRaw(normalised));
 		} catch (err) {
-			// A string has no path of its own, so the caller's label is the only
-			// thing that tells a reader WHICH template failed.
-			if (templateName === undefined || !(err instanceof InkerRenderError))
-				throw err;
-			throw new InkerRenderError(
-				err.code,
-				err.message,
-				{ ...err.context, templateName },
-				{ cause: err },
-			);
+			throw templateName === undefined ? err : labelledError(err, templateName);
 		}
 	}
 
@@ -1996,20 +2022,23 @@ export class Templates {
 	renderRawSync(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
+		templatePath?: string,
 	): string {
-		return this.renderString(source, data);
+		return this.#renderString(source, data, NO_SHARED_STATE, templatePath);
 	}
 
 	/**
 	 * Render a template string, asynchronously (Edge `renderRaw`). Inker parses
 	 * and renders synchronously, so this resolves immediately — it exists so code
 	 * written against Edge's async signature ports without a rewrite.
+	 * `templatePath` names the source in its errors and in `$filename`.
 	 */
 	async renderRaw(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
+		templatePath?: string,
 	): Promise<string> {
-		return this.renderString(source, data);
+		return this.#renderString(source, data, NO_SHARED_STATE, templatePath);
 	}
 
 	/**
@@ -2046,12 +2075,16 @@ export class Templates {
 			);
 		}
 		this.#inMemory.set(key, contents.template);
+		// A `components/` template is a component tag too: rescan.
+		this.#componentTags = undefined;
 		this.clearCache();
 	}
 
 	/** Drop a template registered from memory (Edge `removeTemplate`). */
 	removeTemplate(name: string): void {
-		if (this.#inMemory.delete(memoryKey(name))) this.clearCache();
+		if (!this.#inMemory.delete(memoryKey(name))) return;
+		this.#componentTags = undefined;
+		this.clearCache();
 	}
 
 	clearCache(): void {
@@ -2611,6 +2644,22 @@ export default Templates;
  * then the data passed to the render call. The merge happens here, so the
  * engine needs no notion of who is rendering.
  */
+/**
+ * Name the template an error came from when the error does not already: a
+ * source string has no path of its own, so the caller's label is the only
+ * thing that tells a reader WHICH template failed.
+ */
+function labelledError(err: unknown, templateName: string): unknown {
+	if (!(err instanceof InkerRenderError)) return err;
+	if (err.context.templateName !== undefined) return err;
+	return new InkerRenderError(
+		err.code,
+		err.message,
+		{ ...err.context, templateName },
+		{ cause: err },
+	);
+}
+
 /** An object literal's shape: plain prototype, or none. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null) return false;
@@ -2720,20 +2769,29 @@ export class TemplateRenderer {
 		);
 	}
 
-	/** Render a template string (Edge `renderRawSync`). Alias of `renderString`. */
+	/**
+	 * Render a template string (Edge `renderRawSync`). `templatePath` names the
+	 * source in its errors and in `$filename`.
+	 */
 	renderRawSync(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
+		templatePath?: string,
 	): string {
-		return this.renderString(source, data);
+		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
+			source,
+			data,
+			templatePath,
+		);
 	}
 
 	/** Render a template string, asynchronously (Edge `renderRaw`). */
 	async renderRaw(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
+		templatePath?: string,
 	): Promise<string> {
-		return this.renderString(source, data);
+		return this.renderRawSync(source, data, templatePath);
 	}
 
 	/**

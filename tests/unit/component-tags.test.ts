@@ -133,6 +133,27 @@ describe("inker > components as tags", () => {
 		]);
 	});
 
+	it("exposes a template registered under components/ as a tag", async () => {
+		const t = withTemplates({ "components/card": "<i>file</i>" });
+		t.registerTemplate("components/button", {
+			template: "<b>{{ text }}</b>",
+		});
+		t.registerTemplate("components/card", { template: "<i>memory</i>" });
+		t.registerTemplate("admin::components/panel", { template: "p" });
+		t.registerTemplate("outside", { template: "not a component" });
+		t.registerTemplate("page", {
+			template: "@!button({ text: 'x' })@!card()",
+		});
+		expect(await t.render("page")).toBe("<b>x</b><i>memory</i>");
+		const { components } = defined(t.listComponents()[0]);
+		expect(components.map((c) => c.tagName).sort()).toEqual(["button", "card"]);
+		// Removing it takes the tag away again.
+		t.removeTemplate("components/button");
+		t.removeTemplate("page");
+		t.registerTemplate("page", { template: "@!button({ text: 'x' })" });
+		expect(await t.render("page")).toBe("@!button({ text: 'x' })");
+	});
+
 	it("reports no components when the directory is absent", () => {
 		const t = withTemplates({ page: "hi" });
 		expect(t.listComponents()).toEqual([
