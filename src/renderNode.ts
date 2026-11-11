@@ -261,7 +261,8 @@ export interface InkerTagParser {
  * buffer. INKER DEVIATION (named): Edge runs `compile` ONCE at template
  * compilation (it emits JS); inker parses in Rust and renders by walking the
  * JSON AST, so `compile` runs at RENDER time — same authoring model, no compile
- * phase to imitate. Only inline tags (`block: false`) are supported for now.
+ * phase to imitate. A `block: true` tag takes a body closed by `@end<tagName>`
+ * (or is self-closed as `@!<tagName>`) and reads it through `token.renderBody()`.
  */
 export interface InkerTag {
 	readonly tagName: string;
