@@ -10,7 +10,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetInkerProviderFlags } from "../../src/InkerProvider.js";
 import { InkerRenderError } from "../../src/InkerRenderError.js";
-import { asTyped } from "../__helpers__/bypass-type-check.js";
 import {
 	type BuiltApp,
 	buildMinimalReamApp,
@@ -91,23 +90,13 @@ describe("inker provider — end-to-end with Ream host", () => {
 		);
 	});
 
-	it("csrfField() missing token throws E_INKER_HELPER_THROW with the Shield-hint cause", async () => {
+	it("csrfField() without a token renders nothing, so templates need no guard", async () => {
 		const app = await setupApp();
 		const ctx = app.makeCtx(); // empty store
 
-		let caught: unknown;
-		try {
-			await app.inker.renderToString(ctx, "csrf-only", {});
-		} catch (err) {
-			caught = err;
-		}
+		const html = await app.inker.renderToString(ctx, "csrf-only", {});
 
-		expect(caught).toBeInstanceOf(InkerRenderError);
-		const inkerErr = asTyped<InkerRenderError>(caught);
-		expect(inkerErr.code).toBe("E_INKER_HELPER_THROW");
-		expect(asTyped<Error>(inkerErr.cause).message).toMatch(
-			/blackhole middleware with csrf enabled/,
-		);
+		expect(html.trim()).toBe("");
 	});
 
 	it("url() interpolates :id from params", async () => {
@@ -123,7 +112,7 @@ describe("inker provider — end-to-end with Ream host", () => {
 		expect(out.trim()).toBe("/users/42");
 	});
 
-	it("url() unknown route surfaces as E_INKER_HELPER_THROW", async () => {
+	it("url() unknown route surfaces as a typed error carrying the router's", async () => {
 		const app = await setupApp();
 		const ctx = app.makeCtx();
 
@@ -136,11 +125,11 @@ describe("inker provider — end-to-end with Ream host", () => {
 		} catch (err) {
 			caught = err;
 		}
-		const inkerErr = asTyped<InkerRenderError>(caught);
-		expect(inkerErr.code).toBe("E_INKER_HELPER_THROW");
-		expect(asTyped<Error>(inkerErr.cause).message).toMatch(
-			/Route 'no\.such\.route' not found/,
-		);
+		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toMatchObject({
+			code: "E_INKER_INVALID_EXPRESSION",
+			cause: { message: expect.stringMatching(/no\.such\.route/) },
+		});
 	});
 
 	it("asset() returns the manifest hit from config injection", async () => {

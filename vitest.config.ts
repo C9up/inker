@@ -17,9 +17,6 @@ export default defineConfig({
 	test: {
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
-		// ream-provider.test.ts builds a real @c9up/ream + @c9up/rosetta app — a
-		// monorepo-level integration test that can't run in the standalone repo.
-		// The agnostic behaviour is covered by standalone-smoke.test.ts.
 			// `src/vendor/**` is generated from scripts/vendor/ and identical in every
 			// package that carries it, so measuring it here counts the same lines N
 			// times and holds this package to a floor for code it cannot change. The
@@ -28,7 +25,6 @@ export default defineConfig({
 		exclude: [
 			"**/node_modules/**",
 			"**/dist/**",
-			"tests/integration/ream-provider.test.ts",
 			...win32PackagingSkips,
 		],
 		coverage: {
