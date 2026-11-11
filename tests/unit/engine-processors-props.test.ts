@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { InkerRenderError } from "../../src/InkerRenderError.js";
 import { Templates } from "../../src/Templates.js";
 
 let root: string;
@@ -147,6 +148,25 @@ describe("inker > registerTemplate", () => {
 		t.registerTemplate("page", { template: "from memory" });
 		t.removeTemplate("page");
 		expect(await t.render("page")).toBe("from disk");
+	});
+
+	it("refuses to override a registered template, until it is removed", async () => {
+		const t = new Templates({ root, cacheMode: "never" });
+		t.registerTemplate("components/button", { template: "A" });
+		let caught: unknown;
+		try {
+			t.registerTemplate("components/button", { template: "B" });
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toMatchObject({ code: "E_INKER_TEMPLATE_COLLISION" });
+		expect(await t.render("components/button")).toBe("A");
+		// The same name on another disk is another template.
+		t.registerTemplate("admin::components/button", { template: "C" });
+		t.removeTemplate("components/button");
+		t.registerTemplate("components/button", { template: "B" });
+		expect(await t.render("components/button")).toBe("B");
 	});
 
 	it("rejects a missing template body", () => {

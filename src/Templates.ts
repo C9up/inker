@@ -2016,6 +2016,10 @@ export class Templates {
 	 * Register a template from memory (Edge `registerTemplate`). It resolves
 	 * under the name given — including a `components/…` or layout name — and
 	 * takes precedence over a file of the same name.
+	 *
+	 * A name already registered is refused rather than replaced: two packages
+	 * shipping a template under the same name would otherwise render each
+	 * other's markup without a word. `removeTemplate` is the explicit replace.
 	 */
 	registerTemplate(name: string, contents: { template: string }): void {
 		if (typeof name !== "string" || name.length === 0) {
@@ -2034,7 +2038,14 @@ export class Templates {
 		// template must not be reachable under a name a file could never carry,
 		// or the two namespaces drift apart.
 		// Keyed with its disk, so `welcome` never answers `admin::welcome`.
-		this.#inMemory.set(memoryKey(name), contents.template);
+		const key = memoryKey(name);
+		if (this.#inMemory.has(key)) {
+			throw new InkerRenderError(
+				"E_INKER_TEMPLATE_COLLISION",
+				`Template "${name}" is already registered; refusing to override it. Call removeTemplate(${JSON.stringify(name)}) first to replace it.`,
+			);
+		}
+		this.#inMemory.set(key, contents.template);
 		this.clearCache();
 	}
 

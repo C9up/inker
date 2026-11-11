@@ -59,8 +59,9 @@ export function createTestTemplates(
 	const root = fs.realpathSync.native(
 		fs.mkdtempSync(path.join(os.tmpdir(), "inker-test-")),
 	);
-	// `never` is the deterministic mode: a test that re-registers a template
-	// must see the new source, and there is no file mtime to key off.
+	// `never` is the deterministic mode: a test that replaces a template
+	// (`removeTemplate`, then `registerTemplate`) must see the new source, and
+	// there is no file mtime to key off.
 	const engine = new Templates({
 		root,
 		cacheMode: "never",

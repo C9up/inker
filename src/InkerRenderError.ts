@@ -15,6 +15,8 @@ export type InkerErrorCode =
 	| "E_INKER_UNKNOWN_SLOT"
 	| "E_INKER_DISK_REQUIRED"
 	| "E_INKER_DISK_COLLISION"
+	/** `registerTemplate` was given a name another registration already holds. */
+	| "E_INKER_TEMPLATE_COLLISION"
 	| "E_INKER_UNCLOSED_BLOCK"
 	| "E_INKER_UNMATCHED_BLOCK_END"
 	| "E_INKER_MISMATCHED_BLOCK_END"
