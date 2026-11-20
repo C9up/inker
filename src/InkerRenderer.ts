@@ -9,6 +9,9 @@ import type { Templates } from "./Templates.js";
  * without `@c9up/ream` installed. Ream's HttpContext structurally satisfies
  * this shape — verified by the integration test's compile step.
  */
+/** blackhole's per-request flag: this response's HTML is the application's own. */
+const TRUSTED_HTML = "trustedHtml";
+
 export interface InkerHttpContext {
 	readonly request: object;
 	readonly response: {
@@ -37,6 +40,10 @@ export class InkerRenderer {
 			this.#templates.render(name, data),
 		);
 		ctx.response.type("text/html; charset=utf-8");
+		// The application's own page: blackhole's `xss` pass, which cleans every
+		// text/html body it is not told about, leaves it alone. A page's
+		// interpolations are escaped by the engine, its scripts are the app's.
+		ctx.store.set(TRUSTED_HTML, true);
 		ctx.response.send(html);
 	}
 

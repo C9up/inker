@@ -86,6 +86,30 @@ describe("InkerRenderer", () => {
 			expect(ctx.typeCalls).toEqual(["text/html; charset=utf-8"]);
 		});
 
+		it("marks the page as the application's own for blackhole's xss pass", async () => {
+			const renderer = new InkerRenderer(
+				makeStubTemplates(() => "<script>app()</script>"),
+				new AsyncLocalStorage<InkerHttpContext>(),
+			);
+			const ctx = makeCtx();
+
+			await renderer.render(ctx, "n", {});
+
+			expect(ctx.store.get("trustedHtml")).toBe(true);
+		});
+
+		it("leaves the flag alone when it only renders to a string", async () => {
+			const renderer = new InkerRenderer(
+				makeStubTemplates(() => "<p>fragment</p>"),
+				new AsyncLocalStorage<InkerHttpContext>(),
+			);
+			const ctx = makeCtx();
+
+			await renderer.renderToString(ctx, "n", {});
+
+			expect(ctx.store.has("trustedHtml")).toBe(false);
+		});
+
 		it("writes the rendered body via ctx.response.send", async () => {
 			const renderer = new InkerRenderer(
 				makeStubTemplates(() => "<h1>Hello</h1>"),
