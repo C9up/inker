@@ -240,9 +240,7 @@ fn make_cursor<'a>(
 fn position_at(cursor: &Cursor, offset: usize) -> (u32, u32) {
     let mut line = cursor.base_line;
     let mut column = cursor.base_column;
-    let end = offset.min(cursor.chars.len());
-    for i in 0..end {
-        let c = cursor.chars[i];
+    for &c in cursor.chars.iter().take(offset) {
         if c == '\n' {
             line += 1;
             column = 1;
