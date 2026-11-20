@@ -177,6 +177,24 @@ describe("Edge-core globals (62-7)", () => {
 		expect(render("{{ toMs('nonsense') }}")).toBe("");
 	});
 
+	it("toMs and toBytes keep accepting surrounding and inner whitespace", () => {
+		expect(render("{{ toBytes(v) }}", { v: " \t2 kb \n" })).toBe("2000");
+		expect(render("{{ toMs(v) }}", { v: "  3\tmin  " })).toBe("180000");
+		expect(render("{{ toBytes(v) }}", { v: " 42 " })).toBe("42");
+	});
+
+	it("toMs and toBytes reject a long whitespace run in linear time", () => {
+		// The pattern used to put two `\s*` side by side (the unit may be
+		// empty), so a run of n spaces before a bad character was split every
+		// possible way: 100k spaces took seconds per call.
+		const hostile = `1${" ".repeat(100_000)}!`;
+		for (const name of ["toBytes", "toMs"]) {
+			const started = performance.now();
+			expect(render(`{{ ${name}(v) }}`, { v: hostile })).toBe("");
+			expect(performance.now() - started).toBeLessThan(250);
+		}
+	});
+
 	it("html.escape never returns less escaped than `{{ }}` does", () => {
 		// `html.escape` returns a plain string, so `{{ }}` would escape it a second
 		// time — Edge behaves the same; the explicit escape pairs with `{{{ }}}`.

@@ -268,13 +268,28 @@ const BYTE_MULTIPLIERS: Readonly<Record<string, number>> = {
 
 /** Parse a human byte size (`"1kb"`, `"2.5 MB"`) back to a number. */
 function toBytes(value: unknown): number | null {
+	return parseAmount(value, BYTE_MULTIPLIERS);
+}
+
+/**
+ * `<number> <unit>` → number × the unit's multiplier (no unit: × 1), or null.
+ *
+ * Trimmed first, so ONE whitespace run separates number and unit: two `\s*`
+ * side by side around an optional unit let a long run of spaces before a bad
+ * character backtrack quadratically (seconds of CPU per call on a 100k run).
+ * Upstream's parsers allow a single ` *` there for the same reason.
+ */
+function parseAmount(
+	value: unknown,
+	multipliers: Readonly<Record<string, number>>,
+): number | null {
 	if (typeof value === "number") return value;
-	const match = /^\s*(-?[\d.]+)\s*([a-z]*)\s*$/i.exec(str(value));
+	const match = /^(-?[\d.]+)\s*([a-z]*)$/i.exec(str(value).trim());
 	if (match === null) return null;
 	const amount = Number(match[1]);
 	if (!Number.isFinite(amount)) return null;
 	const unit = (match[2] ?? "").toLowerCase();
-	const multiplier = unit === "" ? 1 : BYTE_MULTIPLIERS[unit];
+	const multiplier = unit === "" ? 1 : multipliers[unit];
 	return multiplier === undefined ? null : amount * multiplier;
 }
 
@@ -314,14 +329,7 @@ const MS_MULTIPLIERS: Readonly<Record<string, number>> = {
 
 /** Parse a human duration (`"1h"`, `"2.5 days"`) back to milliseconds. */
 function toMs(value: unknown): number | null {
-	if (typeof value === "number") return value;
-	const match = /^\s*(-?[\d.]+)\s*([a-z]*)\s*$/i.exec(str(value));
-	if (match === null) return null;
-	const amount = Number(match[1]);
-	if (!Number.isFinite(amount)) return null;
-	const unit = (match[2] ?? "").toLowerCase();
-	const multiplier = unit === "" ? 1 : MS_MULTIPLIERS[unit];
-	return multiplier === undefined ? null : amount * multiplier;
+	return parseAmount(value, MS_MULTIPLIERS);
 }
 
 function ordinal(value: unknown): string {

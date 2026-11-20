@@ -8,10 +8,12 @@
  *
  * `start()` resolves the host router from the container (Ream registers it as
  * `'router'`) + the `@c9up/rosetta` translator (declared as
- * `peerDependenciesMeta.optional`), builds the four canonical helper bodies
- * (`t` / `csrfField` / `url` / `asset`) closing over a single
- * `AsyncLocalStorage<InkerHttpContext>`, constructs the `Templates` instance +
- * `InkerRenderer`, and primes `services/main`'s Proxy via `setInker`.
+ * `peerDependenciesMeta.optional`; without it inker simply registers no `t`),
+ * builds the canonical helper bodies (`t` / `csrfField` / `url` / `asset` …)
+ * closing over a single `AsyncLocalStorage<InkerHttpContext>`, constructs the
+ * `Templates` instance + `InkerRenderer`, installs `ctx.view` (whose renders
+ * enter that same storage with the request), and primes `services/main`'s
+ * Proxy via `setInker`.
  *
  * Reading the router from the container — not importing
  * `@c9up/ream/services/router` — keeps inker runtime-agnostic: a non-Ream host
@@ -33,7 +35,12 @@ import { InkerRenderer } from "./InkerRenderer.js";
 import { plugins } from "./plugins.js";
 import { SafeString } from "./SafeString.js";
 import { clearInker, getInker, setInker } from "./services/main.js";
-import { type CacheMode, Templates } from "./Templates.js";
+import {
+	type CacheMode,
+	RENDER_SCOPE,
+	type TemplateRenderer,
+	Templates,
+} from "./Templates.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
 // ─── Duck-typed host interfaces ──────────────────────────────────
@@ -172,9 +179,12 @@ export default class InkerProvider {
 		// Phase 1 — resolve the host router + the Rosetta translator from the
 		// container. Reading both from the container — not importing
 		// `@c9up/ream/services/router` — keeps inker runtime-agnostic: a non-Ream
-		// host never registers `'router'`. Either peer missing → warn-once + skip
-		// (rendering stays disabled until both are present). The container yields
-		// the real Router instance; factory-thrown errors propagate.
+		// host never registers `'router'`, and without a router → warn-once +
+		// skip (rendering stays disabled until one is present). Rosetta is an
+		// optional peer: without it the engine still comes up, only inker's own
+		// `t` is not registered (as Edge renders with no i18n package
+		// installed). The container yields the real Router instance;
+		// factory-thrown errors propagate.
 		if (!this.app.container.has("router")) {
 			this.#warnPeerMissingOnce(
 				"No `'router'` registered in the container (host is not Ream, or the router is not wired). Inker rendering is disabled until a Ream router is present.",
@@ -183,12 +193,6 @@ export default class InkerProvider {
 		}
 		const router = await this.app.container.resolve<ReamRouter>("router");
 		const rosetta = await this.#resolveRosetta();
-		if (rosetta === undefined) {
-			this.#warnPeerMissingOnce(
-				"`@c9up/rosetta` is not registered in the container. Inker rendering is disabled until a Rosetta instance is present.",
-			);
-			return;
-		}
 
 		// Phase 2 — resolve config.
 		const config = this.app.config.get<InkerProviderConfig>("inker") ?? {};
@@ -239,7 +243,7 @@ export default class InkerProvider {
 		// controller's `ctx.view.render(...)` breaks. Resolved through the
 		// container rather than imported, so inker keeps no runtime dependency
 		// on the host framework.
-		await this.#installContextView(templates);
+		await this.#installContextView(templates, als);
 		const renderer = new InkerRenderer(templates, als);
 		this.#renderer = renderer;
 		setInker(renderer);
@@ -321,10 +325,18 @@ export default class InkerProvider {
 	 * `HttpContext.getter('view', …)`). A singleton getter, so the renderer —
 	 * and anything `share()`d onto it — lives for the whole request.
 	 *
+	 * Every render of that renderer runs inside `als` with the context as its
+	 * store — the frame `inker.render(ctx, …)` enters — so `t()`, `csrfField()`,
+	 * `csrfMeta()` and `cspNonce()` read this request's locale, token and nonce
+	 * through `ctx.view` too.
+	 *
 	 * Silently skipped when the host binds no such class: inker renders fine
 	 * outside an HTTP server, and a console app has no context to extend.
 	 */
-	async #installContextView(templates: Templates): Promise<void> {
+	async #installContextView(
+		templates: Templates,
+		als: AsyncLocalStorage<InkerHttpContext>,
+	): Promise<void> {
 		let ctxClass: unknown;
 		try {
 			ctxClass = await this.app.container.resolve<unknown>("HttpContext");
@@ -337,8 +349,14 @@ export default class InkerProvider {
 		getter.call(
 			ctxClass,
 			"view",
-			function (this: { request?: unknown }): unknown {
-				return templates.createRenderer().share({ request: this.request });
+			function (this: { request?: unknown }): TemplateRenderer {
+				const renderer = templates
+					.createRenderer()
+					.share({ request: this.request });
+				if (isInkerHttpContext(this)) {
+					renderer[RENDER_SCOPE]((render) => als.run(this, render));
+				}
+				return renderer;
 			},
 			true,
 		);
@@ -624,7 +642,9 @@ export function buildCanonicalGlobals(app?: unknown): Map<string, unknown> {
  */
 export function buildCanonicalHelpers(
 	als: AsyncLocalStorage<InkerHttpContext>,
-	rosetta: RosettaTranslator,
+	/** Absent when the optional `@c9up/rosetta` peer is not installed: inker
+	 * then registers no `t` (rosetta's own plugin supplies it when present). */
+	rosetta: RosettaTranslator | undefined,
 	router: ReamRouter,
 	assetManifest: Readonly<Record<string, string>> | undefined,
 	/** The config service behind the `config()` global. `app` is not here: it is
@@ -643,23 +663,30 @@ export function buildCanonicalHelpers(
 
 	const helpers = new Map<string, HelperFn>();
 
-	helpers.set("t", (...args: readonly unknown[]): string => {
-		const [key, params] = args;
-		if (typeof key !== "string") {
-			throw new Error(`[inker] t() requires a string key; got ${typeof key}.`);
-		}
-		const ctx = requireCtx("t");
-		// Rosetta's TranslationParams is narrower than HelperFn's
-		// `unknown[]` — the load-bearing narrow is the contract boundary;
-		// Rosetta validates value types and throws on unsupported shapes.
-		const rosettaParams =
-			params === undefined
-				? undefined
-				: loadBearingCast<
-						Record<string, string | number | boolean | Date | null | undefined>
-					>(params);
-		return rosetta.t(key, rosettaParams, { locale: ctx.locale });
-	});
+	if (rosetta !== undefined) {
+		helpers.set("t", (...args: readonly unknown[]): string => {
+			const [key, params] = args;
+			if (typeof key !== "string") {
+				throw new Error(
+					`[inker] t() requires a string key; got ${typeof key}.`,
+				);
+			}
+			const ctx = requireCtx("t");
+			// Rosetta's TranslationParams is narrower than HelperFn's
+			// `unknown[]` — the load-bearing narrow is the contract boundary;
+			// Rosetta validates value types and throws on unsupported shapes.
+			const rosettaParams =
+				params === undefined
+					? undefined
+					: loadBearingCast<
+							Record<
+								string,
+								string | number | boolean | Date | null | undefined
+							>
+						>(params);
+			return rosetta.t(key, rosettaParams, { locale: ctx.locale });
+		});
+	}
 
 	// D6 (Shield parity): csrfField/csrfMeta DEGRADE — when there is no token
 	// (no request context, or CSRF not enabled), return an empty SafeString
@@ -797,6 +824,24 @@ export function buildCanonicalHelpers(
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * The members of {@link InkerHttpContext} the helpers rely on, checked on the
+ * host's context before `ctx.view` binds it as the render store.
+ */
+function isInkerHttpContext(value: unknown): value is InkerHttpContext {
+	if (typeof value !== "object" || value === null) return false;
+	const response: unknown = Reflect.get(value, "response");
+	return (
+		Reflect.get(value, "store") instanceof Map &&
+		typeof Reflect.get(value, "locale") === "string" &&
+		typeof Reflect.get(value, "request") === "object" &&
+		typeof response === "object" &&
+		response !== null &&
+		typeof Reflect.get(response, "type") === "function" &&
+		typeof Reflect.get(response, "send") === "function"
+	);
 }
 
 function isRosettaShape(value: unknown): value is RosettaTranslator {

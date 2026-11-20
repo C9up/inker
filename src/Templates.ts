@@ -930,6 +930,18 @@ function trimTopBottomNewLines(value: string): string {
 /** Module-private key of the renderer entry points on {@link Templates}. */
 const RENDER_WITH_SHARED: unique symbol = Symbol("inker.renderWithShared");
 
+/**
+ * Package-internal key that wraps every render of a {@link TemplateRenderer}
+ * in a caller-supplied scope. The provider's `ctx.view` uses it to enter the
+ * request's AsyncLocalStorage frame, so `t()`, `csrfField()` and `cspNonce()`
+ * read the same request there as through `inker.render(ctx, …)`. Not
+ * re-exported from the package barrel.
+ */
+export const RENDER_SCOPE: unique symbol = Symbol("inker.renderScope");
+
+/** Runs one render and hands its result back unchanged. */
+export type RenderScope = <T>(render: () => T) => T;
+
 const NO_SHARED_STATE: Readonly<Record<string, unknown>> = Object.freeze({});
 
 /**
@@ -2720,9 +2732,20 @@ function mergeSharedValue(
 export class TemplateRenderer {
 	readonly #templates: Templates;
 	readonly #shared: Record<string, unknown> = Object.create(null);
+	#scope: RenderScope | undefined;
 
 	constructor(templates: Templates) {
 		this.#templates = templates;
+	}
+
+	/** Run every later render of this renderer (and of its clones) in `scope`. */
+	[RENDER_SCOPE](scope: RenderScope): this {
+		this.#scope = scope;
+		return this;
+	}
+
+	#run<T>(render: () => T): T {
+		return this.#scope === undefined ? render() : this.#scope(render);
 	}
 
 	/**
@@ -2745,16 +2768,20 @@ export class TemplateRenderer {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): Promise<string> {
-		return this.#templates[RENDER_WITH_SHARED](this.#shared).render(name, data);
+		return this.#run(() =>
+			this.#templates[RENDER_WITH_SHARED](this.#shared).render(name, data),
+		);
 	}
 
 	renderString(
 		source: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
-		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
-			source,
-			data,
+		return this.#run(() =>
+			this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
+				source,
+				data,
+			),
 		);
 	}
 
@@ -2763,9 +2790,8 @@ export class TemplateRenderer {
 		name: string,
 		data: Readonly<Record<string, unknown>> = {},
 	): string {
-		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderSync(
-			name,
-			data,
+		return this.#run(() =>
+			this.#templates[RENDER_WITH_SHARED](this.#shared).renderSync(name, data),
 		);
 	}
 
@@ -2778,10 +2804,12 @@ export class TemplateRenderer {
 		data: Readonly<Record<string, unknown>> = {},
 		templatePath?: string,
 	): string {
-		return this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
-			source,
-			data,
-			templatePath,
+		return this.#run(() =>
+			this.#templates[RENDER_WITH_SHARED](this.#shared).renderString(
+				source,
+				data,
+				templatePath,
+			),
 		);
 	}
 
@@ -2801,7 +2829,9 @@ export class TemplateRenderer {
 	 * it came from.
 	 */
 	clone(): TemplateRenderer {
-		return new TemplateRenderer(this.#templates).share(this.#shared);
+		const copy = new TemplateRenderer(this.#templates).share(this.#shared);
+		if (this.#scope !== undefined) copy[RENDER_SCOPE](this.#scope);
+		return copy;
 	}
 
 	/**

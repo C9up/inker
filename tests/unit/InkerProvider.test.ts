@@ -413,6 +413,21 @@ describe("buildCanonicalHelpers", () => {
 		expect(result).toBe("fr:welcome");
 	});
 
+	it("registers no t() when @c9up/rosetta is absent", () => {
+		const helpers = buildCanonicalHelpers(
+			new AsyncLocalStorage<InkerHttpContext>(),
+			undefined,
+			{
+				makeUrl: () => "/",
+				urlFor: () => "/",
+				makeSignedUrl: () => "/",
+			},
+			undefined,
+		);
+		expect(helpers.has("t")).toBe(false);
+		expect(helpers.has("csrfField")).toBe(true);
+	});
+
 	it("t() throws outside an inker.render frame", () => {
 		const { helpers } = setup();
 		const t = helpers.get("t");
@@ -764,16 +779,11 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		expect(first).toBeInstanceOf(InkerRenderer);
 	});
 
-	it("start() warns + skips when no 'router' is registered (non-Ream host)", async () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		const singletons = new Map<string, () => unknown>();
-		// A host that never registered `'router'` (not Ream / router not wired):
-		// inker degrades — warn-once, rendering disabled, no crash.
-		const app: InkerAppContext = {
+	// A host that never registered `'router'` (not Ream / router not wired).
+	function routerlessApp(): InkerAppContext {
+		return {
 			container: {
-				singleton(token: unknown, factory: () => unknown) {
-					singletons.set(String(token), factory);
-				},
+				singleton(): void {},
 				async resolve(): Promise<never> {
 					throw Object.assign(new Error("no binding"), {
 						code: "E_CONTAINER_NOT_FOUND",
@@ -785,6 +795,12 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 			},
 			config: { get: () => undefined },
 		};
+	}
+
+	it("start() warns + skips when no 'router' is registered (non-Ream host)", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		// inker degrades — warn-once, rendering disabled, no crash.
+		const app = routerlessApp();
 		const provider = new InkerProvider(app);
 		provider.register();
 		await provider.start();
@@ -793,41 +809,31 @@ describe("InkerProvider start() — idempotency & degraded-host", () => {
 		warn.mockRestore();
 	});
 
-	it("start() warns once when rosetta is not registered in the container", async () => {
+	it("start() without rosetta still renders, and warns nothing (optional peer)", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		const { app } = mkAppContext({ appRoot: tmp }, {});
-		const provider = new InkerProvider(app);
-		provider.register();
-
-		await provider.start();
-		await provider.start();
-
-		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn.mock.calls[0]?.[0]).toMatch(/Rosetta instance/);
-		warn.mockRestore();
-	});
-
-	it("start() leaves renderer unresolvable when rosetta is missing", async () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		const { app } = mkAppContext({ appRoot: tmp }, {});
-		const provider = new InkerProvider(app);
-		provider.register();
-		await provider.start();
-		await expect(app.container.resolve(InkerRenderer)).rejects.toThrow(
-			/before InkerProvider\.start\(\) ran/,
+		fs.writeFileSync(
+			path.join(tmp, "resources/templates/home.inker"),
+			"{{ urlFor('home') }}",
 		);
+		const { app } = mkAppContext({ appRoot: tmp }, {});
+		const provider = new InkerProvider(app);
+		provider.register();
+		await provider.start();
+
+		expect(warn).not.toHaveBeenCalled();
 		warn.mockRestore();
+		const renderer = await app.container.resolve<InkerRenderer>(InkerRenderer);
+		expect(renderer).toBeInstanceOf(InkerRenderer);
+		expect(await renderer.templates.render("home", {})).toBe("/");
 	});
 
 	it("a second provider instance warns independently (per-instance warn-once)", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		const { app: appA } = mkAppContext({ appRoot: tmp }, {});
-		await new InkerProvider(appA).start();
+		await new InkerProvider(routerlessApp()).start();
 		// No resetInkerProviderFlags() — a fresh instance must emit its own
 		// diagnostic. The module-level warn-once used to silence the 2nd provider
 		// in the same process (audit 2026-06-13).
-		const { app: appB } = mkAppContext({ appRoot: tmp }, {});
-		await new InkerProvider(appB).start();
+		await new InkerProvider(routerlessApp()).start();
 		expect(warn).toHaveBeenCalledTimes(2);
 		warn.mockRestore();
 	});
