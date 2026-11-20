@@ -107,7 +107,10 @@ describe("truncate / excerpt stay linear on hostile input", () => {
 	function best(name: "truncate" | "excerpt", input: string): number {
 		call(name, input, 20);
 		let fastest = Number.POSITIVE_INFINITY;
-		for (let run = 0; run < 3; run++) {
+		// The fastest of five: a shared CI runner pauses (GC, a neighbour) far
+		// more often than it speeds up, and one pause on the large input alone
+		// read 11x for a linear pass.
+		for (let run = 0; run < 5; run++) {
 			const started = performance.now();
 			call(name, input, 20);
 			fastest = Math.min(fastest, performance.now() - started);
@@ -140,7 +143,7 @@ describe("truncate / excerpt stay linear on hostile input", () => {
 	});
 
 	it("truncate of a long tag-heavy string", () => {
-		expect(growth("truncate", (n) => "<b>".repeat(n), 25_000)).toBeLessThan(
+		expect(growth("truncate", (n) => "<b>".repeat(n), 50_000)).toBeLessThan(
 			MAX_GROWTH,
 		);
 	});
