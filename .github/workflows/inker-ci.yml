@@ -243,6 +243,19 @@ jobs:
       - run: cargo install cargo-audit --locked --version 0.22.2
       - run: cargo audit --deny warnings
 
+  npm-audit:
+    name: Advisories (npm, production tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      # What a user installs (dependencies and peers, resolved fresh, no
+      # devDependencies) must carry no high or critical advisory and none it
+      # cannot be updated out of. Exceptions: .github/npm-audit-exceptions.json.
+      - run: node .github/scripts/npm-audit.mjs
+
   # Publish job — DORMANT for 55.1 per D55.1.6. Lands but stays gated on
   # workflow_dispatch only (manual maintainer click). NPM_TOKEN required.
   # Will activate when the maintainer decides Inker is ready for npm publish.
@@ -256,7 +269,7 @@ jobs:
       # authenticates with).
       id-token: write
     timeout-minutes: 15
-    needs: [quality, build-and-test, cargo-tests, ts-tests, audit]
+    needs: [quality, build-and-test, cargo-tests, ts-tests, audit, npm-audit]
     if: github.event_name == 'workflow_dispatch'
     # A publish is a deployment to npm. The environment's protection rules
     # (required reviewer, deployments from v* tags only) are what stands
