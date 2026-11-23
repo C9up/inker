@@ -1,5 +1,6 @@
 import "./augmentations.js";
 
+export * as errors from "./errors.js";
 export type {
 	AssetHelper,
 	CspNonceHelper,
@@ -10,10 +11,10 @@ export type {
 	UrlHelper,
 } from "./helpers.js";
 export {
+	InkerError,
 	type InkerErrorCode,
-	type InkerErrorContext,
-	InkerRenderError,
-} from "./InkerRenderError.js";
+	type InkerErrorPosition,
+} from "./inkerError.js";
 // The default export is the plugin registrar, the way `import edge from
 // 'edge.js'` hands back the engine to push plugins into. Read `plugins.ts` for
 // why it is a registrar here and not the engine itself.

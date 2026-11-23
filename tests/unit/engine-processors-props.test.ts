@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { errors } from "../../src/index.js";
 import { Templates } from "../../src/Templates.js";
 
 let root: string;
@@ -128,7 +128,7 @@ describe("inker > Edge-shaped render aliases", () => {
 			];
 			for (const failure of failures) {
 				await expect(failure).rejects.toMatchObject({
-					context: { templateName: "emails/welcome" },
+					filename: "emails/welcome",
 				});
 			}
 		}
@@ -180,7 +180,7 @@ describe("inker > registerTemplate", () => {
 		} catch (err) {
 			caught = err;
 		}
-		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toBeInstanceOf(errors.E_INKER_TEMPLATE_COLLISION);
 		expect(caught).toMatchObject({ code: "E_INKER_TEMPLATE_COLLISION" });
 		expect(await t.render("components/button")).toBe("A");
 		// The same name on another disk is another template.

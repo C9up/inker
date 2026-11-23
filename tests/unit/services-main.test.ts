@@ -40,6 +40,9 @@ describe("services/main inker singleton", () => {
 		expect(() => mod.default.renderToString(makeCtx(), "n", {})).toThrow(
 			/accessed before InkerProvider\.start\(\)/,
 		);
+		expect(() => mod.default.renderToString(makeCtx(), "n", {})).toThrow(
+			expect.objectContaining({ code: "E_INKER_NOT_BOOTED" }),
+		);
 	});
 
 	it("returns undefined from `getInker` before binding", async () => {

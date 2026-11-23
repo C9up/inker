@@ -6,9 +6,8 @@ import InkerProvider, {
 	type InkerAppContext,
 	resetInkerProviderFlags,
 } from "../../src/InkerProvider.js";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
 import type { InkerRenderer } from "../../src/InkerRenderer.js";
-import inkerDefault, { plugins } from "../../src/index.js";
+import inkerDefault, { errors, plugins } from "../../src/index.js";
 import { clearInker } from "../../src/services/main.js";
 import type { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
@@ -83,7 +82,7 @@ describe("inker > plugin registrar", () => {
 		// from there. Reached through a widened view of the same object rather
 		// than a cast: the point is what a JavaScript caller can do.
 		const loose: { use(plugin: unknown): unknown } = plugins;
-		expect(() => loose.use(42)).toThrow(InkerRenderError);
+		expect(() => loose.use(42)).toThrow(errors.E_INKER_INVALID_PATH);
 		expect(plugins.size).toBe(0);
 	});
 
@@ -233,6 +232,8 @@ describe("inker > share().render() on the module singleton", () => {
 	});
 
 	it("refuses shared state that is not an object", () => {
-		expect(() => inkerDefault.share(asTyped(null))).toThrow(InkerRenderError);
+		expect(() => inkerDefault.share(asTyped(null))).toThrow(
+			errors.E_INKER_INVALID_PATH,
+		);
 	});
 });

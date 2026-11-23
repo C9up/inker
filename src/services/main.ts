@@ -9,6 +9,7 @@
  * app itself via `setInker(myRenderer)`.
  */
 
+import * as errors from "../errors.js";
 import type { InkerRenderer } from "../InkerRenderer.js";
 
 let instance: InkerRenderer | undefined;
@@ -62,10 +63,10 @@ const inker: InkerRenderer = new Proxy({} as InkerRenderer, {
 			return undefined;
 		}
 		if (!instance) {
-			throw new Error(
+			throw new errors.E_INKER_NOT_BOOTED([
 				"[inker] InkerRenderer singleton accessed before InkerProvider.start() ran " +
 					"or `setInker(myRenderer)` was called. Wire one of them first.",
-			);
+			]);
 		}
 		const value = Reflect.get(instance, prop, instance);
 		return typeof value === "function" ? value.bind(instance) : value;

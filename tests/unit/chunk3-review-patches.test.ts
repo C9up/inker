@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Exception } from "@c9up/flare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
-import { type HelperFn, Templates } from "../../src/index.js";
+import { errors, type HelperFn, Templates } from "../../src/index.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
 function makeTempRoot(): string {
@@ -40,8 +41,8 @@ describe("chunk3 review patches", () => {
 				await tpl.render("index", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(e).toBeInstanceOf(InkerRenderError);
-				const code = asTyped<InkerRenderError>(e).code;
+				expect(e).toSatisfy(isInkerException);
+				const code = asTyped<Exception>(e).code;
 				// Either path is acceptable: chunk1-P9 catches `.` segments at
 				// parse time; T2 catches the post-normalizer empty key.
 				expect(["E_INKER_PARSE_ERROR", "E_INKER_INVALID_PATH"]).toContain(code);
@@ -51,7 +52,7 @@ describe("chunk3 review patches", () => {
 
 	// T3 — Helper Map key must be a string
 	describe("T3 — helper Map key must be a string", () => {
-		it("throws InkerRenderError (not raw TypeError) for Symbol key", () => {
+		it("throws an inker error (not raw TypeError) for Symbol key", () => {
 			const helpers = new Map<unknown, HelperFn>([[Symbol("bad"), () => "x"]]);
 			try {
 				new Templates({
@@ -60,15 +61,13 @@ describe("chunk3 review patches", () => {
 				});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(e).toBeInstanceOf(InkerRenderError);
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-				expect(asTyped<InkerRenderError>(e).message).toMatch(
-					/must be a string/,
-				);
+				expect(e).toSatisfy(isInkerException);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).message).toMatch(/must be a string/);
 			}
 		});
 
-		it("throws InkerRenderError for number key", () => {
+		it("throws an inker error for number key", () => {
 			const helpers = new Map<unknown, HelperFn>([[42, () => "x"]]);
 			try {
 				new Templates({
@@ -77,7 +76,7 @@ describe("chunk3 review patches", () => {
 				});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 			}
 		});
 	});
@@ -111,9 +110,7 @@ describe("chunk3 review patches", () => {
 				await tpl.render("page", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe(
-					"E_INKER_DUPLICATE_LAYOUT",
-				);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_DUPLICATE_LAYOUT");
 			}
 		});
 
@@ -142,24 +139,20 @@ describe("chunk3 review patches", () => {
 					await tpl.render("evil", {});
 					expect.fail("should have thrown");
 				} catch (e) {
-					expect(e).toBeInstanceOf(InkerRenderError);
-					expect(asTyped<InkerRenderError>(e).code).toBe(
-						"E_INKER_INVALID_PATH",
-					);
+					expect(e).toSatisfy(isInkerException);
+					expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 					// P1: post-O_NOFOLLOW the symlink final segment is refused at
 					// `open()` time with ELOOP rather than read-then-realpath-check.
 					// Either message variant proves the content was never read —
 					// the security property (no exposure) is asserted by the
 					// `not.toContain("PASSWORD")` check below, which is the real
 					// regression guard.
-					expect(asTyped<InkerRenderError>(e).message).toMatch(
+					expect(asTyped<Exception>(e).message).toMatch(
 						/escapes the templates root via symlink|not a readable file \(ELOOP\)/,
 					);
 					// The error message must not leak the secret content. (Direct
 					// check that the message doesn't contain the secret.)
-					expect(asTyped<InkerRenderError>(e).message).not.toContain(
-						"PASSWORD",
-					);
+					expect(asTyped<Exception>(e).message).not.toContain("PASSWORD");
 				}
 			} finally {
 				fs.rmSync(sensitiveDir, { recursive: true, force: true });
@@ -206,10 +199,8 @@ describe("chunk3 review patches", () => {
 				await tpl.render("foo\nbar", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-				expect(asTyped<InkerRenderError>(e).message).toMatch(
-					/control character/,
-				);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).message).toMatch(/control character/);
 			}
 		});
 
@@ -219,7 +210,7 @@ describe("chunk3 review patches", () => {
 				await tpl.render("foo\tbar", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 			}
 		});
 
@@ -229,7 +220,7 @@ describe("chunk3 review patches", () => {
 				await tpl.render("foo\x1bbar", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 			}
 		});
 
@@ -239,8 +230,8 @@ describe("chunk3 review patches", () => {
 				await tpl.render("﻿foo", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-				expect(asTyped<InkerRenderError>(e).message).toMatch(/BOM/);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).message).toMatch(/BOM/);
 			}
 		});
 
@@ -250,10 +241,8 @@ describe("chunk3 review patches", () => {
 				await tpl.render("foo\uD800bar", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-				expect(asTyped<InkerRenderError>(e).message).toMatch(
-					/lone high surrogate/,
-				);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).message).toMatch(/lone high surrogate/);
 			}
 		});
 
@@ -263,10 +252,8 @@ describe("chunk3 review patches", () => {
 				await tpl.render("foo\uDC00bar", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-				expect(asTyped<InkerRenderError>(e).message).toMatch(
-					/lone low surrogate/,
-				);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(asTyped<Exception>(e).message).toMatch(/lone low surrogate/);
 			}
 		});
 
@@ -281,7 +268,9 @@ describe("chunk3 review patches", () => {
 	// D3 — Constructor rejects filesystem-root
 	describe("D3 — constructor rejects filesystem/drive root", () => {
 		it("rejects root = '/'", () => {
-			expect(() => new Templates({ root: "/" })).toThrow(InkerRenderError);
+			expect(() => new Templates({ root: "/" })).toThrow(
+				errors.E_INKER_INVALID_PATH,
+			);
 		});
 
 		it("rejects Windows drive root like 'C:\\'", () => {
@@ -290,8 +279,8 @@ describe("chunk3 review patches", () => {
 				new Templates({ root: "C:\\" });
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(e).toBeInstanceOf(InkerRenderError);
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+				expect(e).toSatisfy(isInkerException);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 			}
 		});
 
@@ -325,7 +314,7 @@ describe("chunk3 review patches", () => {
 				tpl.renderString("@if(true)@include('foo')@endif", {});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_REQUIRED");
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_DISK_REQUIRED");
 			}
 		});
 
@@ -337,7 +326,7 @@ describe("chunk3 review patches", () => {
 				});
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_DISK_REQUIRED");
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_DISK_REQUIRED");
 			}
 		});
 	});

@@ -1,6 +1,6 @@
 import os from "node:os";
 import { describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerError, isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 
 // A name the render data does not carry reads as `undefined`, as in Edge,
@@ -15,10 +15,10 @@ function codeOf(fn: () => unknown): string {
 	try {
 		fn();
 	} catch (e) {
-		if (e instanceof InkerRenderError) return e.code;
+		if (isInkerException(e)) return e.code;
 		throw e;
 	}
-	throw new Error("expected an InkerRenderError");
+	throw new Error("expected an inker error");
 }
 
 describe("missing identifiers", () => {
@@ -44,8 +44,8 @@ describe("missing identifiers", () => {
 			render("@each(x in missing){{ x }}@endeach");
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			if (e instanceof InkerRenderError) {
+			expect(e).toSatisfy(isInkerError);
+			if (isInkerError(e)) {
 				expect(e.code).toBe("E_INKER_INVALID_ITERABLE");
 				expect(e.message).toContain("@if()");
 			}

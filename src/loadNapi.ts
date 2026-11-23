@@ -8,7 +8,13 @@
 // Per cerebrum 2026-04-15 there is NO JS fallback. If the binary fails to
 // load, consumers get a typed error. Zero `as` / `any` per cerebrum 2026-05-04.
 
-import { type InkerErrorCode, InkerRenderError } from "./InkerRenderError.js";
+import type { Exception } from "@c9up/flare";
+import * as errors from "./errors.js";
+import {
+	InkerError,
+	type InkerErrorCode,
+	isInkerException,
+} from "./inkerError.js";
 import {
 	hasFunctions,
 	loadNativeBinary,
@@ -61,10 +67,9 @@ export function getNative(): NativeExports {
 	}
 	const { suffix, cause } = attempt;
 	if (suffix === undefined) {
-		throw new InkerRenderError(
-			"E_INKER_NAPI_REQUIRED",
+		throw new errors.E_INKER_NAPI_REQUIRED([
 			`No native binary for this platform for @c9up/inker native binary. Supported: ${supportedTargets().join(", ")}.`,
-		);
+		]);
 	}
 	const causeMessage = cause instanceof Error ? cause.message : String(cause);
 	// The prebuilt linux binaries target glibc (`-gnu`). On musl hosts (Alpine
@@ -73,10 +78,10 @@ export function getNative(): NativeExports {
 	const muslHint = suffix.endsWith("-gnu")
 		? " If you are on Alpine/musl, note the prebuilt binaries target glibc (musl is not a supported target)."
 		: "";
-	throw new InkerRenderError(
-		"E_INKER_NAPI_REQUIRED",
-		`@c9up/inker native binary 'index.${suffix}.node' not found, failed to load, or is stale — run 'pnpm --filter @c9up/inker build:napi' to build it.${muslHint} Cause: ${causeMessage}`,
-		undefined,
+	throw new errors.E_INKER_NAPI_REQUIRED(
+		[
+			`@c9up/inker native binary 'index.${suffix}.node' not found, failed to load, or is stale — run 'pnpm --filter @c9up/inker build:napi' to build it.${muslHint} Cause: ${causeMessage}`,
+		],
 		{ cause },
 	);
 }
@@ -137,13 +142,13 @@ const CODE_MAP: Readonly<Record<string, InkerErrorCode>> = {
 };
 
 /**
- * Translate a thrown value from a NAPI call into an `InkerRenderError`.
- * If it's already an `InkerRenderError` (helper threw and propagated), pass through.
+ * Translate a thrown value from a NAPI call into an inker error.
+ * If it's already one of inker's (helper threw and propagated), pass through.
  * If it's a `napi::Error` carrying our JSON envelope, reconstruct typed.
  * Otherwise wrap as parse error.
  */
-export function napiThrowToInker(err: unknown): InkerRenderError {
-	if (err instanceof InkerRenderError) return err;
+export function napiThrowToInker(err: unknown): Exception {
+	if (isInkerException(err)) return err;
 	if (err instanceof Error) {
 		let parsed: unknown;
 		try {
@@ -154,27 +159,28 @@ export function napiThrowToInker(err: unknown): InkerRenderError {
 		if (isNapiErrorPayload(parsed)) {
 			const code = CODE_MAP[parsed.code];
 			if (code !== undefined) {
-				return new InkerRenderError(
-					code,
+				return new InkerError(
 					parsed.message,
+					code,
 					{
-						line: readNumber(parsed, "line"),
-						column: readNumber(parsed, "column"),
-						templateName: readString(parsed, "templateName"),
+						line: readNumber(parsed, "line") ?? 0,
+						col: readNumber(parsed, "column") ?? 0,
+						filename: readString(parsed, "templateName") ?? "",
 					},
 					{ cause: err },
 				);
 			}
 		}
-		return new InkerRenderError(
-			"E_INKER_PARSE_ERROR",
+		return new InkerError(
 			`Native call failed: ${err.message}`,
-			undefined,
+			"E_INKER_PARSE_ERROR",
+			{ line: 0, col: 0, filename: "" },
 			{ cause: err },
 		);
 	}
-	return new InkerRenderError(
-		"E_INKER_PARSE_ERROR",
+	return new InkerError(
 		`Native call failed with non-Error: ${String(err)}`,
+		"E_INKER_PARSE_ERROR",
+		{ line: 0, col: 0, filename: "" },
 	);
 }

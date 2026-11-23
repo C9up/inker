@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerError } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 
 let root: string;
@@ -227,9 +227,9 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 			await t.render("broken");
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			if (e instanceof InkerRenderError) {
-				expect(e.context.templateName).toBe("partials/boom");
+			expect(e).toSatisfy(isInkerError);
+			if (isInkerError(e)) {
+				expect(e.filename).toBe("partials/boom");
 			}
 		}
 	});
@@ -311,11 +311,12 @@ describe("inker > @stack, @pushTo, @pushOnceTo", () => {
 		} catch (err) {
 			caught = err;
 		}
-		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toSatisfy(isInkerError);
 		expect(caught).toMatchObject({
 			code: "E_INKER_INVALID_EXPRESSION",
 			message: expect.stringMatching(/declared twice/),
-			context: { line: 2, column: 3 },
+			line: 2,
+			col: 3,
 		});
 	});
 
@@ -350,12 +351,12 @@ describe("inker > @newError", () => {
 			engine().renderString("@newError('bad usage', 'caller.inker', 42, 7)");
 			expect.unreachable("should have thrown");
 		} catch (error) {
-			expect(error).toBeInstanceOf(InkerRenderError);
-			if (!(error instanceof InkerRenderError)) return;
+			expect(error).toSatisfy(isInkerError);
+			if (!isInkerError(error)) return;
 			expect(error.code).toBe("E_INKER_TEMPLATE_ERROR");
-			expect(error.context.line).toBe(42);
-			expect(error.context.column).toBe(7);
-			expect(error.context.templateName).toBe("caller.inker");
+			expect(error.line).toBe(42);
+			expect(error.col).toBe(7);
+			expect(error.filename).toBe("caller.inker");
 		}
 	});
 
@@ -369,10 +370,11 @@ describe("inker > @newError", () => {
 			await t.render("page");
 			expect.unreachable("should have thrown");
 		} catch (error) {
-			expect(error).toBeInstanceOf(InkerRenderError);
-			if (!(error instanceof InkerRenderError)) return;
+			expect(error).toSatisfy(isInkerError);
+			if (!isInkerError(error)) return;
 			expect(error.message).toBe("needs a label");
-			expect(error.context.line).toBe(2);
+			expect(error.line).toBe(2);
+			expect(error.filename).toBe("page");
 		}
 	});
 });
@@ -383,8 +385,8 @@ describe("inker > @dd and @debugger", () => {
 			engine().renderString("before@dd(user)after", { user: { id: 7 } });
 			expect.unreachable("should have thrown");
 		} catch (error) {
-			expect(error).toBeInstanceOf(InkerRenderError);
-			if (!(error instanceof InkerRenderError)) return;
+			expect(error).toSatisfy(isInkerError);
+			if (!isInkerError(error)) return;
 			expect(error.code).toBe("E_INKER_DUMP_DIE");
 			expect(error.message).toContain('"id": 7');
 		}

@@ -9,11 +9,14 @@
  * against the DISK's own root, so mounting a second directory cannot widen
  * traversal out of either root.
  */
+
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Exception } from "@c9up/flare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { errors } from "../../src/index.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
@@ -96,9 +99,9 @@ describe("Templates — named disks (edge.mount parity)", () => {
 			await t.render("nope::hello", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain(
+			expect(e).toSatisfy(isInkerException);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).message).toContain(
 				"Unknown templates disk 'nope'",
 			);
 		}
@@ -132,9 +135,7 @@ describe("Templates — named disks (edge.mount parity)", () => {
 					"mounting a taken disk name to a new root must throw",
 				);
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe(
-					"E_INKER_DISK_COLLISION",
-				);
+				expect(asTyped<Exception>(e).code).toBe("E_INKER_DISK_COLLISION");
 			}
 			// The rejected mount left the original disk untouched.
 			expect(await t.render("pkg::hello", { name: "x" })).toBe(
@@ -165,7 +166,9 @@ describe("Templates — named disks (edge.mount parity)", () => {
 	it("rejects invalid disk names (path-shaped / separator / empty)", () => {
 		const t = new Templates({ root: defaultRoot, cacheMode: "never" });
 		for (const bad of ["a/b", "a::b", "", "a b", "../x"]) {
-			expect(() => t.mount(bad, pkgRoot)).toThrowError(InkerRenderError);
+			expect(() => t.mount(bad, pkgRoot)).toThrowError(
+				errors.E_INKER_INVALID_PATH,
+			);
 		}
 	});
 });

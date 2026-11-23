@@ -1,4 +1,4 @@
-import { InkerRenderError } from "./InkerRenderError.js";
+import * as errors from "./errors.js";
 
 /**
  * Marker class for already-escaped strings. Helpers that return
@@ -14,13 +14,12 @@ export class SafeString {
 	readonly value: string;
 	constructor(value: string) {
 		if (typeof value !== "string") {
-			// Throws `InkerRenderError` (not native `TypeError`) so callers
+			// Throws `E_INKER_INVALID_EXPRESSION` (not native `TypeError`) so callers
 			// handling the typed error contract uniformly catch SafeString
 			// construction failures alongside every other Inker failure mode.
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
+			throw new errors.E_INKER_INVALID_EXPRESSION([
 				`SafeString requires a string; got ${typeof value}`,
-			);
+			]);
 		}
 		this.value = value;
 	}

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { InkerRenderError } from "../../src/InkerRenderError.js";
+import type { InkerError } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
@@ -73,7 +73,7 @@ describe("Templates — full-JS expressions (62-2 Edge parity)", () => {
 			await render("{{ ({ __proto__: 1 }) }}", {});
 			expect.fail("expected a parse rejection");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_INVALID_EXPRESSION");
 		}
 	});

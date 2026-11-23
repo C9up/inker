@@ -1,6 +1,8 @@
+import type { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
+import * as errors from "../../src/errors.js";
 import { INKER_GLOBAL_NAMES } from "../../src/globals.js";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { getNative } from "../../src/loadNapi.js";
 import { type InkerNodeJson, renderNodeTree } from "../../src/renderNode.js";
 
@@ -279,19 +281,19 @@ describe("Edge-core globals (62-7)", () => {
 			} catch (error) {
 				caught = error;
 			}
-			expect(caught).toBeInstanceOf(InkerRenderError);
-			if (caught instanceof InkerRenderError) {
+			expect(caught).toBeInstanceOf(errors.E_INKER_INVALID_JSON_LD);
+			if (isInkerException(caught)) {
 				expect(caught.code).toBe("E_INKER_INVALID_JSON_LD");
 				expect(caught.message).toContain(what);
 			}
 		}
 	});
 
-	function jsonLdError(p: unknown): InkerRenderError {
+	function jsonLdError(p: unknown): Exception {
 		try {
 			render("{{ html.jsonLd(p) }}", { p });
 		} catch (error) {
-			if (error instanceof InkerRenderError) return error;
+			if (isInkerException(error)) return error;
 			throw error;
 		}
 		throw new Error("html.jsonLd did not throw");

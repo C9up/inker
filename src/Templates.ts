@@ -2,13 +2,20 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Exception } from "@c9up/flare";
+import * as errors from "./errors.js";
 import { INKER_GLOBAL_NAMES } from "./globals.js";
 import type { HelperFn } from "./helpers.js";
-import { InkerRenderError } from "./InkerRenderError.js";
 import {
 	PROTOTYPE_POLLUTION_KEYS,
 	RESERVED_BINDING_NAMES,
 } from "./identifierGuards.js";
+import {
+	InkerError,
+	inTemplate,
+	isInkerError,
+	isInkerException,
+} from "./inkerError.js";
 import {
 	getNative,
 	type NapiComposeInfo,
@@ -115,17 +122,17 @@ interface ComposedTemplate {
 	partialAsts: Map<string, ParsedTemplate>;
 	componentAsts: Map<string, ParsedTemplate>;
 	/** Referenced partials whose file does not exist, keyed like `partialAsts`. */
-	missingPartials: Map<string, InkerRenderError>;
+	missingPartials: Map<string, Exception>;
 	/** Referenced components whose file does not exist. */
-	missingComponents: Map<string, InkerRenderError>;
+	missingComponents: Map<string, Exception>;
 }
 
 /** What the static preload collects: every reachable template, loaded once. */
 interface PreloadClosure {
 	readonly partialAsts: Map<string, ParsedTemplate>;
 	readonly componentAsts: Map<string, ParsedTemplate>;
-	readonly missingPartials: Map<string, InkerRenderError>;
-	readonly missingComponents: Map<string, InkerRenderError>;
+	readonly missingPartials: Map<string, Exception>;
+	readonly missingComponents: Map<string, Exception>;
 }
 
 /**
@@ -133,23 +140,19 @@ interface PreloadClosure {
  * first so a later path swap cannot redirect the read (T6 + P1), check that
  * the file behind that descriptor is inside the root, then read from it.
  */
-function readContainedSync(
-	absPath: string,
-	root: string,
-	validatedName: string,
-): string {
+function readContainedSync(absPath: string, root: string): string {
 	let fd: number;
 	try {
 		fd = fs.openSync(absPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 	} catch (cause) {
-		throw wrapFsError(cause, absPath, validatedName);
+		throw wrapFsError(cause, absPath);
 	}
 	try {
-		assertOpenedFileContained(fd, absPath, root, validatedName);
+		assertOpenedFileContained(fd, absPath, root);
 		try {
 			return fs.readFileSync(fd, "utf8");
 		} catch (cause) {
-			throw wrapFsError(cause, absPath, validatedName);
+			throw wrapFsError(cause, absPath);
 		}
 	} finally {
 		fs.closeSync(fd);
@@ -161,10 +164,8 @@ function readContainedSync(
  * it instead of failing: Edge resolves partials and components when they
  * render, so one behind an untaken `@if` / `@includeIf` must not stop the page.
  */
-function isTemplateNotFound(e: unknown): e is InkerRenderError {
-	return (
-		e instanceof InkerRenderError && e.code === "E_INKER_TEMPLATE_NOT_FOUND"
-	);
+function isTemplateNotFound(e: unknown): e is Exception {
+	return isInkerException(e) && e.code === "E_INKER_TEMPLATE_NOT_FOUND";
 }
 
 /** The template file extension, shared by resolution and the component scan. */
@@ -196,10 +197,9 @@ const VALID_CACHE_MODES: ReadonlySet<string> = new Set([
  * Shared by the constructor and `configure()` so both apply the same rules. */
 function resolveCacheMode(requested: CacheMode): "mtime" | "never" {
 	if (!VALID_CACHE_MODES.has(requested)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Templates cacheMode must be one of 'auto' | 'mtime' | 'never'; got ${JSON.stringify(requested)}`,
-		);
+		]);
 	}
 	if (requested === "auto") {
 		// Through `inProduction()`: `NODE_ENV=prod` read verbatim answers "not
@@ -257,22 +257,18 @@ function normalizePartialKey(name: string): string {
 	// through (no `..`, no NUL, no backslash, length > 0), so the assertion
 	// must live here.
 	if (key.length === 0) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Partial/component name resolves to an empty key; got ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 	return key;
 }
 
 function validateName(name: unknown): string {
 	if (typeof name !== "string" || name.length === 0) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name must be a non-empty string; got ${JSON.stringify(name)}`,
-			{ templateName: typeof name === "string" ? name : undefined },
-		);
+		]);
 	}
 	assertSafeCharacters(name);
 	assertSafePathShape(name);
@@ -288,45 +284,35 @@ function validateName(name: unknown): string {
  */
 function assertSafeCharacters(name: string): void {
 	if (name.includes("\0")) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			"Template name contains a NUL byte",
-			{ templateName: name },
-		);
+		]);
 	}
 	for (let i = 0; i < name.length; i += 1) {
 		const code = name.charCodeAt(i);
 		// C0 controls (0x00 caught above), DEL, C1 controls
 		if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Template name contains a control character (0x${code.toString(16).padStart(2, "0")}) at offset ${i}; got ${JSON.stringify(name)}`,
-				{ templateName: name },
-			);
+			]);
 		}
 		if (code === 0xfeff) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Template name contains a BOM (U+FEFF) at offset ${i}`,
-				{ templateName: name },
-			);
+			]);
 		}
 		if (code >= 0xd800 && code <= 0xdbff) {
 			const next = name.charCodeAt(i + 1);
 			if (!(next >= 0xdc00 && next <= 0xdfff)) {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_PATH",
+				throw new errors.E_INKER_INVALID_PATH([
 					`Template name contains a lone high surrogate at offset ${i}`,
-					{ templateName: name },
-				);
+				]);
 			}
 			i += 1;
 		} else if (code >= 0xdc00 && code <= 0xdfff) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Template name contains a lone low surrogate at offset ${i}`,
-				{ templateName: name },
-			);
+			]);
 		}
 	}
 }
@@ -339,32 +325,24 @@ function assertSafeCharacters(name: string): void {
  */
 function assertSafePathShape(name: string): void {
 	if (path.isAbsolute(name)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name must be relative to the templates root; got absolute path ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 	if (name.split(/[/\\]/).some((segment) => segment === "..")) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name cannot contain '..' segments; got ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 	if (name.includes("\\")) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name cannot contain backslashes (use forward slash only); got ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 	if (/^[A-Za-z]:/.test(name)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name cannot start with a Windows drive-letter prefix; got ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 	// A bare (post-`#splitDisk`) template name never legitimately contains `:`.
 	// The drive-letter guard above only catches a leading `[A-Za-z]:`; a residual
@@ -373,11 +351,9 @@ function assertSafePathShape(name: string): void {
 	// data-stream reference — a cross-platform resolution divergence. `:` is
 	// already reserved as the `::` disk separator, so forbid it outright here.
 	if (name.includes(":")) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template name cannot contain ':' characters; got ${JSON.stringify(name)}`,
-			{ templateName: name },
-		);
+		]);
 	}
 }
 
@@ -391,11 +367,9 @@ function assertNotReservedDeviceName(name: string): void {
 	for (const segment of name.split("/")) {
 		const base = segment.replace(/\.[^.]*$/, "").toLowerCase();
 		if (WINDOWS_RESERVED.has(base)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Template name segment '${segment}' is a Windows-reserved device name`,
-				{ templateName: name },
-			);
+			]);
 		}
 	}
 }
@@ -410,15 +384,13 @@ function assertNotReservedDeviceName(name: string): void {
 const DISK_NAME_RE = /^[A-Za-z0-9_-]+$/;
 function assertDiskName(diskName: unknown): void {
 	if (typeof diskName !== "string" || !DISK_NAME_RE.test(diskName)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Mount disk name must match ${DISK_NAME_RE} (identifier-shaped, no path separators); got ${JSON.stringify(diskName)}`,
-			{ templateName: typeof diskName === "string" ? diskName : undefined },
-		);
+		]);
 	}
 }
 
-function assertContained(root: string, absPath: string, name: string): void {
+function assertContained(root: string, absPath: string): void {
 	// P12: case-sensitive `startsWith` breaks on APFS/HFS+/NTFS where
 	// `realpath` canonicalises segment casing — a root like
 	// `/Users/x/Templates` whose realpath returns `/users/x/templates`
@@ -429,24 +401,16 @@ function assertContained(root: string, absPath: string, name: string): void {
 	const rel = path.relative(root, normalised);
 	if (rel === "") return; // identical path
 	if (rel.startsWith("..") || path.isAbsolute(rel)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Resolved template path escapes the templates root: ${normalised} is outside ${root}`,
-			{ templatePath: normalised, templateName: name },
-		);
+		]);
 	}
 }
 
-function wrapFsError(
-	cause: unknown,
-	absPath: string,
-	name: string,
-): InkerRenderError {
+function wrapFsError(cause: unknown, absPath: string): Exception {
 	if (isErrnoException(cause) && cause.code === "ENOENT") {
-		return new InkerRenderError(
-			"E_INKER_TEMPLATE_NOT_FOUND",
-			`Template not found: ${absPath}`,
-			{ templatePath: absPath, templateName: name },
+		return new errors.E_INKER_TEMPLATE_NOT_FOUND(
+			[`Template not found: ${absPath}`],
 			{ cause },
 		);
 	}
@@ -454,10 +418,8 @@ function wrapFsError(
 		// EACCES / EISDIR / ELOOP / ENOTDIR — file exists but the path does
 		// not resolve to a readable regular file. Path-axis error, not
 		// missing-template.
-		return new InkerRenderError(
-			"E_INKER_INVALID_PATH",
-			`Template path is not a readable file (${cause.code}): ${absPath}`,
-			{ templatePath: absPath, templateName: name },
+		return new errors.E_INKER_INVALID_PATH(
+			[`Template path is not a readable file (${cause.code}): ${absPath}`],
 			{ cause },
 		);
 	}
@@ -465,16 +427,14 @@ function wrapFsError(
 	// don't lie about "template not found" since the file may well exist;
 	// surface as a generic path-axis failure with the underlying message.
 	const detail = cause instanceof Error ? cause.message : String(cause);
-	return new InkerRenderError(
-		"E_INKER_INVALID_PATH",
-		`Failed to load template ${absPath}: ${detail}`,
-		{ templatePath: absPath, templateName: name },
+	return new errors.E_INKER_INVALID_PATH(
+		[`Failed to load template ${absPath}: ${detail}`],
 		{ cause },
 	);
 }
 
 // Run a native (NAPI) call and translate any thrown `napi::Error` carrying the
-// engine's JSON error envelope back into a typed `InkerRenderError` (preserving
+// engine's JSON error envelope back into a typed inker error (preserving
 // code / line / column / templateName). Without this, the raw napi error
 // surfaces with `code === "GenericFailure"`.
 function callNative<T>(fn: () => T): T {
@@ -493,11 +453,9 @@ function callNative<T>(fn: () => T): T {
  */
 function canonicalizeTemplatesRoot(root: unknown): string {
 	if (typeof root !== "string" || !path.isAbsolute(root)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Templates root must be an absolute path; got ${JSON.stringify(root)}`,
-			{ templatePath: typeof root === "string" ? root : undefined },
-		);
+		]);
 	}
 
 	// D3: refuse filesystem-root / drive-root values. With root = "/" on
@@ -506,31 +464,25 @@ function canonicalizeTemplatesRoot(root: unknown): string {
 	// degenerates to "anywhere on the volume". Operator misconfiguration —
 	// fail loudly at construction rather than serve traversal as a feature.
 	if (root === "/" || /^[A-Za-z]:[\\/]?$/.test(root)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Templates root cannot be the filesystem/drive root; got ${JSON.stringify(root)}`,
-			{ templatePath: root },
-		);
+		]);
 	}
 
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(root);
 	} catch (cause) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
-			`Templates root does not exist: ${root}`,
-			{ templatePath: root },
+		throw new errors.E_INKER_INVALID_PATH(
+			[`Templates root does not exist: ${root}`],
 			{ cause },
 		);
 	}
 
 	if (!stat.isDirectory()) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Templates root is not a directory: ${root}`,
-			{ templatePath: root },
-		);
+		]);
 	}
 
 	// Canonicalize root via realpath so symlinked-target containment checks
@@ -548,10 +500,10 @@ function canonicalizeTemplatesRoot(root: unknown): string {
 		// which otherwise breaks the symlink-containment check on CI runners.
 		return fs.realpathSync.native(root);
 	} catch (cause) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
-			`Templates root could not be canonicalised (realpath failed) although it exists: ${root}`,
-			{ templatePath: root },
+		throw new errors.E_INKER_INVALID_PATH(
+			[
+				`Templates root could not be canonicalised (realpath failed) although it exists: ${root}`,
+			],
 			{ cause },
 		);
 	}
@@ -575,10 +527,9 @@ function validateHelpers(
 	// could pass a plain object and hit a confusing "helpers.keys is not a
 	// function" at construction.
 	if (!(helpers instanceof Map)) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Templates.helpers must be a Map; got ${Object.prototype.toString.call(helpers).slice(8, -1)}`,
-		);
+		]);
 	}
 	const helperNames = new Set<string>(INKER_GLOBAL_NAMES);
 	for (const [key, value] of helpers) {
@@ -588,41 +539,32 @@ function validateHelpers(
 		// contract. Map allows any key type at runtime; only strings make
 		// sense as helper names.
 		if (typeof key !== "string") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Helper name must be a string; got ${typeof key}`,
-			);
+			]);
 		}
 		// P13 — validate each helper value is callable. Without this, a
 		// non-function would surface as a generic TypeError wrapped under
 		// E_INKER_HELPER_THROW at render-time, hiding the registration bug.
 		if (typeof value !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Helper '${key}' must be a function; got ${typeof value}`,
-				{ templateName: key },
-			);
+			]);
 		}
 		if (!HELPER_NAME_RE.test(key)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Helper name '${key}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)`,
-				{ templateName: key },
-			);
+			]);
 		}
 		if (RESERVED_BINDING_NAMES.has(key)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Helper name '${key}' is a reserved word`,
-				{ templateName: key },
-			);
+			]);
 		}
 		if (PROTOTYPE_POLLUTION_KEYS.has(key)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Helper name '${key}' is forbidden (prototype-pollution surface)`,
-				{ templateName: key },
-			);
+			]);
 		}
 		helperNames.add(key);
 	}
@@ -679,10 +621,9 @@ export class Processor {
 			((value: OutputProcessorValue) => string | undefined),
 	): void {
 		if (typeof fn !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`processor.process('${String(stage)}') — handler must be a function; got ${typeof fn}`,
-			);
+			]);
 		}
 		if (stage === "raw") {
 			this.#raw.push(fn);
@@ -695,10 +636,9 @@ export class Processor {
 		}
 		// Unreachable from TypeScript; reachable from plain JS, and a stage that
 		// never fires would be a silent no-op — so it is loud instead.
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`processor.process — unknown stage '${String(stage)}'. Inker supports 'raw' and 'output'. A 'compiled' stage has no equivalent: no JavaScript is emitted, templates parse to an AST. A 'tag' stage has none either: parsing happens in Rust, so a JS handler cannot mutate a token mid-parse — and its canonical use, exposing components as tags, is built in (see listComponents).`,
-		);
+		]);
 	}
 
 	/** Apply every `raw` transform in registration order. */
@@ -752,17 +692,16 @@ function assertOpenedFileContained(
 	fd: number,
 	absPath: string,
 	root: string,
-	validatedName: string,
 ): void {
 	let opened: fs.Stats;
 	try {
 		opened = fs.fstatSync(fd);
 	} catch (cause) {
-		throw wrapFsError(cause, absPath, validatedName);
+		throw wrapFsError(cause, absPath);
 	}
 	const kernelPath = openedFilePath(fd);
 	if (kernelPath !== undefined) {
-		assertResolvedInsideRoot(kernelPath, root, validatedName);
+		assertResolvedInsideRoot(kernelPath, root);
 		return;
 	}
 	let realPath: string;
@@ -773,15 +712,13 @@ function assertOpenedFileContained(
 		realPath = fs.realpathSync.native(absPath);
 		resolved = fs.statSync(realPath);
 	} catch (cause) {
-		throw wrapFsError(cause, absPath, validatedName);
+		throw wrapFsError(cause, absPath);
 	}
-	assertResolvedInsideRoot(realPath, root, validatedName);
+	assertResolvedInsideRoot(realPath, root);
 	if (resolved.dev !== opened.dev || resolved.ino !== opened.ino) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Template path changed while it was being opened: ${absPath}`,
-			{ templatePath: absPath, templateName: validatedName },
-		);
+		]);
 	}
 }
 
@@ -808,25 +745,20 @@ function openedFilePath(fd: number): string | undefined {
 	}
 }
 
-function assertResolvedInsideRoot(
-	resolvedPath: string,
-	root: string,
-	validatedName: string,
-): void {
+function assertResolvedInsideRoot(resolvedPath: string, root: string): void {
 	const rel = path.relative(root, resolvedPath);
 	if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			`Resolved template path escapes the templates root via symlink: ${resolvedPath} is outside ${root}`,
-			{ templatePath: resolvedPath, templateName: validatedName },
-		);
+		]);
 	}
 }
 
 /** One template the composition needs before it can continue. */
 interface LoadRequest {
 	readonly absPath: string;
-	readonly validatedName: string;
+	/** The template's name, which a parse error is labelled with. */
+	readonly name: string;
 	readonly root: string;
 	/** `disk::name` key of an in-memory template that would answer the load. */
 	readonly memoryKey: string;
@@ -866,20 +798,18 @@ type RenderSteps = Generator<
 
 function askedForAst(answer: ParsedTemplate | string): ParsedTemplate {
 	if (typeof answer === "string") {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			"render driver answered a template load with rendered HTML",
-		);
+		]);
 	}
 	return answer;
 }
 
 function askedForHtml(answer: ParsedTemplate | string): string {
 	if (typeof answer !== "string") {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new errors.E_INKER_INVALID_PATH([
 			"render driver answered a sub-render with a template AST",
-		);
+		]);
 	}
 	return answer;
 }
@@ -903,11 +833,11 @@ function memoryKey(name: string, prefix = ""): string {
 /** Shorthand so a request reads like the call it replaced. */
 function loadRequest(
 	absPath: string,
-	validatedName: string,
+	name: string,
 	root: string,
 	memoryKey: string,
 ): LoadRequest {
-	return { absPath, validatedName, root, memoryKey };
+	return { absPath, name, root, memoryKey };
 }
 
 /** A callable global doubles as a helper, so the parser accepts `{{ name(x) }}`
@@ -1082,10 +1012,9 @@ export class Templates {
 		);
 		const existing = this.#disks.get(diskName);
 		if (existing !== undefined && existing !== root) {
-			throw new InkerRenderError(
-				"E_INKER_DISK_COLLISION",
+			throw new errors.E_INKER_DISK_COLLISION([
 				`Disk "${diskName}" is already mounted to "${existing}"; refusing to overwrite it with "${root}". Call unmount(${JSON.stringify(diskName)}) first to replace it.`,
-			);
+			]);
 		}
 		this.#disks.set(diskName, root);
 		// Bare names now resolve somewhere else; component tags follow the disk.
@@ -1135,22 +1064,19 @@ export class Templates {
 	registerTag(tag: InkerTag): void {
 		const name = tag?.tagName;
 		if (typeof name !== "string" || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`registerTag — tagName must be a valid identifier (letters, digits, underscore; not starting with a digit); got ${JSON.stringify(name)}`,
-			);
+			]);
 		}
 		if (RESERVED_TAG_NAMES.has(name)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`registerTag({ tagName: '${name}' }) — '${name}' is a built-in inker directive and cannot be overridden`,
-			);
+			]);
 		}
 		if (typeof tag.compile !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`registerTag({ tagName: '${name}' }) — compile must be a function`,
-			);
+			]);
 		}
 		this.#tags.set(name, tag);
 		// A new tag name changes parse output; drop any AST parsed without it.
@@ -1175,13 +1101,12 @@ export class Templates {
 	 * separate loader object, so the disk surface lives on the engine itself.
 	 */
 	resolve(name: string): { template: string } {
-		const { root, validated, absPath, memoryKey } =
-			this.#resolveTemplateFile(name);
+		const { root, absPath, memoryKey } = this.#resolveTemplateFile(name);
 		const inMemory = this.#inMemory.get(memoryKey);
 		if (inMemory !== undefined) return { template: inMemory };
 		// The same guarded read a render does: the root is a containment
 		// boundary for every way a template's source leaves the disk.
-		return { template: readContainedSync(absPath, root, validated) };
+		return { template: readContainedSync(absPath, root) };
 	}
 
 	/** The mounted disks, name → canonicalised root (Edge `loader.mounted`).
@@ -1356,11 +1281,9 @@ export class Templates {
 		const root =
 			disk === "default" ? this.#defaultRoot() : this.#disks.get(disk);
 		if (root === undefined) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Unknown templates disk '${disk}' in '${name}' — mount it with Templates#mount('${disk}', dir) first`,
-				{ templateName: name },
-			);
+			]);
 		}
 		return { root, bare };
 	}
@@ -1378,7 +1301,7 @@ export class Templates {
 		const { root, bare } = this.#splitDisk(name);
 		const validated = validateName(`${prefix}${bare}`);
 		const absPath = path.join(root, `${validated}${TEMPLATE_EXT}`);
-		assertContained(root, absPath, validated);
+		assertContained(root, absPath);
 		return { root, validated, absPath, memoryKey: memoryKey(name, prefix) };
 	}
 
@@ -1425,7 +1348,7 @@ export class Templates {
 			try {
 				ast = await this.#loadAst(
 					req.absPath,
-					req.validatedName,
+					req.name,
 					req.root,
 					req.memoryKey,
 				);
@@ -1468,12 +1391,7 @@ export class Templates {
 			}
 			let ast: ParsedTemplate;
 			try {
-				ast = this.#loadAstSync(
-					req.absPath,
-					req.validatedName,
-					req.root,
-					req.memoryKey,
-				);
+				ast = this.#loadAstSync(req.absPath, req.name, req.root, req.memoryKey);
 			} catch (e) {
 				next = step.throw(e);
 				continue;
@@ -1630,18 +1548,22 @@ export class Templates {
 			const accept = (ast: ParsedTemplate): readonly InkerNodeJson[] => {
 				const info = ast.info;
 				if (info.hasLayout) {
-					throw new InkerRenderError(
-						"E_INKER_LAYOUT_IN_PARTIAL",
+					throw new InkerError(
 						`${isComponent ? "Component" : "Partial"} file '${validated}' contains @layout() — ${isComponent ? "components" : "partials"} cannot declare layouts`,
-						{ templatePath: absPath, templateName: validated },
+						"E_INKER_LAYOUT_IN_PARTIAL",
+						{ line: 0, col: 0, filename: validated },
 					);
 				}
 				const slot = info.slots[0];
 				if (!isComponent && slot !== undefined) {
-					throw new InkerRenderError(
-						"E_INKER_UNKNOWN_SLOT",
+					throw new InkerError(
 						`Partial '${validated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
-						{ templateName: validated, line: slot.line, column: slot.column },
+						"E_INKER_UNKNOWN_SLOT",
+						{
+							line: slot.line ?? 0,
+							col: slot.column ?? 0,
+							filename: validated,
+						},
 					);
 				}
 				const nodes = ast.nodes;
@@ -1723,34 +1645,39 @@ export class Templates {
 		// (not a body node), so `firstDiskNode` won't surface it — check
 		// `hasLayout` explicitly to preserve the renderString disk-required guard.
 		if (info.hasLayout) {
-			throw new InkerRenderError(
-				"E_INKER_DISK_REQUIRED",
+			throw new InkerError(
 				`Templates#renderString cannot resolve @layout('${info.layoutName ?? ""}') — use Templates#render(name, data) instead`,
+				"E_INKER_DISK_REQUIRED",
+				{ line: 0, col: 0, filename: "" },
 			);
 		}
 		const disk = info.firstDiskNode;
 		if (disk !== null && disk !== undefined) {
 			if (disk.kind === "Layout") {
-				throw new InkerRenderError(
-					"E_INKER_DISK_REQUIRED",
+				throw new InkerError(
 					`Templates#renderString cannot resolve @layout('${disk.name}') — use Templates#render(name, data) instead`,
+					"E_INKER_DISK_REQUIRED",
+					{ line: 0, col: 0, filename: "" },
 				);
 			}
 			if (disk.kind === "Partial") {
-				throw new InkerRenderError(
-					"E_INKER_DISK_REQUIRED",
+				throw new InkerError(
 					`Templates#renderString cannot resolve @include('${disk.name}') — use Templates#render(name, data) instead`,
+					"E_INKER_DISK_REQUIRED",
+					{ line: 0, col: 0, filename: "" },
 				);
 			}
 			if (disk.kind === "Component") {
-				throw new InkerRenderError(
-					"E_INKER_DISK_REQUIRED",
+				throw new InkerError(
 					`Templates#renderString cannot resolve @component('${disk.name}') — use Templates#render(name, data) instead`,
+					"E_INKER_DISK_REQUIRED",
+					{ line: 0, col: 0, filename: "" },
 				);
 			}
-			throw new InkerRenderError(
-				"E_INKER_DISK_REQUIRED",
+			throw new InkerError(
 				`Templates#renderString cannot use {{> ${disk.name} }} outside of a layout — the slot has no parent layout to inject into`,
+				"E_INKER_DISK_REQUIRED",
+				{ line: 0, col: 0, filename: "" },
 			);
 		}
 
@@ -1781,27 +1708,22 @@ export class Templates {
 	 */
 	global(name: string, value: unknown): void {
 		if (typeof name !== "string") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Global name must be a string; got ${typeof name}`,
-			);
+			]);
 		}
 		if (!HELPER_NAME_RE.test(name)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Global name '${name}' is not a valid identifier (must match /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)`,
-				{ templateName: name },
-			);
+			]);
 		}
 		// Same denylist as object-literal keys and each-bindings: a global named
 		// `__proto__` / `constructor` / `prototype` would be assigned onto the
 		// merged state object and shadow Object.prototype for every template.
 		if (PROTOTYPE_POLLUTION_KEYS.has(name)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Global name '${name}' is not allowed (prototype-pollution key)`,
-				{ templateName: name },
-			);
+			]);
 		}
 		this.#globals.set(name, value);
 		if (isHelperFn(value)) {
@@ -1845,10 +1767,9 @@ export class Templates {
 		options?: T,
 	): this {
 		if (typeof plugin !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Plugin must be a function; got ${typeof plugin}`,
-			);
+			]);
 		}
 		// Registration only. Edge defers plugins to the first render so one
 		// registered before `mount()` or `configure()` still observes the engine
@@ -1905,10 +1826,9 @@ export class Templates {
 	 */
 	onRender(callback: (renderer: TemplateRenderer) => void): this {
 		if (typeof callback !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`onRender() expects a function; got ${typeof callback}`,
-			);
+			]);
 		}
 		this.#renderCallbacks.push(callback);
 		return this;
@@ -1994,7 +1914,7 @@ export class Templates {
 	 * Parse a template from disk WITHOUT rendering it (Edge `compile`) — the
 	 * syntax check a linter or an editor integration wants.
 	 *
-	 * Throws {@link InkerRenderError} carrying `code`, `line` and `column` when
+	 * Throws an inker error carrying `code`, `line` and `column` when
 	 * the template does not parse; returns nothing when it does.
 	 *
 	 * Named deviation, NAPI: Edge compiles to a JavaScript function and hands
@@ -2064,16 +1984,14 @@ export class Templates {
 	 */
 	registerTemplate(name: string, contents: { template: string }): void {
 		if (typeof name !== "string" || name.length === 0) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`registerTemplate — name must be a non-empty string; got ${typeof name}`,
-			);
+			]);
 		}
 		if (typeof contents?.template !== "string") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`registerTemplate('${name}') — contents.template must be a string`,
-			);
+			]);
 		}
 		// Validate the name on the same rules as a disk lookup: an in-memory
 		// template must not be reachable under a name a file could never carry,
@@ -2081,10 +1999,9 @@ export class Templates {
 		// Keyed with its disk, so `welcome` never answers `admin::welcome`.
 		const key = memoryKey(name);
 		if (this.#inMemory.has(key)) {
-			throw new InkerRenderError(
-				"E_INKER_TEMPLATE_COLLISION",
+			throw new errors.E_INKER_TEMPLATE_COLLISION([
 				`Template "${name}" is already registered; refusing to override it. Call removeTemplate(${JSON.stringify(name)}) first to replace it.`,
-			);
+			]);
 		}
 		this.#inMemory.set(key, contents.template);
 		// A `components/` template is a component tag too: rescan.
@@ -2111,9 +2028,22 @@ export class Templates {
 		this.#inflight.clear();
 	}
 
+	/** Load a template's AST, its parse error named after the template. */
 	async #loadAst(
 		absPath: string,
-		validatedName: string,
+		name: string,
+		root: string,
+		memoryKey: string,
+	): Promise<ParsedTemplate> {
+		try {
+			return await this.#loadAstUnlabelled(absPath, root, memoryKey);
+		} catch (err) {
+			throw labelledError(err, name);
+		}
+	}
+
+	async #loadAstUnlabelled(
+		absPath: string,
 		root: string,
 		memoryKey: string,
 	): Promise<ParsedTemplate> {
@@ -2136,7 +2066,7 @@ export class Templates {
 		const inflight = this.#inflight.get(cacheKey);
 		if (inflight !== undefined) return inflight;
 
-		const promise = this.#loadAstUncached(absPath, validatedName, root);
+		const promise = this.#loadAstUncached(absPath, root);
 		this.#inflight.set(cacheKey, promise);
 		try {
 			return await promise;
@@ -2147,7 +2077,6 @@ export class Templates {
 
 	async #loadAstUncached(
 		absPath: string,
-		validatedName: string,
 		root: string,
 	): Promise<ParsedTemplate> {
 		// T7: snapshot the cache generation. If clearCache() runs while this
@@ -2168,7 +2097,7 @@ export class Templates {
 			try {
 				currentMtime = (await fsPromises.stat(absPath)).mtimeMs;
 			} catch (cause) {
-				throw wrapFsError(cause, absPath, validatedName);
+				throw wrapFsError(cause, absPath);
 			}
 			// D1: treat mtime === 0 as "no timestamp available" rather than a
 			// real value. Some FUSE filesystems, tar restores, and certain
@@ -2200,15 +2129,15 @@ export class Templates {
 				fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
 			);
 		} catch (cause) {
-			throw wrapFsError(cause, absPath, validatedName);
+			throw wrapFsError(cause, absPath);
 		}
 		let source: string;
 		try {
-			assertOpenedFileContained(handle.fd, absPath, root, validatedName);
+			assertOpenedFileContained(handle.fd, absPath, root);
 			try {
 				source = await handle.readFile("utf8");
 			} catch (cause) {
-				throw wrapFsError(cause, absPath, validatedName);
+				throw wrapFsError(cause, absPath);
 			}
 		} finally {
 			await handle.close();
@@ -2264,11 +2193,7 @@ export class Templates {
 	 * (`#parseAndCache`) are the SAME functions, so the two paths cannot drift
 	 * on the parts that matter.
 	 */
-	#loadAstUncachedSync(
-		absPath: string,
-		validatedName: string,
-		root: string,
-	): ParsedTemplate {
+	#loadAstUncachedSync(absPath: string, root: string): ParsedTemplate {
 		const loadGeneration = this.#cacheGeneration;
 		const cacheKey = `${root}\u0000${absPath}`;
 		const cached = this.#cache.get(cacheKey);
@@ -2282,7 +2207,7 @@ export class Templates {
 			try {
 				currentMtime = fs.statSync(absPath).mtimeMs;
 			} catch (cause) {
-				throw wrapFsError(cause, absPath, validatedName);
+				throw wrapFsError(cause, absPath);
 			}
 			// D1: mtimeMs 0 is a "no timestamp" sentinel on some filesystems —
 			// caching on it would freeze the template forever. See the async twin.
@@ -2295,7 +2220,7 @@ export class Templates {
 			}
 		}
 
-		const source = readContainedSync(absPath, root, validatedName);
+		const source = readContainedSync(absPath, root);
 
 		return this.#parseAndCache(
 			source,
@@ -2312,7 +2237,19 @@ export class Templates {
 	 */
 	#loadAstSync(
 		absPath: string,
-		validatedName: string,
+		name: string,
+		root: string,
+		memoryKey: string,
+	): ParsedTemplate {
+		try {
+			return this.#loadAstUnlabelledSync(absPath, root, memoryKey);
+		} catch (err) {
+			throw labelledError(err, name);
+		}
+	}
+
+	#loadAstUnlabelledSync(
+		absPath: string,
 		root: string,
 		memoryKey: string,
 	): ParsedTemplate {
@@ -2321,7 +2258,7 @@ export class Templates {
 			const source = this.#applyRaw(inMemory);
 			return this.#parse(source);
 		}
-		return this.#loadAstUncachedSync(absPath, validatedName, root);
+		return this.#loadAstUncachedSync(absPath, root);
 	}
 
 	*#compose(
@@ -2351,14 +2288,13 @@ export class Templates {
 		// layout-yield context.
 		const bodySlot = entryInfo.slots[0];
 		if (bodySlot !== undefined) {
-			throw new InkerRenderError(
-				"E_INKER_UNKNOWN_SLOT",
+			throw new InkerError(
 				`{{> ${bodySlot.name} }} outside of a layout — slot placeholders are only valid inside layout files (got at line ${bodySlot.line}, column ${bodySlot.column} in '${entryName}')`,
+				"E_INKER_UNKNOWN_SLOT",
 				{
-					templatePath: entryAbsPath,
-					templateName: entryName,
-					line: bodySlot.line,
-					column: bodySlot.column,
+					line: bodySlot.line ?? 0,
+					col: bodySlot.column ?? 0,
+					filename: entryName,
 				},
 			);
 		}
@@ -2381,10 +2317,10 @@ export class Templates {
 		// `#resolveTemplateFile` as `undefined` instead of raising here.
 		if (layoutName === undefined) {
 			// hasLayout true but no name — should be impossible (parse invariant).
-			throw new InkerRenderError(
-				"E_INKER_INVALID_LAYOUT_POSITION",
+			throw new InkerError(
 				`Internal: layout flagged but no layout name on '${entryName}'`,
-				{ templatePath: entryAbsPath, templateName: entryName },
+				"E_INKER_INVALID_LAYOUT_POSITION",
+				{ line: 0, col: 0, filename: entryName },
 			);
 		}
 		const layoutLine = entryInfo.layoutLine ?? undefined;
@@ -2397,15 +2333,10 @@ export class Templates {
 		} = this.#resolveTemplateFile(layoutName);
 
 		if (includeStack.has(layoutAbsPath)) {
-			throw new InkerRenderError(
-				"E_INKER_CIRCULAR_INCLUDE",
+			throw new InkerError(
 				`Circular include: ${this.#cycleString(includeStack, layoutAbsPath)} (started at ${entryAbsPath})`,
-				{
-					templatePath: layoutAbsPath,
-					templateName: layoutValidated,
-					line: layoutLine,
-					column: layoutColumn,
-				},
+				"E_INKER_CIRCULAR_INCLUDE",
+				{ line: layoutLine ?? 0, col: layoutColumn ?? 0, filename: entryName },
 			);
 		}
 
@@ -2430,14 +2361,13 @@ export class Templates {
 
 			// Nested-layout rejection.
 			if (layoutInfo.hasLayout) {
-				throw new InkerRenderError(
-					"E_INKER_NESTED_LAYOUT_UNSUPPORTED",
+				throw new InkerError(
 					`Layout file '${layoutValidated}' itself contains @layout() — nested layouts are not supported`,
+					"E_INKER_NESTED_LAYOUT_UNSUPPORTED",
 					{
-						templatePath: layoutAbsPath,
-						templateName: layoutValidated,
-						line: layoutInfo.layoutLine ?? undefined,
-						column: layoutInfo.layoutColumn ?? undefined,
+						line: layoutInfo.layoutLine ?? 0,
+						col: layoutInfo.layoutColumn ?? 0,
+						filename: layoutValidated,
 					},
 				);
 			}
@@ -2445,14 +2375,13 @@ export class Templates {
 			// Unknown-slot rejection (any slot whose name is not "body").
 			const unknownSlot = layoutInfo.slots.find((s) => s.name !== "body");
 			if (unknownSlot !== undefined) {
-				throw new InkerRenderError(
-					"E_INKER_UNKNOWN_SLOT",
+				throw new InkerError(
 					`Unknown slot '${unknownSlot.name}' — Inker 53.2 only supports {{> body }}. Named sections arrive in 53.3.`,
+					"E_INKER_UNKNOWN_SLOT",
 					{
-						templatePath: layoutAbsPath,
-						templateName: layoutValidated,
-						line: unknownSlot.line,
-						column: unknownSlot.column,
+						line: unknownSlot.line ?? 0,
+						col: unknownSlot.column ?? 0,
+						filename: layoutValidated,
 					},
 				);
 			}
@@ -2460,13 +2389,10 @@ export class Templates {
 			// Missing-slot rejection (D11) — only when the body has real content.
 			const hasBodySlot = layoutInfo.slots.some((s) => s.name === "body");
 			if (!hasBodySlot && entryInfo.hasContent) {
-				throw new InkerRenderError(
-					"E_INKER_MISSING_SLOT",
+				throw new InkerError(
 					`Layout '${layoutValidated}' has no {{> body }} placeholder, cannot render body of child '${entryName}'`,
-					{
-						templatePath: layoutAbsPath,
-						templateName: layoutValidated,
-					},
+					"E_INKER_MISSING_SLOT",
+					{ line: 0, col: 0, filename: layoutValidated },
 				);
 			}
 
@@ -2531,14 +2457,13 @@ export class Templates {
 			const info = partialAst.info;
 			// Layout-in-partial rejection.
 			if (info.hasLayout) {
-				throw new InkerRenderError(
-					"E_INKER_LAYOUT_IN_PARTIAL",
+				throw new InkerError(
 					`Partial file '${partialValidated}' contains @layout() — partials cannot declare layouts`,
+					"E_INKER_LAYOUT_IN_PARTIAL",
 					{
-						templatePath: partialAbsPath,
-						templateName: partialValidated,
-						line: info.layoutLine ?? undefined,
-						column: info.layoutColumn ?? undefined,
+						line: info.layoutLine ?? 0,
+						col: info.layoutColumn ?? 0,
+						filename: partialValidated,
 					},
 				);
 			}
@@ -2546,13 +2471,13 @@ export class Templates {
 			// Slot-in-partial rejection: slots only mean something in layouts.
 			const slot = info.slots[0];
 			if (slot !== undefined) {
-				throw new InkerRenderError(
-					"E_INKER_UNKNOWN_SLOT",
+				throw new InkerError(
 					`Partial '${partialValidated}' contains {{> ${slot.name} }} — slot placeholders are only valid inside layout files (line ${slot.line}, column ${slot.column})`,
+					"E_INKER_UNKNOWN_SLOT",
 					{
-						templateName: partialValidated,
-						line: slot.line,
-						column: slot.column,
+						line: slot.line ?? 0,
+						col: slot.column ?? 0,
+						filename: partialValidated,
 					},
 				);
 			}
@@ -2608,14 +2533,13 @@ export class Templates {
 			// Layout-in-component rejection (reuse E_INKER_LAYOUT_IN_PARTIAL
 			// per AC5: same axis "layout in non-entry file").
 			if (info.hasLayout) {
-				throw new InkerRenderError(
-					"E_INKER_LAYOUT_IN_PARTIAL",
+				throw new InkerError(
 					`Component file '${componentValidated}' contains @layout() — components cannot declare layouts`,
+					"E_INKER_LAYOUT_IN_PARTIAL",
 					{
-						templatePath: componentAbsPath,
-						templateName: componentValidated,
-						line: info.layoutLine ?? undefined,
-						column: info.layoutColumn ?? undefined,
+						line: info.layoutLine ?? 0,
+						col: info.layoutColumn ?? 0,
+						filename: componentValidated,
 					},
 				);
 			}
@@ -2646,6 +2570,17 @@ export class Templates {
 export default Templates;
 
 /**
+ * Name the template an error came from when the error does not already: a
+ * source string has no path of its own, so the caller's label is the only
+ * thing that tells a reader WHICH template failed.
+ */
+function labelledError(err: unknown, templateName: string): unknown {
+	return isInkerError(err)
+		? inTemplate(err, { line: 0, col: 0, filename: templateName })
+		: err;
+}
+
+/**
  * A renderer with its own shared state (Edge `edge.createRenderer`).
  *
  * Created per request so `share()` state — the current URL, the signed-in user,
@@ -2656,22 +2591,6 @@ export default Templates;
  * then the data passed to the render call. The merge happens here, so the
  * engine needs no notion of who is rendering.
  */
-/**
- * Name the template an error came from when the error does not already: a
- * source string has no path of its own, so the caller's label is the only
- * thing that tells a reader WHICH template failed.
- */
-function labelledError(err: unknown, templateName: string): unknown {
-	if (!(err instanceof InkerRenderError)) return err;
-	if (err.context.templateName !== undefined) return err;
-	return new InkerRenderError(
-		err.code,
-		err.message,
-		{ ...err.context, templateName },
-		{ cause: err },
-	);
-}
-
 /** An object literal's shape: plain prototype, or none. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null) return false;
@@ -2755,10 +2674,9 @@ export class TemplateRenderer {
 	 */
 	share(data: Readonly<Record<string, unknown>>): this {
 		if (typeof data !== "object" || data === null || Array.isArray(data)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`share() expects an object; got ${data === null ? "null" : typeof data}`,
-			);
+			]);
 		}
 		mergeShared(this.#shared, data, new WeakMap());
 		return this;

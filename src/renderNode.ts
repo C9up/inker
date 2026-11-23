@@ -1,6 +1,12 @@
+import type { Exception } from "@c9up/flare";
 import { hasAwaitOperator } from "./awaitToken.js";
 import { classNames, htmlAttrs, INKER_GLOBALS } from "./globals.js";
-import { InkerRenderError } from "./InkerRenderError.js";
+import {
+	InkerError,
+	inTemplate,
+	isInkerError,
+	isInkerException,
+} from "./inkerError.js";
 import { LruCache } from "./lruCache.js";
 import { SafeString } from "./SafeString.js";
 import type { Stacks } from "./stacks.js";
@@ -428,10 +434,10 @@ function compileExpr(source: string): CompiledExpr {
 		// is non-strict), so the scope chain is identical either way.
 		fn = compileExprFunction(source);
 	} catch (cause) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_EXPRESSION",
+		throw new InkerError(
 			`invalid expression \`${source}\`: ${errMessage(cause)}`,
-			undefined,
+			"E_INKER_INVALID_EXPRESSION",
+			{ line: 0, col: 0, filename: "" },
 			{ cause },
 		);
 	}
@@ -448,11 +454,11 @@ function isStackOverflow(e: unknown): boolean {
 	return e instanceof RangeError && /call stack/i.test(e.message);
 }
 
-function depthError(cause: unknown): InkerRenderError {
-	return new InkerRenderError(
-		"E_INKER_RENDER_DEPTH",
+function depthError(cause: unknown): InkerError {
+	return new InkerError(
 		`the render nested too deep: ${errMessage(cause)}`,
-		undefined,
+		"E_INKER_RENDER_DEPTH",
+		{ line: 0, col: 0, filename: "" },
 		{ cause },
 	);
 }
@@ -466,15 +472,15 @@ function evalExpr(
 	try {
 		return compileExpr(source)(scope, helpers);
 	} catch (cause) {
-		if (cause instanceof InkerRenderError) throw cause;
+		if (isInkerException(cause)) throw cause;
 		if (isStackOverflow(cause)) throw depthError(cause);
 		const msg = errMessage(cause);
 		const callee = unknownCallee(msg, scope, helpers);
 		if (callee !== undefined) {
-			throw new InkerRenderError(
-				"E_INKER_UNKNOWN_IDENTIFIER",
+			throw new InkerError(
 				`'${callee}' is not a helper, a global or a function in the render data${suggestHelper(callee, helpers)}`,
-				{ line: pos?.line, column: pos?.column, expression: source },
+				"E_INKER_UNKNOWN_IDENTIFIER",
+				{ line: pos?.line ?? 0, col: pos?.column ?? 0, filename: "" },
 				{ cause },
 			);
 		}
@@ -483,10 +489,10 @@ function evalExpr(
 		const code = /is not defined|cannot read propert/i.test(msg)
 			? "E_INKER_UNKNOWN_IDENTIFIER"
 			: "E_INKER_INVALID_EXPRESSION";
-		throw new InkerRenderError(
-			code,
+		throw new InkerError(
 			msg,
-			{ line: pos?.line, column: pos?.column },
+			code,
+			{ line: pos?.line ?? 0, col: pos?.column ?? 0, filename: "" },
 			{ cause },
 		);
 	}
@@ -576,9 +582,10 @@ function driveSync(step: RenderStep, out: string[], what: string): string {
 	const next = guardDepth(() => step.next());
 	while (!next.done) {
 		step.return(undefined);
-		throw new InkerRenderError(
-			"E_INKER_ASYNC_NOT_SUPPORTED",
+		throw new InkerError(
 			`${what} cannot use \`await\` — it renders synchronously`,
+			"E_INKER_ASYNC_NOT_SUPPORTED",
+			{ line: 0, col: 0, filename: "" },
 		);
 	}
 	return out.join("");
@@ -662,10 +669,10 @@ function evalLetDestructure(
 			// `Record<string, unknown>` result without a cast.
 			fn = (s, h) => compiled(MISSING_AS_UNDEFINED, SANDBOX_SHADOW, h, s);
 		} catch (cause) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
+			throw new InkerError(
 				`invalid @let destructuring \`${pattern} = ${rhs}\`: ${errMessage(cause)}`,
-				{ line: pos.line, column: pos.column },
+				"E_INKER_INVALID_EXPRESSION",
+				{ line: pos.line ?? 0, col: pos.column ?? 0, filename: "" },
 				{ cause },
 			);
 		}
@@ -674,17 +681,17 @@ function evalLetDestructure(
 	try {
 		return fn(scope, helpers);
 	} catch (cause) {
-		if (cause instanceof InkerRenderError) throw cause;
+		if (isInkerException(cause)) throw cause;
 		const msg = errMessage(cause);
 		const code = /is not defined|cannot read propert|cannot destructure/i.test(
 			msg,
 		)
 			? "E_INKER_UNKNOWN_IDENTIFIER"
 			: "E_INKER_INVALID_EXPRESSION";
-		throw new InkerRenderError(
-			code,
+		throw new InkerError(
 			msg,
-			{ line: pos.line, column: pos.column },
+			code,
+			{ line: pos.line ?? 0, col: pos.column ?? 0, filename: "" },
 			{ cause },
 		);
 	}
@@ -706,10 +713,10 @@ function stringifyScalar(v: unknown, source: string): string {
 			try {
 				return String(v);
 			} catch (cause) {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					`cannot interpolate the value of \`${source}\`: ${errMessage(cause)}`,
-					undefined,
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: 0, col: 0, filename: "" },
 					{ cause },
 				);
 			}
@@ -747,8 +754,8 @@ export interface NodeRenderContext {
 	 * one actually renders — Edge resolves them at that point, so one behind an
 	 * untaken `@if` / `@includeIf` costs nothing.
 	 */
-	readonly missingPartials?: ReadonlyMap<string, InkerRenderError>;
-	readonly missingComponents?: ReadonlyMap<string, InkerRenderError>;
+	readonly missingPartials?: ReadonlyMap<string, Exception>;
+	readonly missingComponents?: ReadonlyMap<string, Exception>;
 	/** How many partials / components deep this walk is. */
 	readonly depth?: number;
 	/**
@@ -814,10 +821,10 @@ const MAX_TEMPLATE_DEPTH = 100;
 function nextDepth(ctx: NodeRenderContext, what: string): number {
 	const depth = (ctx.depth ?? 0) + 1;
 	if (depth > MAX_TEMPLATE_DEPTH) {
-		throw new InkerRenderError(
-			"E_INKER_RENDER_DEPTH",
+		throw new InkerError(
 			`${what} nests partials/components more than ${MAX_TEMPLATE_DEPTH} levels deep — a recursion that never ends on the data`,
-			{ templateName: ctx.templateName },
+			"E_INKER_RENDER_DEPTH",
+			{ line: 0, col: 0, filename: ctx.templateName ?? "" },
 		);
 	}
 	return depth;
@@ -891,10 +898,10 @@ function requireStacks(
 	pos: { readonly line?: number; readonly column?: number },
 ): Stacks {
 	if (ctx.stacks === undefined) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_EXPRESSION",
+		throw new InkerError(
 			`${tag} used in a render with no stack store`,
-			{ line: pos.line, column: pos.column },
+			"E_INKER_INVALID_EXPRESSION",
+			{ line: pos.line ?? 0, col: pos.column ?? 0, filename: "" },
 		);
 	}
 	return ctx.stacks;
@@ -923,6 +930,25 @@ function rootFrame(scope: object): object {
 
 // ---- The walker ----
 
+/**
+ * Give an error raised while rendering `node` the template it belongs to, and
+ * the node's line when the error had none: Edge reads both off the token that
+ * compiled the failing expression. The innermost template catches first, so
+ * an error in a partial names the partial, not the page that included it.
+ */
+function inNode(
+	err: unknown,
+	node: InkerNodeJson,
+	ctx: NodeRenderContext,
+): unknown {
+	if (!isInkerError(err)) return err;
+	return inTemplate(err, {
+		line: "line" in node && node.line !== undefined ? node.line : 0,
+		col: "column" in node && node.column !== undefined ? node.column : 0,
+		filename: ctx.templateName ?? "",
+	});
+}
+
 /** Render a list of sibling nodes, threading `@let` bindings forward. */
 function* renderNodes(
 	nodes: readonly InkerNodeJson[],
@@ -933,30 +959,34 @@ function* renderNodes(
 ): RenderStep {
 	let scope = data;
 	for (const node of nodes) {
-		if (node.type === "Let") {
-			// `@let` short-circuits `renderNode`, so its own line has to be
-			// stamped here or the binding would evaluate under the previous
-			// node's `$lineNumber`.
-			if (node.line !== undefined) helpers.$lineNumber = node.line;
-			if (node.destructure) {
-				scope = childScope(
-					scope,
-					evalLetDestructure(
-						node.name,
-						node.source,
-						node.names ?? [],
+		try {
+			if (node.type === "Let") {
+				// `@let` short-circuits `renderNode`, so its own line has to be
+				// stamped here or the binding would evaluate under the previous
+				// node's `$lineNumber`.
+				if (node.line !== undefined) helpers.$lineNumber = node.line;
+				if (node.destructure) {
+					scope = childScope(
 						scope,
-						helpers,
-						node,
-					),
-				);
-			} else {
-				const value = yield* evalStep(node.source, scope, helpers, node);
-				scope = childScope(scope, { [node.name]: value });
+						evalLetDestructure(
+							node.name,
+							node.source,
+							node.names ?? [],
+							scope,
+							helpers,
+							node,
+						),
+					);
+				} else {
+					const value = yield* evalStep(node.source, scope, helpers, node);
+					scope = childScope(scope, { [node.name]: value });
+				}
+				continue;
 			}
-			continue;
+			yield* renderNode(node, scope, helpers, ctx, out);
+		} catch (err) {
+			throw inNode(err, node, ctx);
 		}
-		yield* renderNode(node, scope, helpers, ctx, out);
 	}
 }
 
@@ -1069,10 +1099,10 @@ function* renderNode(
 			// `@dd` — dump and die. The dump is already in `out`, but the render
 			// is abandoned, so it is carried on the error for the caller to show.
 			if (node.die) {
-				throw new InkerRenderError(
-					"E_INKER_DUMP_DIE",
+				throw new InkerError(
 					`@dd(${node.source}) stopped the render:\n${json}`,
-					{ line: node.line, column: node.column, expression: node.source },
+					"E_INKER_DUMP_DIE",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			return;
@@ -1115,18 +1145,18 @@ function* renderNode(
 		}
 		case "Inject": {
 			if (ctx.context === undefined) {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					"@inject can only be used inside a component — there is no $context to write to at the top level",
-					{ line: node.line, column: node.column },
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			const value = yield* evalStep(node.source, scope, helpers, node);
 			if (!isRecord(value)) {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					`@inject(${node.source}) expects an object, got ${value === null ? "null" : typeof value}`,
-					{ line: node.line, column: node.column },
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			for (const key of Object.keys(value)) {
@@ -1150,31 +1180,31 @@ function* renderNode(
 			const [message, filename, line, column] = Array.isArray(parts)
 				? parts
 				: [parts];
-			throw new InkerRenderError(
-				"E_INKER_TEMPLATE_ERROR",
+			throw new InkerError(
 				typeof message === "string" ? message : String(message),
+				"E_INKER_TEMPLATE_ERROR",
 				{
-					line: typeof line === "number" ? line : node.line,
-					column: typeof column === "number" ? column : node.column,
-					templateName:
-						typeof filename === "string" ? filename : ctx.templateName,
+					line: typeof line === "number" ? line : (node.line ?? 0),
+					col: typeof column === "number" ? column : (node.column ?? 0),
+					filename:
+						typeof filename === "string" ? filename : (ctx.templateName ?? ""),
 				},
 			);
 		}
 		case "Stack": {
 			const name = yield* evalStep(node.source, scope, helpers, node);
 			if (typeof name !== "string") {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					`@stack(${node.source}) expects a string name, got ${typeof name}`,
-					{ line: node.line, column: node.column },
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			out.push(
 				requireStacks(ctx, "@stack", node).create(name, {
-					templateName: ctx.templateName,
-					line: node.line,
-					column: node.column,
+					line: node.line ?? 0,
+					col: node.column ?? 0,
+					filename: ctx.templateName ?? "",
 				}),
 			);
 			return;
@@ -1182,10 +1212,10 @@ function* renderNode(
 		case "PushTo": {
 			const name = yield* evalStep(node.source, scope, helpers, node);
 			if (typeof name !== "string") {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					`@${node.once ? "pushOnceTo" : "pushTo"}(${node.source}) expects a string name, got ${typeof name}`,
-					{ line: node.line, column: node.column },
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			const stacks = requireStacks(
@@ -1213,18 +1243,18 @@ function* renderNode(
 			// `@<tagName>(jsArg)` — a registered custom tag (Edge `registerTag`).
 			const tag = ctx.tags?.get(node.name);
 			if (tag === undefined) {
-				throw new InkerRenderError(
-					"E_INKER_UNKNOWN_TAG",
+				throw new InkerError(
 					`@${node.name} — no tag registered with this name (register it with \`templates.registerTag({ tagName: '${node.name}', … })\`)`,
-					{ line: node.line, column: node.column },
+					"E_INKER_UNKNOWN_TAG",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			const jsArg = node.args_source;
 			if (!tag.seekable && jsArg.trim() !== "") {
-				throw new InkerRenderError(
-					"E_INKER_INVALID_EXPRESSION",
+				throw new InkerError(
 					`@${node.name} does not accept arguments (registered with seekable: false)`,
-					{ line: node.line, column: node.column },
+					"E_INKER_INVALID_EXPRESSION",
+					{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 				);
 			}
 			const token: InkerTagToken = {
@@ -1262,10 +1292,10 @@ function* renderNode(
 						column: node.column,
 					});
 					if (isThenable(v)) {
-						throw new InkerRenderError(
-							"E_INKER_ASYNC_NOT_SUPPORTED",
+						throw new InkerError(
 							`@${node.name} cannot output an awaited expression — a tag renders synchronously`,
-							{ line, column: node.column },
+							"E_INKER_ASYNC_NOT_SUPPORTED",
+							{ line: line ?? 0, col: node.column ?? 0, filename: "" },
 						);
 					}
 					if (v instanceof SafeString) {
@@ -1290,9 +1320,10 @@ function* renderNode(
 			// no-op (its body/slot injection is handled outside the walker).
 			return;
 		default:
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
+			throw new InkerError(
 				`node type '${node.type}' is not yet handled by the Node renderer`,
+				"E_INKER_INVALID_EXPRESSION",
+				{ line: 0, col: 0, filename: "" },
 			);
 	}
 }
@@ -1337,9 +1368,10 @@ function* renderEach(
 			iterable === null || iterable === undefined
 				? " — wrap the loop in `@if()` to guard a possibly-absent value"
 				: "";
-		throw new InkerRenderError(
-			"E_INKER_INVALID_ITERABLE",
+		throw new InkerError(
 			`@each iterable \`${node.iterable_source}\` is not an array, a string or an object${hint}`,
+			"E_INKER_INVALID_ITERABLE",
+			{ line: 0, col: 0, filename: "" },
 		);
 	}
 
@@ -1510,10 +1542,10 @@ function* templateName(
 	if (node.name_source === undefined) return node.name;
 	const value = yield* evalStep(node.name_source, scope, helpers, node);
 	if (typeof value !== "string" || value.length === 0) {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_PATH",
+		throw new InkerError(
 			`${directive}(${node.name_source}) must name a template with a non-empty string, got ${value === null ? "null" : typeof value}`,
-			{ line: node.line, column: node.column },
+			"E_INKER_INVALID_PATH",
+			{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 		);
 	}
 	return value;
@@ -1543,17 +1575,19 @@ function* templateNodes(
 	)?.get(key);
 	if (missing !== undefined) throw missing;
 	if (ctx.loadTemplate === undefined) {
-		throw new InkerRenderError(
-			"E_INKER_DISK_REQUIRED",
+		throw new InkerError(
 			`@${kind === "partial" ? "include" : "component"}('${raw}') — no template loader in this render`,
+			"E_INKER_DISK_REQUIRED",
+			{ line: 0, col: 0, filename: "" },
 		);
 	}
 	const loaded = ctx.loadTemplate(kind, raw);
 	const nodes = isThenable(loaded) ? yield loaded : loaded;
 	if (!isNodeList(nodes)) {
-		throw new InkerRenderError(
-			"E_INKER_DISK_REQUIRED",
+		throw new InkerError(
 			`@${kind === "partial" ? "include" : "component"}('${raw}') — the loader returned no template`,
+			"E_INKER_DISK_REQUIRED",
+			{ line: 0, col: 0, filename: "" },
 		);
 	}
 	return nodes;
@@ -1575,18 +1609,18 @@ function* componentProps(
 	const value = yield* evalStep(node.props_source, scope, helpers, node);
 	if (value === null || value === undefined) return props;
 	if (typeof value !== "object") {
-		throw new InkerRenderError(
-			"E_INKER_INVALID_EXPRESSION",
+		throw new InkerError(
 			`@component props \`${node.props_source}\` must be an object, got ${typeof value}`,
-			{ line: node.line, column: node.column },
+			"E_INKER_INVALID_EXPRESSION",
+			{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 		);
 	}
 	for (const key of Object.keys(value)) {
 		if (PROTO_KEYS.has(key)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
+			throw new InkerError(
 				`@component props key '${key}' is forbidden (prototype-pollution surface)`,
-				{ line: node.line, column: node.column },
+				"E_INKER_INVALID_EXPRESSION",
+				{ line: node.line ?? 0, col: node.column ?? 0, filename: "" },
 			);
 		}
 		props[key] = Reflect.get(value, key);

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { nativeBinarySuffix } from "../../src/vendor/nativeBinary.js";
 
@@ -33,10 +33,10 @@ function codeOf(fn: () => unknown): string {
 	try {
 		fn();
 	} catch (e) {
-		if (e instanceof InkerRenderError) return e.code;
+		if (isInkerException(e)) return e.code;
 		throw e;
 	}
-	throw new Error("expected an InkerRenderError");
+	throw new Error("expected an inker error");
 }
 
 describe("block nesting depth", () => {

@@ -1,4 +1,5 @@
-import { InkerRenderError } from "./InkerRenderError.js";
+import type { Exception } from "@c9up/flare";
+import * as errors from "./errors.js";
 import { SafeString } from "./SafeString.js";
 import { type TruncatiseOptions, truncatise } from "./truncatise.js";
 
@@ -506,24 +507,21 @@ function jsonPathText(path: JsonPath): string {
 	return out === "" ? "the value" : out;
 }
 
-function invalidJsonLd(path: JsonPath, what: string): InkerRenderError {
+function invalidJsonLd(path: JsonPath, what: string): Exception {
 	const where =
 		path.length === 0
 			? "html.jsonLd was given"
 			: `html.jsonLd: ${jsonPathText(path)} is`;
-	return new InkerRenderError(
-		"E_INKER_INVALID_JSON_LD",
+	return new errors.E_INKER_INVALID_JSON_LD([
 		`${where} ${what}, which JSON-LD cannot hold`,
-	);
+	]);
 }
 
 /** A getter or `toJSON` of the caller's data threw: its error, not a cycle. */
-function jsonLdThrew(action: string, cause: unknown): InkerRenderError {
+function jsonLdThrew(action: string, cause: unknown): Exception {
 	const reason = cause instanceof Error ? cause.message : String(cause);
-	return new InkerRenderError(
-		"E_INKER_HELPER_THROW",
-		`html.jsonLd: ${action} threw: ${reason}`,
-		undefined,
+	return new errors.E_INKER_HELPER_THROW(
+		[`html.jsonLd: ${action} threw: ${reason}`],
 		{ cause },
 	);
 }

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 
 // `@component(name, props)` takes any JavaScript expression for the props
@@ -25,10 +25,10 @@ async function codeOf(fn: () => Promise<unknown>): Promise<string> {
 	try {
 		await fn();
 	} catch (e) {
-		if (e instanceof InkerRenderError) return e.code;
+		if (isInkerException(e)) return e.code;
 		throw e;
 	}
-	throw new Error("expected an InkerRenderError");
+	throw new Error("expected an inker error");
 }
 
 const data = { a: 1, list: [1, 2], user: { name: "ada" } };

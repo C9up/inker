@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerError } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 
 // Render data is plain JS evaluated in V8 — it never crosses the native
@@ -138,8 +138,8 @@ describe("render data — objects interpolated through their string form", () =>
 				render("{{ v }}", { v: value });
 				expect.fail("should have thrown");
 			} catch (e) {
-				expect(e).toBeInstanceOf(InkerRenderError);
-				if (e instanceof InkerRenderError) {
+				expect(e).toSatisfy(isInkerError);
+				if (isInkerError(e)) {
 					expect(e.code).toBe("E_INKER_INVALID_EXPRESSION");
 				}
 			}

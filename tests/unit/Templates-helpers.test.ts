@@ -2,11 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	type HelperFn,
-	type InkerRenderError,
-	SafeString,
-} from "../../src/index.js";
+import { type HelperFn, SafeString } from "../../src/index.js";
+import type { InkerError } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
@@ -47,8 +44,8 @@ describe("Templates — helpers option (constructor)", () => {
 			new Templates({ root, helpers });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain("reserved word");
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<InkerError>(e).message).toContain("reserved word");
 		}
 	});
 
@@ -58,10 +55,8 @@ describe("Templates — helpers option (constructor)", () => {
 			new Templates({ root, helpers });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain(
-				"prototype-pollution",
-			);
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<InkerError>(e).message).toContain("prototype-pollution");
 		}
 	});
 
@@ -76,9 +71,7 @@ describe("Templates — helpers option (constructor)", () => {
 			await tpl.render("x", {});
 			expect.fail("should have thrown — bogus() not in frozen name set");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNKNOWN_IDENTIFIER",
-			);
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_UNKNOWN_IDENTIFIER");
 		}
 	});
 
@@ -100,11 +93,9 @@ describe("Templates — helpers option (constructor)", () => {
 			await tpl.render("x", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNKNOWN_IDENTIFIER",
-			);
-			expect(asTyped<InkerRenderError>(e).message).toContain("'truncat'");
-			expect(asTyped<InkerRenderError>(e).message).toContain(
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_UNKNOWN_IDENTIFIER");
+			expect(asTyped<InkerError>(e).message).toContain("'truncat'");
+			expect(asTyped<InkerError>(e).message).toContain(
 				"did you mean 'truncate'",
 			);
 		}
@@ -118,9 +109,7 @@ describe("Templates — helpers option (constructor)", () => {
 			tpl.renderString("{{ bogus() }}", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNKNOWN_IDENTIFIER",
-			);
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_UNKNOWN_IDENTIFIER");
 		}
 	});
 
@@ -176,8 +165,8 @@ describe("Templates — helpers option (constructor)", () => {
 			new Templates({ root, helpers: fakeMap });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain("must be a Map");
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<InkerError>(e).message).toContain("must be a Map");
 		}
 	});
 
@@ -189,10 +178,8 @@ describe("Templates — helpers option (constructor)", () => {
 			new Templates({ root, helpers });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain(
-				"must be a function",
-			);
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<InkerError>(e).message).toContain("must be a function");
 		}
 	});
 
@@ -202,8 +189,8 @@ describe("Templates — helpers option (constructor)", () => {
 			await tpl.render("subdir\\evil", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
-			expect(asTyped<InkerRenderError>(e).message).toContain("backslash");
+			expect(asTyped<InkerError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<InkerError>(e).message).toContain("backslash");
 		}
 	});
 });

@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Exception } from "@c9up/flare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped, bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 
@@ -29,8 +30,8 @@ describe("Templates — name validation (P1+P3)", () => {
 			await templates.render("../../etc/passwd", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(e).toSatisfy(isInkerException);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 
@@ -40,7 +41,7 @@ describe("Templates — name validation (P1+P3)", () => {
 			await templates.render("/etc/passwd", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 
@@ -50,8 +51,8 @@ describe("Templates — name validation (P1+P3)", () => {
 			await templates.render("foo\u0000bar", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(e).toSatisfy(isInkerException);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 
@@ -61,7 +62,7 @@ describe("Templates — name validation (P1+P3)", () => {
 			await templates.render("", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 });
@@ -85,7 +86,7 @@ describe("Templates — cacheMode validation (P10)", () => {
 			});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 });
@@ -112,8 +113,8 @@ describe("Templates — non-ENOENT FS errors wrapped (P9)", () => {
 			await templates.render("foo", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			const err = asTyped<InkerRenderError>(e);
+			expect(e).toSatisfy(isInkerException);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_INVALID_PATH");
 			// The original Node error is preserved on .cause for diagnostics.
 			expect(err.cause).toBeInstanceOf(Error);

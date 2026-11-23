@@ -17,9 +17,9 @@ Interpolation is `{{ expr }}` (HTML-escaped) or `{{{ expr }}}` (raw). The `expr`
 
 ## Strict by default
 
-- Missing templates throw `InkerRenderError` with `code: "E_INKER_TEMPLATE_NOT_FOUND"`.
-- A name missing from the render data reads as `undefined` (guard it with `@if(name)`); navigating into it throws `code: "E_INKER_UNKNOWN_IDENTIFIER"` with the line + column of the offending expression.
-- Parse errors throw `code: "E_INKER_PARSE_ERROR"` with a precise reason.
+- Missing templates throw `errors.E_INKER_TEMPLATE_NOT_FOUND`.
+- A name missing from the render data reads as `undefined` (guard it with `@if(name)`); navigating into it throws an `InkerError` with `code: "E_INKER_UNKNOWN_IDENTIFIER"`, and the `filename`, `line` and `col` of the offending expression.
+- Parse errors throw an `InkerError` with the code of what is wrong (`E_INKER_UNCLOSED_BLOCK`, `E_INKER_PARSE_ERROR`…) and its position.
 
 The full reference (file layout, cache semantics, error surface) lives at <https://reamjs.com/en/guides/frontend/templates/>.
 
@@ -34,7 +34,7 @@ The coverage gate (v8 provider) is wired in `vitest.config.ts` with thresholds a
 
 ## Native binary
 
-The lexer and parser run in Rust via napi-rs; rendering, expressions included, runs in V8. The TypeScript surface (`Templates`, `InkerProvider`, `SafeString`, `InkerRenderError`) is unchanged — the engine is loaded transparently from a prebuilt `.node` binary.
+The lexer and parser run in Rust via napi-rs; rendering, expressions included, runs in V8. The TypeScript surface (`Templates`, `InkerProvider`, `SafeString`, `errors`) is unchanged — the engine is loaded transparently from a prebuilt `.node` binary.
 
 - **Build locally:** `pnpm --filter @c9up/inker build:napi` compiles the `inker-engine-napi` crate (release) and copies `index.<platform>.node` into the package root. The 5-platform NAPI CI matrix (`linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64`, `darwin-arm64`, `win32-x64-msvc`) builds these on native runners.
 - **No JS fallback.** If the binary is missing or fails to load, every render throws `E_INKER_NAPI_REQUIRED` with an actionable hint pointing at `pnpm --filter @c9up/inker build:napi`. Run that after a fresh checkout or a platform change.

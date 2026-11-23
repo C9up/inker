@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Exception } from "@c9up/flare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerException } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
@@ -23,8 +24,8 @@ describe("Templates — construction", () => {
 			new Templates({ root: "./foo" });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(e).toSatisfy(isInkerException);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 
@@ -34,7 +35,7 @@ describe("Templates — construction", () => {
 			new Templates({ root });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		}
 	});
 
@@ -46,7 +47,7 @@ describe("Templates — construction", () => {
 			new Templates({ root: file });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_INVALID_PATH");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_PATH");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -64,16 +65,18 @@ describe("Templates — render() filesystem behaviour", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
-	it("throws E_INKER_TEMPLATE_NOT_FOUND with absolute path in context", async () => {
+	it("throws E_INKER_TEMPLATE_NOT_FOUND naming the absolute path", async () => {
 		const templates = new Templates({ root, cacheMode: "mtime" });
 		try {
 			await templates.render("missing", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(e).toBeInstanceOf(InkerRenderError);
-			const err = asTyped<InkerRenderError>(e);
+			expect(e).toSatisfy(isInkerException);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_TEMPLATE_NOT_FOUND");
-			expect(err.context.templatePath).toBe(path.join(root, "missing.inker"));
+			expect(err.message).toBe(
+				`Template not found: ${path.join(root, "missing.inker")}`,
+			);
 		}
 	});
 
@@ -110,7 +113,7 @@ describe("Templates — render() filesystem behaviour", () => {
 			templates.renderString("@layout('main')hi", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_DISK_REQUIRED");
 			expect(err.message).toContain("layout");
 		}
@@ -122,7 +125,7 @@ describe("Templates — render() filesystem behaviour", () => {
 			templates.renderString("@include('partials/x')", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_DISK_REQUIRED");
 			expect(err.message).toContain("include");
 		}
@@ -134,7 +137,7 @@ describe("Templates — render() filesystem behaviour", () => {
 			templates.renderString("{{> body }}", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_DISK_REQUIRED");
 			expect(err.message).toContain("slot");
 		}
@@ -312,9 +315,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", { user: { name: "Alice" } });
 			expect.fail("should have thrown");
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNKNOWN_IDENTIFIER",
-			);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_UNKNOWN_IDENTIFIER");
 		}
 	});
 
@@ -326,7 +327,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_RENDER_DEPTH");
 		}
 	});
@@ -340,7 +341,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<Exception>(e);
 			expect(err.code).toBe("E_INKER_LAYOUT_IN_PARTIAL");
 		}
 	});
@@ -359,7 +360,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_PARSE_ERROR");
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_PARSE_ERROR");
 		}
 	});
 
@@ -495,9 +496,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", { x: true });
 			expect.fail();
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_MISMATCHED_BLOCK_END",
-			);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_MISMATCHED_BLOCK_END");
 		}
 	});
 
@@ -508,9 +507,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNMATCHED_BLOCK_END",
-			);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_UNMATCHED_BLOCK_END");
 		}
 	});
 
@@ -525,9 +522,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_INVALID_EXPRESSION",
-			);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_INVALID_EXPRESSION");
 		}
 	});
 
@@ -538,9 +533,7 @@ describe("Templates — component resolution (53.3)", () => {
 			await templates.render("page", {});
 			expect.fail();
 		} catch (e) {
-			expect(asTyped<InkerRenderError>(e).code).toBe(
-				"E_INKER_UNMATCHED_BLOCK_END",
-			);
+			expect(asTyped<Exception>(e).code).toBe("E_INKER_UNMATCHED_BLOCK_END");
 		}
 	});
 

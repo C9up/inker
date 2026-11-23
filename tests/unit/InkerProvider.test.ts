@@ -159,6 +159,9 @@ describe("resolveCacheMode", () => {
 		);
 		expect(() => resolveCacheMode("NEVER")).toThrow(/cacheMode must be/);
 		expect(() => resolveCacheMode("")).toThrow(/cacheMode must be/);
+		expect(() => resolveCacheMode("")).toThrow(
+			expect.objectContaining({ code: "E_INKER_INVALID_CONFIG" }),
+		);
 	});
 });
 
@@ -283,6 +286,9 @@ describe("mergeHelpers", () => {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentional bad value
 			mergeHelpers(canonical, { bad: "not a fn" as unknown as HelperFn }),
 		).toThrow(/additionalHelpers\.bad must be a function/);
+		expect(() =>
+			mergeHelpers(canonical, { bad: "not a fn" as unknown as HelperFn }),
+		).toThrow(expect.objectContaining({ code: "E_INKER_INVALID_CONFIG" }));
 	});
 });
 
@@ -316,6 +322,9 @@ describe("coerceUrlParams", () => {
 			/param 'id' is undefined/,
 		);
 		expect(() => coerceUrlParams({ id: null })).toThrow(/param 'id' is null/);
+		expect(() => coerceUrlParams({ id: null })).toThrow(
+			expect.objectContaining({ code: "E_INKER_INVALID_HELPER_ARGUMENT" }),
+		);
 	});
 
 	it("rejects Symbol param values with a typed Inker error (no raw TypeError)", () => {
@@ -432,6 +441,9 @@ describe("buildCanonicalHelpers", () => {
 		const { helpers } = setup();
 		const t = helpers.get("t");
 		expect(() => t?.("hi")).toThrow(/invoked outside of an inker\.render/);
+		expect(() => t?.("hi")).toThrow(
+			expect.objectContaining({ code: "E_INKER_OUTSIDE_RENDER" }),
+		);
 	});
 
 	it("t() rejects non-string keys", () => {
@@ -439,6 +451,9 @@ describe("buildCanonicalHelpers", () => {
 		const t = helpers.get("t");
 		expect(() => runInCtx(als, ctx(), () => t?.(42))).toThrow(
 			/t\(\) requires a string key/,
+		);
+		expect(() => runInCtx(als, ctx(), () => t?.(42))).toThrow(
+			expect.objectContaining({ code: "E_INKER_INVALID_HELPER_ARGUMENT" }),
 		);
 	});
 
@@ -577,6 +592,9 @@ describe("buildCanonicalHelpers", () => {
 		expect(() => runInCtx(als, ctx(), () => signedRoute?.(1))).toThrow(
 			/signedRoute\(\) requires a string route name/,
 		);
+		expect(() => runInCtx(als, ctx(), () => route?.(1))).toThrow(
+			expect.objectContaining({ code: "E_INKER_INVALID_HELPER_ARGUMENT" }),
+		);
 	});
 
 	it("url() propagates router throws (unknown name)", () => {
@@ -713,6 +731,9 @@ describe("InkerProvider lifecycle", () => {
 		await expect(app.container.resolve(InkerRenderer)).rejects.toThrow(
 			/resolved before InkerProvider\.start\(\) ran/,
 		);
+		await expect(app.container.resolve(InkerRenderer)).rejects.toMatchObject({
+			code: "E_INKER_NOT_BOOTED",
+		});
 	});
 
 	it("boot() is a no-op (does not force-resolve the renderer)", async () => {

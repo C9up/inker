@@ -24,6 +24,7 @@
  * single sanctioned cross-package narrowing site, `#started` idempotency.
  */
 
+import * as errors from "./errors.js";
 import "./augmentations.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
@@ -281,10 +282,10 @@ export default class InkerProvider {
 
 	#getRendererOrThrow(): InkerRenderer {
 		if (this.#renderer === undefined) {
-			throw new Error(
+			throw new errors.E_INKER_NOT_BOOTED([
 				"[inker] InkerRenderer resolved before InkerProvider.start() ran. " +
 					"Wait for the boot lifecycle to complete, or call `start()` manually.",
-			);
+			]);
 		}
 		return this.#renderer;
 	}
@@ -447,9 +448,9 @@ export function resolveCacheMode(
 ): "mtime" | "never" {
 	if (userMode === "mtime" || userMode === "never") return userMode;
 	if (userMode !== undefined && userMode !== "auto") {
-		throw new Error(
+		throw new errors.E_INKER_INVALID_CONFIG([
 			`[inker] config.inker.cacheMode must be "mtime", "never", "auto", or undefined; got ${JSON.stringify(userMode)}.`,
-		);
+		]);
 	}
 	return inProduction() ? "never" : "mtime";
 }
@@ -523,9 +524,9 @@ export function mergeHelpers(
 	if (additional === undefined) return out;
 	for (const [name, fn] of Object.entries(additional)) {
 		if (typeof fn !== "function") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_CONFIG([
 				`[inker] additionalHelpers.${name} must be a function; got ${typeof fn}.`,
-			);
+			]);
 		}
 		if (out.has(name) && !warnedNames.has(name)) {
 			warnedNames.add(name);
@@ -549,39 +550,39 @@ export function coerceUrlParams(
 ): Record<string, string> | undefined {
 	if (raw === undefined || raw === null) return undefined;
 	if (typeof raw !== "object" || Array.isArray(raw)) {
-		throw new Error(
+		throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 			`[inker] url() params must be a plain object; got ${Array.isArray(raw) ? "array" : typeof raw}.`,
-		);
+		]);
 	}
 	// P9: Date objects pass the "is object, not array" check but `Object.entries`
 	// returns `[]` for them — silently emitting an empty params Map and a URL
 	// built from no replacements. Refuse explicitly with a hint pointing to
 	// `toISOString()`.
 	if (raw instanceof Date) {
-		throw new Error(
+		throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 			"[inker] url() params cannot be a Date instance — call `.toISOString()` first or wrap it in a plain object.",
-		);
+		]);
 	}
 	const out: Record<string, string> = Object.create(null);
 	for (const [k, v] of Object.entries(raw)) {
 		if (v === null || v === undefined) {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] url() param '${k}' is ${v === null ? "null" : "undefined"} — omit the key or provide a value.`,
-			);
+			]);
 		}
 		if (typeof v === "symbol") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] url() param '${k}' is a Symbol — only stringifiable primitives are supported.`,
-			);
+			]);
 		}
 		// P8: NaN / +Infinity / -Infinity all stringify into URL-unfriendly
 		// `"NaN"` / `"Infinity"` literals, producing routes like
 		// `/users/NaN`. Authors usually arrive here via a downstream helper
 		// that returned an unexpected non-finite value; surface it loud.
 		if (typeof v === "number" && !Number.isFinite(v)) {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] url() param '${k}' is ${Number.isNaN(v) ? "NaN" : v > 0 ? "Infinity" : "-Infinity"} — only finite numbers are supported.`,
-			);
+			]);
 		}
 		out[k] = String(v);
 	}
@@ -656,9 +657,9 @@ export function buildCanonicalHelpers(
 	const requireCtx = (helperName: string): InkerHttpContext => {
 		const ctx = als.getStore();
 		if (ctx === undefined) {
-			throw new Error(
+			throw new errors.E_INKER_OUTSIDE_RENDER([
 				`[inker] ${helperName}() invoked outside of an inker.render(ctx, …) call — store unavailable.`,
-			);
+			]);
 		}
 		return ctx;
 	};
@@ -669,9 +670,9 @@ export function buildCanonicalHelpers(
 		helpers.set("t", (...args: readonly unknown[]): string => {
 			const [key, params] = args;
 			if (typeof key !== "string") {
-				throw new Error(
+				throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 					`[inker] t() requires a string key; got ${typeof key}.`,
-				);
+				]);
 			}
 			const ctx = requireCtx("t");
 			// Rosetta's TranslationParams is narrower than HelperFn's
@@ -730,18 +731,18 @@ export function buildCanonicalHelpers(
 	const buildUrl = (label: string, args: readonly unknown[]): string => {
 		const [name, params] = args;
 		if (typeof name !== "string") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] ${label}() requires a string route name; got ${typeof name}.`,
-			);
+			]);
 		}
 		return router.urlFor(name, coerceUrlParams(params));
 	};
 	const buildSignedUrl = (label: string, args: readonly unknown[]): string => {
 		const [name, params, options] = args;
 		if (typeof name !== "string") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] ${label}() requires a string route name; got ${typeof name}.`,
-			);
+			]);
 		}
 		const opts = isPlainRecord(options) ? options : undefined;
 		return router.makeSignedUrl(name, coerceUrlParams(params), opts);
@@ -765,9 +766,9 @@ export function buildCanonicalHelpers(
 	): unknown => {
 		const [key, defaultValue] = args;
 		if (typeof key !== "string") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] config() requires a string key; got ${typeof key}.`,
-			);
+			]);
 		}
 		return appConfig === undefined
 			? defaultValue
@@ -791,9 +792,9 @@ export function buildCanonicalHelpers(
 	helpers.set("formAttributes", (...args: readonly unknown[]): unknown => {
 		const [name, params, options] = args;
 		if (typeof name !== "string") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] formAttributes() requires a string route name; got ${typeof name}.`,
-			);
+			]);
 		}
 		const found = router.findOrFail?.(name);
 		let method = (found?.methods?.[0] ?? "GET").toUpperCase();
@@ -812,9 +813,9 @@ export function buildCanonicalHelpers(
 	helpers.set("asset", (...args: readonly unknown[]): string => {
 		const [name] = args;
 		if (typeof name !== "string") {
-			throw new Error(
+			throw new errors.E_INKER_INVALID_HELPER_ARGUMENT([
 				`[inker] asset() requires a string asset name; got ${typeof name}.`,
-			);
+			]);
 		}
 		return assetManifest?.[name] ?? `/_assets/${name}`;
 	});

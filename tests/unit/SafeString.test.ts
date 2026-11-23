@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { errors } from "../../src/index.js";
 import { SafeString } from "../../src/SafeString.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
@@ -15,16 +15,18 @@ describe("SafeString", () => {
 		expect(wrapped.value).toBe("");
 	});
 
-	it("rejects non-string values with InkerRenderError (typed-error contract)", () => {
-		// R7: switched from native TypeError to InkerRenderError so callers
+	it("rejects non-string values with E_INKER_INVALID_EXPRESSION (typed-error contract)", () => {
+		// R7: switched from native TypeError to an inker error so callers
 		// handling the typed-error contract uniformly catch SafeString
 		// construction failures alongside every other Inker failure mode.
-		expect(() => new SafeString(asTyped<string>(42))).toThrow(InkerRenderError);
+		expect(() => new SafeString(asTyped<string>(42))).toThrow(
+			errors.E_INKER_INVALID_EXPRESSION,
+		);
 		expect(() => new SafeString(asTyped<string>(null))).toThrow(
-			InkerRenderError,
+			errors.E_INKER_INVALID_EXPRESSION,
 		);
 		expect(() => new SafeString(asTyped<string>(undefined))).toThrow(
-			InkerRenderError,
+			errors.E_INKER_INVALID_EXPRESSION,
 		);
 	});
 

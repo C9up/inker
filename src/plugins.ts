@@ -38,7 +38,7 @@
  * point in the lifecycle, and the plugin runs before anything renders.
  */
 
-import { InkerRenderError } from "./InkerRenderError.js";
+import * as errors from "./errors.js";
 import type {
 	InkerPluginFn,
 	InkerPluginOptions,
@@ -73,10 +73,9 @@ class InkerPlugins {
 		options?: T,
 	): this {
 		if (typeof plugin !== "function") {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`Plugin must be a function; got ${typeof plugin}`,
-			);
+			]);
 		}
 		const queued: QueuedPlugin = {
 			apply: (templates) => {
@@ -133,19 +132,17 @@ class InkerPlugins {
 	 */
 	share(state: Readonly<Record<string, unknown>>): InkerSharedRenderer {
 		if (typeof state !== "object" || state === null || Array.isArray(state)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_PATH",
+			throw new errors.E_INKER_INVALID_PATH([
 				`share() expects an object; got ${state === null ? "null" : typeof state}`,
-			);
+			]);
 		}
 		return {
 			render: async (template, data = {}) => {
 				const engine = this.#engine;
 				if (engine === undefined) {
-					throw new InkerRenderError(
-						"E_INKER_ENGINE_MISSING",
+					throw new errors.E_INKER_ENGINE_MISSING([
 						`Cannot render '${template}': no template engine has been built yet — register InkerProvider and let it start before rendering through the inker singleton`,
-					);
+					]);
 				}
 				return engine.share(state).render(template, data);
 			},

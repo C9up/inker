@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { InkerRenderError } from "../../src/InkerRenderError.js";
+import type { InkerError } from "../../src/inkerError.js";
 import { Templates } from "../../src/Templates.js";
 import { asTyped } from "../__helpers__/bypass-type-check.js";
 
@@ -160,7 +160,7 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_RENDER_DEPTH");
 			expect(err.message.replace(/\\/g, "/")).toContain("partials/");
 		}
@@ -184,11 +184,9 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_NESTED_LAYOUT_UNSUPPORTED");
-			expect(err.context.templatePath).toBe(
-				path.join(root, "layouts/main.inker"),
-			);
+			expect(err.filename).toBe("layouts/main");
 		}
 	});
 
@@ -207,11 +205,9 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_LAYOUT_IN_PARTIAL");
-			expect(err.context.templatePath).toBe(
-				path.join(root, "partials/bad.inker"),
-			);
+			expect(err.filename).toBe("partials/bad");
 		}
 	});
 
@@ -226,7 +222,7 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_MISSING_SLOT");
 			expect(err.message).toContain("layouts/empty");
 			expect(err.message).toContain("page");
@@ -259,12 +255,10 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_UNKNOWN_SLOT");
 			expect(err.message).toContain("head");
-			expect(err.context.templatePath).toBe(
-				path.join(root, "layouts/main.inker"),
-			);
+			expect(err.filename).toBe("layouts/main");
 		}
 	});
 
@@ -278,7 +272,7 @@ describe("Templates — layouts and partials", () => {
 			await templates.render("page", {});
 			expect.fail("should have thrown");
 		} catch (e) {
-			const err = asTyped<InkerRenderError>(e);
+			const err = asTyped<InkerError>(e);
 			expect(err.code).toBe("E_INKER_PARSE_ERROR");
 		}
 	});
@@ -427,7 +421,7 @@ describe("Templates — layouts and partials", () => {
 				await templates.render("page", {});
 				expect.fail();
 			} catch (e) {
-				expect(asTyped<InkerRenderError>(e).code).toBe("E_INKER_RENDER_DEPTH");
+				expect(asTyped<InkerError>(e).code).toBe("E_INKER_RENDER_DEPTH");
 			}
 		});
 
@@ -488,7 +482,7 @@ describe("Templates — layouts and partials", () => {
 				await templates.render("page", { items: null });
 				expect.fail();
 			} catch (e) {
-				const err = asTyped<InkerRenderError>(e);
+				const err = asTyped<InkerError>(e);
 				expect(err.code).toBe("E_INKER_INVALID_ITERABLE");
 				expect(err.message).toContain("if");
 			}
@@ -501,9 +495,10 @@ describe("Templates — layouts and partials", () => {
 				await templates.render("page", { x: null });
 				expect.fail();
 			} catch (e) {
-				const err = asTyped<InkerRenderError>(e);
+				const err = asTyped<InkerError>(e);
 				expect(err.code).toBe("E_INKER_UNKNOWN_IDENTIFIER");
-				expect(err.context.line).toBeGreaterThan(0);
+				expect(err).toMatchObject({ line: 2, filename: "page" });
+				expect(err.col).toBeGreaterThan(0);
 			}
 		});
 	});

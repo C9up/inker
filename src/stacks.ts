@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-	type InkerErrorContext,
-	InkerRenderError,
-} from "./InkerRenderError.js";
+import * as errors from "./errors.js";
+import { InkerError, type InkerErrorPosition } from "./inkerError.js";
 
 /**
  * Named output stacks — the store behind `@stack`, `@pushTo` and `@pushOnceTo`
@@ -50,16 +48,18 @@ export class Stacks {
 	/**
 	 * Create a stack placeholder and return the token to emit. Two `@stack` tags
 	 * with the same name are an authoring mistake — the second would silently
-	 * never be filled — so it throws rather than degrading, with `context`
-	 * (the second tag's position) on the error.
+	 * never be filled — so it throws rather than degrading. Given `position`
+	 * (the second tag's, as the render passes it), the error is an
+	 * `InkerError` at that place; without one it is `errors.E_INKER_INVALID_EXPRESSION`,
+	 * where Edge throws a plain `Error`.
 	 */
-	create(name: string, context?: InkerErrorContext): string {
+	create(name: string, position?: InkerErrorPosition): string {
 		if (this.#placeholders.has(name)) {
-			throw new InkerRenderError(
-				"E_INKER_INVALID_EXPRESSION",
-				`@stack('${name}') is declared twice — a stack can only be output once per render`,
-				context,
-			);
+			const message = `@stack('${name}') is declared twice — a stack can only be output once per render`;
+			if (position === undefined) {
+				throw new errors.E_INKER_INVALID_EXPRESSION([message]);
+			}
+			throw new InkerError(message, "E_INKER_INVALID_EXPRESSION", position);
 		}
 		const token = `<!--inker-stack:${this.#salt}:${name}-->`;
 		this.#placeholders.set(name, token);

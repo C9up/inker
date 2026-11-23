@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetInkerProviderFlags } from "../../src/InkerProvider.js";
-import { InkerRenderError } from "../../src/InkerRenderError.js";
+import { isInkerError } from "../../src/inkerError.js";
 import {
 	type BuiltApp,
 	buildMinimalReamApp,
@@ -125,7 +125,7 @@ describe("inker provider — end-to-end with Ream host", () => {
 		} catch (err) {
 			caught = err;
 		}
-		expect(caught).toBeInstanceOf(InkerRenderError);
+		expect(caught).toSatisfy(isInkerError);
 		expect(caught).toMatchObject({
 			code: "E_INKER_INVALID_EXPRESSION",
 			cause: { message: expect.stringMatching(/no\.such\.route/) },
