@@ -21,7 +21,7 @@ Interpolation is `{{ expr }}` (HTML-escaped) or `{{{ expr }}}` (raw). The `expr`
 - A name missing from the render data reads as `undefined` (guard it with `@if(name)`); navigating into it throws `code: "E_INKER_UNKNOWN_IDENTIFIER"` with the line + column of the offending expression.
 - Parse errors throw `code: "E_INKER_PARSE_ERROR"` with a precise reason.
 
-The full reference (file layout, cache semantics, error surface) lives at <https://r-eam.com/en/guides/frontend/templates/>.
+The full reference (file layout, cache semantics, error surface) lives at <https://reamjs.com/en/guides/frontend/templates/>.
 
 ## Testing
 

@@ -293,7 +293,7 @@ export default class InkerProvider {
 		if (this.#peerWarnEmitted) return;
 		this.#peerWarnEmitted = true;
 		console.warn(
-			`[inker] ${detail} See https://r-eam.com/en/guides/frontend/templates/.`,
+			`[inker] ${detail} See https://reamjs.com/en/guides/frontend/templates/.`,
 		);
 	}
 
