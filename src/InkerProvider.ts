@@ -292,7 +292,9 @@ export default class InkerProvider {
 	#warnPeerMissingOnce(detail: string): void {
 		if (this.#peerWarnEmitted) return;
 		this.#peerWarnEmitted = true;
-		console.warn(`[inker] ${detail} See https://ream.dev/modules/inker.`);
+		console.warn(
+			`[inker] ${detail} See https://r-eam.com/en/guides/frontend/templates/.`,
+		);
 	}
 
 	async #readAppRoot(): Promise<string> {
