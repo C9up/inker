@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Exception } from "@c9up/flare";
@@ -6,7 +6,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import { errors, InkerError, Templates } from "../../src/index.js";
 import { inTemplate, isInkerError } from "../../src/inkerError.js";
 
-const root = mkdtempSync(join(tmpdir(), "inker-errors-"));
+// The real path: the message names the resolved file, and the temp directory is
+// a symlink on macOS (/var -> /private/var) and a short 8.3 name on Windows.
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "inker-errors-")));
 writeFileSync(join(root, "broken.inker"), "<p>\n  @if(user)\n</p>");
 writeFileSync(join(root, "page.inker"), "<h1>Hi</h1>\n<p>{{ user.name }}</p>");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
