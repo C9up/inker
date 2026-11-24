@@ -20,6 +20,7 @@ import {
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeBinarySuffix } from "../../../src/vendor/nativeBinary.js";
 
 export const PKG_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -58,14 +59,10 @@ export function packToTemp(tmpDir: string): string {
 		[tsc, "-p", "tsconfig.build.json", "--outDir", path.join(stage, "dist")],
 		{ cwd: PKG_ROOT, encoding: "utf8" },
 	);
-	for (const file of readdirSync(PKG_ROOT)) {
-		if (
-			file === "README.md" ||
-			file === "LICENSE" ||
-			/^index\..+\.node$/.test(file)
-		) {
-			copyFileSync(path.join(PKG_ROOT, file), path.join(stage, file));
-		}
+	// The binary is not in here: it ships in the platform package
+	// (`packPlatformToTemp`).
+	for (const file of ["README.md", "LICENSE"]) {
+		copyFileSync(path.join(PKG_ROOT, file), path.join(stage, file));
 	}
 	// The build already ran; the staged copy has no sources to run it on.
 	const scripts = Object.fromEntries(
@@ -76,18 +73,55 @@ export function packToTemp(tmpDir: string): string {
 		`${JSON.stringify({ ...manifest, scripts }, null, 2)}\n`,
 	);
 
+	return pack(stage, path.join(tmpDir, "packed"));
+}
+
+/**
+ * Pack this host's platform package (`npm/<suffix>/`) into `tmpDir`, as the
+ * publish job does: its manifest, the binary built at the package root, and
+ * the licence. Returns the platform package's name and the tarball path.
+ */
+export function packPlatformToTemp(tmpDir: string): {
+	name: string;
+	tarball: string;
+} {
+	const suffix = nativeBinarySuffix();
+	if (suffix === undefined) {
+		throw new Error(`no platform package is built for ${process.platform}`);
+	}
+	const binary = `index.${suffix}.node`;
+	if (!existsSync(path.join(PKG_ROOT, binary))) {
+		throw new Error(`${binary} is not built: run pnpm build:napi first`);
+	}
+	const stage = path.join(tmpDir, "stage-platform");
+	mkdirSync(stage, { recursive: true });
+	copyFileSync(path.join(PKG_ROOT, binary), path.join(stage, binary));
+	copyFileSync(path.join(PKG_ROOT, "LICENSE"), path.join(stage, "LICENSE"));
+	copyFileSync(
+		path.join(PKG_ROOT, "npm", suffix, "package.json"),
+		path.join(stage, "package.json"),
+	);
+	return {
+		name: `@c9up/inker-${suffix}`,
+		tarball: pack(stage, path.join(tmpDir, "packed-platform")),
+	};
+}
+
+/** `pnpm pack` the staged `dir` into the new directory `into`; the tarball's path. */
+function pack(dir: string, into: string): string {
+	mkdirSync(into, { recursive: true });
 	const isWin = process.platform === "win32";
 	const stdout = execFileSync(
 		isWin ? "pnpm.cmd" : "pnpm",
-		["pack", "--pack-destination", tmpDir],
+		["pack", "--pack-destination", into],
 		// `.cmd` needs a shell since the CVE-2024-27980 fix (EINVAL otherwise).
-		{ cwd: stage, encoding: "utf8", shell: isWin },
+		{ cwd: dir, encoding: "utf8", shell: isWin },
 	);
-	const tarball = readdirSync(tmpDir).find((f) => f.endsWith(".tgz"));
-	if (tarball === undefined || !existsSync(path.join(tmpDir, tarball))) {
+	const tarball = readdirSync(into).find((f) => f.endsWith(".tgz"));
+	if (tarball === undefined) {
 		throw new Error(
-			`pnpm pack did not produce a tarball in ${tmpDir}; stdout was:\n${stdout}`,
+			`pnpm pack did not produce a tarball in ${into}; stdout was:\n${stdout}`,
 		);
 	}
-	return path.join(tmpDir, tarball);
+	return path.join(into, tarball);
 }

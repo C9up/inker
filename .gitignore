@@ -7,6 +7,8 @@ dist/
 coverage/
 test-results.json
 *.node
+# The publish job copies the licence into each platform package it publishes.
+npm/*/LICENSE
 .env
 .env.local
 .DS_Store

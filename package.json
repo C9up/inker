@@ -32,6 +32,8 @@
     "build": "tsc -p tsconfig.build.json",
     "build:napi": "cargo build --release -p inker-engine-napi && pnpm build:napi-types && node scripts/copy-napi.mjs",
     "build:napi-types": "node scripts/build-napi-types.mjs",
+    "platforms:sync": "node scripts/platform-packages.mjs",
+    "platforms:check": "node scripts/platform-packages.mjs --check",
     "prepack": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -53,6 +55,13 @@
   "dependencies": {
     "@c9up/flare": "^0.1.0"
   },
+  "optionalDependencies": {
+    "@c9up/inker-linux-x64-gnu": "0.1.25",
+    "@c9up/inker-linux-arm64-gnu": "0.1.25",
+    "@c9up/inker-darwin-x64": "0.1.25",
+    "@c9up/inker-darwin-arm64": "0.1.25",
+    "@c9up/inker-win32-x64-msvc": "0.1.25"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",
     "@c9up/ream": "^0.2.0",
@@ -64,9 +73,9 @@
   },
   "files": [
     "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
     "README.md",
-    "dist",
-    "index.*.node"
+    "dist"
   ],
   "publishConfig": {
     "main": "./dist/index.js",

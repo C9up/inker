@@ -11,10 +11,11 @@
  *      `file:<tarball>` — no ream, no rosetta. devDeps add `tsx` so the
  *      consumer can `node --import tsx` runtime-TS sources (inker is
  *      source-first per ADR-003; its export-map points at `./src/*.ts`).
- *   3. `pnpm install --ignore-workspace --no-frozen-lockfile --ignore-scripts`
- *      consumer (the --ignore-workspace flag is belt-and-suspenders; /tmp has
- *      no parent workspace, but the flag locks behaviour against a future
- *      $TMPDIR move into a workspace-rooted dir).
+ *   3. `pnpm install --no-frozen-lockfile --ignore-scripts` in the consumer.
+ *      Its own `pnpm-workspace.yaml` makes it a workspace root, so no parent
+ *      workspace reaches it, and overrides the platform package inker pins
+ *      (`@c9up/inker-<suffix>`) with a tarball packed from the local build:
+ *      the binary reaches inker the way an install from npm delivers it.
  *   4. Render a composite template (interpolation + layout + partial + if
  *      + each + helper) via a spawned `node --import tsx ...`.
  *   5. Import @c9up/inker/provider as the second `it()` block.
@@ -41,7 +42,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { packToTemp } from "./__helpers__/packToTemp.js";
+import { packPlatformToTemp, packToTemp } from "./__helpers__/packToTemp.js";
 
 const SMOKE_TIMEOUT_MS = 180_000;
 
@@ -95,8 +96,9 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 	beforeAll(() => {
 		tmpDir = mkdtempSync(path.join(tmpdir(), "inker-smoke-"));
 
-		// 1. pack inker into a tarball
+		// 1. pack inker, and this host's platform package, into tarballs
 		const tarballPath = packToTemp(tmpDir);
+		const platform = packPlatformToTemp(tmpDir);
 
 		// 2. seed the consumer (NO @c9up/ream, NO @c9up/rosetta)
 		consumerDir = path.join(tmpDir, "consumer");
@@ -114,6 +116,10 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 				null,
 				2,
 			)}\n`,
+		);
+		writeFileSync(
+			path.join(consumerDir, "pnpm-workspace.yaml"),
+			`overrides:\n  ${JSON.stringify(platform.name)}: ${JSON.stringify(`file:${platform.tarball}`)}\n`,
 		);
 
 		// 3. seed templates exercising every axis required by AC1
@@ -173,12 +179,7 @@ describe("@c9up/inker standalone smoke (AC1, AC2, AC6)", () => {
 			// pulls esbuild). This consumer only imports modules; it never needs
 			// anything compiled, so skipping scripts keeps the fixture installable
 			// whatever pnpm the runner happens to have.
-			[
-				"install",
-				"--ignore-workspace",
-				"--no-frozen-lockfile",
-				"--ignore-scripts",
-			],
+			["install", "--no-frozen-lockfile", "--ignore-scripts"],
 			consumerDir,
 		);
 

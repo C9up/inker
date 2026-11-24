@@ -1,13 +1,12 @@
-// PATTERN: copy-and-rename for 55.2/55.3/55.4 — Rust hot-path packages.
+// Loads inker's native engine: the local build (`index.<suffix>.node` at the
+// package root, written by `scripts/copy-napi.mjs`) when there is one, else the
+// platform package `@c9up/inker-<suffix>` the package manager installed as an
+// optional dependency. A failure throws `E_INKER_NAPI_REQUIRED`, whose message
+// says what to do and whose `cause` is the load error.
 //
-// Loads the native `inker-engine-napi` binary built by `scripts/copy-napi.mjs`
-// and re-throws load failures as `E_INKER_NAPI_REQUIRED` per cerebrum
-// NAPI-loader pattern (2026-04-27) — actionable hint points at
-// `pnpm --filter @c9up/inker build:napi`.
-//
-// Per cerebrum 2026-04-15 there is NO JS fallback. If the binary fails to
-// load, consumers get a typed error. Zero `as` / `any` per cerebrum 2026-05-04.
+// There is no JavaScript fallback: without the engine, nothing renders.
 
+import { arch, platform } from "node:process";
 import type { Exception } from "@c9up/flare";
 import * as errors from "./errors.js";
 import {
@@ -18,8 +17,15 @@ import {
 import {
 	hasFunctions,
 	loadNativeBinary,
+	muslHint,
 	supportedTargets,
 } from "./vendor/nativeBinary.js";
+
+/**
+ * The npm name the platform packages derive from: `@c9up/inker-<suffix>`,
+ * one per target, each an optional dependency pinned to this version.
+ */
+const PACKAGE_NAME = "@c9up/inker";
 
 /**
  * The engine's types, as the Rust declares them.
@@ -58,31 +64,45 @@ let cachedNative: NativeExports | undefined;
 export function getNative(): NativeExports {
 	if (cachedNative !== undefined) return cachedNative;
 
-	// The resolution and the export check are shared; the refusals below stay
+	// The resolution and the export check are shared; the refusal below stays
 	// this package's own.
-	const attempt = loadNativeBinary(isNativeExports, NATIVE_CALLS);
+	const attempt = loadNativeBinary(isNativeExports, NATIVE_CALLS, {
+		packageName: PACKAGE_NAME,
+	});
 	if (attempt.loaded) {
 		cachedNative = attempt.binary;
 		return cachedNative;
 	}
-	const { suffix, cause } = attempt;
-	if (suffix === undefined) {
-		throw new errors.E_INKER_NAPI_REQUIRED([
-			`No native binary for this platform for @c9up/inker native binary. Supported: ${supportedTargets().join(", ")}.`,
-		]);
-	}
-	const causeMessage = cause instanceof Error ? cause.message : String(cause);
-	// The prebuilt linux binaries target glibc (`-gnu`). On musl hosts (Alpine
-	// containers) the `-gnu` binary fails to dlopen with a libc symbol error —
-	// surface that explicitly rather than only pointing at the build step.
-	const muslHint = suffix.endsWith("-gnu")
-		? " If you are on Alpine/musl, note the prebuilt binaries target glibc (musl is not a supported target)."
-		: "";
 	throw new errors.E_INKER_NAPI_REQUIRED(
 		[
-			`@c9up/inker native binary 'index.${suffix}.node' not found, failed to load, or is stale — run 'pnpm --filter @c9up/inker build:napi' to build it.${muslHint} Cause: ${causeMessage}`,
+			"The inker Rust engine is required but not loaded.\n" +
+				`  Fix: ${remedy(attempt.suffix, attempt.platformPackage)}`,
 		],
-		{ cause },
+		attempt.cause === undefined ? undefined : { cause: attempt.cause },
+	);
+}
+
+/**
+ * What to do about a missing engine, phrased for whoever has to fix it.
+ *
+ * An application installs the platform package; a checkout of inker builds
+ * the local binary. The load error itself is not in here: it names paths on
+ * the host, so it travels as the refusal's `cause` instead of its message.
+ */
+function remedy(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+): string {
+	if (suffix === undefined) {
+		return `no prebuilt binary for ${platform}-${arch}; inker ships one for ${supportedTargets().join(", ")}.`;
+	}
+	if (platformPackage === undefined) {
+		return `index.${suffix}.node failed to load. Rebuild it: cd packages/inker && pnpm build:napi`;
+	}
+	return (
+		`install ${platformPackage} at the exact version of ${PACKAGE_NAME}: it is the optional dependency that carries the ${suffix} binary, ` +
+		"and an install that omits optional dependencies skips it. " +
+		`In a checkout of inker, build it instead: pnpm build:napi.${muslHint()}`
 	);
 }
 

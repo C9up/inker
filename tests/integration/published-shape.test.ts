@@ -145,5 +145,8 @@ describe("@c9up/inker published shape (AC5)", () => {
 		// AC5c — README + LICENSE present (package.json `files` advertises them)
 		expect(inTarball.has("package/README.md")).toBe(true);
 		expect(inTarball.has("package/LICENSE")).toBe(true);
+
+		// The binaries ship in the platform packages, one per target.
+		expect(tarList.filter((entry) => entry.endsWith(".node"))).toEqual([]);
 	});
 });

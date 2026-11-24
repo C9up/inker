@@ -1,0 +1,29 @@
+{
+  "name": "@c9up/inker-darwin-x64",
+  "version": "0.1.25",
+  "description": "The darwin-x64 native engine of @c9up/inker, installed by it as an optional dependency.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.darwin-x64.node",
+  "files": [
+    "index.darwin-x64.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/inker.git",
+    "directory": "npm/darwin-x64"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -36,8 +36,20 @@ The coverage gate (v8 provider) is wired in `vitest.config.ts` with thresholds a
 
 The lexer and parser run in Rust via napi-rs; rendering, expressions included, runs in V8. The TypeScript surface (`Templates`, `InkerProvider`, `SafeString`, `errors`) is unchanged — the engine is loaded transparently from a prebuilt `.node` binary.
 
-- **Build locally:** `pnpm --filter @c9up/inker build:napi` compiles the `inker-engine-napi` crate (release) and copies `index.<platform>.node` into the package root. The 5-platform NAPI CI matrix (`linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64`, `darwin-arm64`, `win32-x64-msvc`) builds these on native runners.
-- **No JS fallback.** If the binary is missing or fails to load, every render throws `E_INKER_NAPI_REQUIRED` with an actionable hint pointing at `pnpm --filter @c9up/inker build:napi`. Run that after a fresh checkout or a platform change.
+Each platform's engine is its own npm package, which `@c9up/inker` lists as an optional dependency at its exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/inker-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/inker-linux-arm64-gnu` |
+| macOS x64 | `@c9up/inker-darwin-x64` |
+| macOS arm64 | `@c9up/inker-darwin-arm64` |
+| Windows x64 | `@c9up/inker-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`, `cpu` and `libc` fields), so an install downloads one binary and needs no Rust toolchain. An install run with optional dependencies omitted (`--no-optional`, `--omit=optional`) skips it.
+
+- **No JS fallback.** If the engine is missing or fails to load, every render throws `E_INKER_NAPI_REQUIRED`. Its message names the package to install (for example `Fix: install @c9up/inker-linux-x64-gnu at the exact version of @c9up/inker: ...`); the load error itself is the exception's `cause`.
+- **Build locally:** in a checkout of this repository, `pnpm --filter @c9up/inker build:napi` compiles the `inker-engine-napi` crate (release) and copies `index.<platform>.node` into the package root. inker loads that file before looking for the platform package. `node scripts/platform-packages.mjs` rewrites the platform packages' manifests (`npm/<platform>/package.json`) and the optional dependencies after a version bump; CI fails when they are stale.
 - **Helpers are plain TS functions in V8 scope.** Custom helpers registered via `TemplatesOptions.helpers` (or `InkerProvider`) — and the core globals — are in lexical scope when the Node renderer evaluates each expression in V8 (plain functions in lexical scope; no Rust knowledge required to write one). They can be called **anywhere** an expression can: whole interpolations (`{{ helper(args) }}`), `@if()` conditions, `@each()` iterables, operator expressions, and nested-call / loop-scoped arguments (`{{ users.filter(u => can(u)) }}`). Arguments are the real JS values — a `Date` stays a `Date`, a `Map` a `Map`, `bigint`/`NaN`/`±Infinity` untouched — there is no NAPI/JSON coercion. A helper returning a `SafeString` is emitted raw.
 
 ## Templates are code, not input
